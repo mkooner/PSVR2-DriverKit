@@ -28,6 +28,8 @@ extern "C" {
 #define PSVR2_VID 0x054C
 #define PSVR2_PID 0x0CDE
 
+struct psvr2_hmd;
+
 /*!
  * Create the PS VR2 HMD device
  *
@@ -35,6 +37,10 @@ extern "C" {
  */
 struct xrt_device *
 psvr2_hmd_create(struct xrt_prober_device *xpdev);
+
+
+struct t_timing_event_source *
+psvr2_hmd_get_timing_event_source(struct psvr2_hmd *hmd);
 
 /*!
  * Probing function for PlayStation VR2 devices.

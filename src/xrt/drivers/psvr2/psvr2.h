@@ -2,6 +2,7 @@
 // Copyright 2023, Jan Schmidt
 // Copyright 2024, Joel Valenciano
 // Copyright 2025, Beyley Cardellio
+// Copyright 2026, Conner Bondurant
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
@@ -12,10 +13,13 @@
  * @author Rylie Pavlik <rylie.pavlik@collabora.com>
  * @author Joel Valenciano <joelv1907@gmail.com>
  * @author Beyley Cardellio <ep1cm1n10n123@gmail.com>
+ * @author Conner Bondurant <conner.bondurant@triptych.me>
  * @ingroup drv_psvr2
  */
 #pragma once
 
+#include "tracking/t_time_sync.h"
+#include "xrt/xrt_frameserver.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -49,6 +53,9 @@ extern "C" {
 #include "util/u_debug.h"
 
 #include "psvr2_protocol.h"
+#include "psvr2_blobwatch.h"
+
+#include <tracking/t_tracking.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -217,8 +224,13 @@ struct psvr2_hmd
 	/* Display parameters */
 	struct u_device_simple_info info;
 
+	struct u_sink_debug led_debug_sinks[4];
+	struct ld_camera *led_sink_cameras[2];
+
 	/* Camera debug sinks */
 	struct u_sink_debug debug_sinks[4];
+
+	struct u_sink_debug blob_visualizer_sinks[4];
 
 	/* USB communication */
 	libusb_context *ctx;
@@ -253,6 +265,7 @@ struct psvr2_hmd
 
 	timepoint_ns last_imu_vts_ns;
 	timepoint_ns last_slam_vts_ns;
+	timepoint_ns last_led_timestamp_us;
 	timepoint_ns system_zero_ns;
 	timepoint_ns last_imu_ns;
 
@@ -268,6 +281,21 @@ struct psvr2_hmd
 	bool face_feature_enabled;
 
 	struct psvr2_et_data et_data;
+
+	/* LED Tracking Debug */
+	struct xrt_frame_context xfctx;
+	struct t_blob_sink *blob_sinks[4];
+	struct psvr2_blobwatch *blobwatch;
+
+	struct t_constellation_tracker *led_tracker;
+
+	/* Timing source for sync to pssense */
+	struct t_timing_event_sink *timing_sink;
+	struct t_timing_event_source *timing_source;
+
+	// Cheating super hard to get the tracking online
+	struct xrt_device *pssense_left;
+	struct xrt_device *pssense_right;
 };
 
 /// Casting helper function
@@ -309,6 +337,10 @@ psvr2_get_face_tracking(struct xrt_device *xdev,
                         enum xrt_input_name facial_expression_type,
                         int64_t at_timestamp_ns,
                         struct xrt_facial_expression_set *out_value);
+
+bool
+psvr2_set_camera_mode(struct psvr2_hmd *hmd, enum psvr2_camera_mode mode);
+
 
 #ifdef __cplusplus
 }
