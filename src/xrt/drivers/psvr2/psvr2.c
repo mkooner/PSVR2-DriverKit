@@ -699,8 +699,7 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 				PSVR2_ERROR(hmd, "Invalid entry %d, %d", entry->offset, entry->size);
 			}
 
-			//PSVR2_DEBUG(hmd, "Entry with offset %u, size %u, type %u", entry->offset, entry->size,
-			           // entry->type);
+			// PSVR2_DEBUG(hmd, "Entry with offset %u, size %u, type %u", entry->offset, entry->size, entry->type);
 
 			switch (entry->type) {
 			case GEN_DATA_CAMERA_CALIB_VRTRACE_0: {
@@ -723,6 +722,7 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 				break;
 			}
 			case GEN_DATA_CALIBRATION_BLOCK: {
+				PSVR2_DEBUG(hmd, "WOW");
 				psvr2_parse_gen_calibration_block(hmd, buf + entry->offset, entry->size);
 				//PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
 				break;
@@ -1515,17 +1515,6 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		u_sink_debug_init(&hmd->debug_sinks[i]);
 	}
 
-	for (size_t i = 0; i < ARRAY_SIZE(hmd->led_debug_sinks); i++) {
-		u_sink_debug_init(&hmd->led_debug_sinks[i]);
-		u_sink_blob_visualizer_create(&hmd->xfctx, NULL, &hmd->led_debug_sinks[i], USB_CAM_MODE10_WIDTH,
-		                              USB_CAM_MODE10_HEIGHT, &hmd->blob_sinks[i]);
-	}
-	
-	psvr2_blobwatch_create(
-	    &hmd->xfctx,
-	    (struct t_blob_sink *[]){hmd->blob_sinks[0], hmd->blob_sinks[1], hmd->blob_sinks[2], hmd->blob_sinks[3]},
-	    &hmd->blobwatch);
-
 	b_timing_source_create(&hmd->xfctx, &hmd->timing_sink, &hmd->timing_source);
 
 	u_var_add_root(hmd, "PS VR2 HMD", true);
@@ -1571,14 +1560,6 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		hmd->brightness_btn.cb = (void (*)(void *))update_brightness;
 		hmd->brightness_btn.ptr = hmd;
 		u_var_add_button(hmd, &hmd->brightness_btn, "Set Brightness");
-	}
-
-	u_var_add_gui_header(hmd, NULL, "LED Detection");
-	{
-		u_var_add_sink_debug(hmd, &hmd->led_debug_sinks[0], "Bottom Left Camera");
-		u_var_add_sink_debug(hmd, &hmd->led_debug_sinks[1], "Bottom Right Camera");
-		u_var_add_sink_debug(hmd, &hmd->led_debug_sinks[2], "Top Left Camera");
-		u_var_add_sink_debug(hmd, &hmd->led_debug_sinks[3], "Top Right Camera");
 	}
 
 	u_var_add_gui_header(hmd, NULL, "Camera data");

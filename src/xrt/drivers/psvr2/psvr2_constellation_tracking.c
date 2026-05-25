@@ -17,6 +17,7 @@
 #include "xrt/xrt_defines.h"
 #include <string.h>
 #include "psvr2_constellation_tracking.h"
+#include "../pssense/pssense_interface.h"
 
 // Version of the camera relation data that is easier to work with for determining final orientation of all cameras
 struct camera_relation_internal {
@@ -46,7 +47,12 @@ void psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uin
 		PSVR2_ERROR(hmd, "Calibration block too small");
 		return;
 	}
-
+	
+	// For some reason this gets triggered twice, we only really want to configure this once.
+	if ((hmd->pssense_left == NULL && hmd->pssense_right == NULL) || hmd->led_tracker != NULL){
+		return; 
+	}
+	
 	struct gen_calibration_block *block = (struct gen_calibration_block *)data;
 
 	if (memcmp(block->magic, "SIE\x01", 4) != 0) {
@@ -162,4 +168,21 @@ void psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uin
 	}
 
 	t_constellation_tracker_create(&hmd->xfctx, &constellation_tracker_params, &hmd->led_tracker);
+	// Write blob sinks into the blobwatch 
+	for (size_t i = 0; i < mosaic->num_cameras; i++){
+		hmd->blob_sinks[i] = mosaic->cameras[i].blob_sink;
+	}
+
+	psvr2_blobwatch_create(
+	    &hmd->xfctx,
+	    (struct t_blob_sink *[]){hmd->blob_sinks[0], hmd->blob_sinks[1], hmd->blob_sinks[2], hmd->blob_sinks[3]},
+	    &hmd->blobwatch);
+
+	if (hmd->pssense_left) {
+		pssense_add_to_constellation_tracker(hmd->pssense_left, hmd->led_tracker);
+	}
+	if (hmd->pssense_right) {
+		pssense_add_to_constellation_tracker(hmd->pssense_right, hmd->led_tracker);
+	}
+	
 }

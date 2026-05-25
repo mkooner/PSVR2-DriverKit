@@ -65,9 +65,12 @@ static struct t_blob blob_storage_array[PSVR2_MAX_LEDS_PER_CAMERA * 4];
 void
 psvr2_blobwatch_push_ld_payload(struct psvr2_blobwatch *bw, struct ld_payload *payload)
 {
+	if (bw == NULL) {return;}
 	for (size_t i = 0; i < ARRAY_SIZE(payload->cameras); i++) {
 		struct ld_camera *camera = &payload->cameras[i];
 
+		// TODO: instead of just overwriting the LEDs each update
+		// Check if any LEDs look like an existing one, and just update it in place instead.
 		for (size_t j = 0; j < camera->num_leds; j++) {
 			led_to_blob(j, &camera->leds[j], &blob_storage_array[i * PSVR2_MAX_LEDS_PER_CAMERA + j]);
 		}

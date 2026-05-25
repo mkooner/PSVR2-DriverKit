@@ -8,6 +8,7 @@
  * @ingroup xrt_iface
  */
 
+#include "psvr2/psvr2.h"
 #include "xrt/xrt_config_drivers.h"
 #include "xrt/xrt_prober.h"
 #include "xrt/xrt_system.h"
@@ -61,6 +62,8 @@ psvr2_builder(struct xrt_builder *xb)
 
 DEBUG_GET_ONCE_LOG_OPTION(psvr2_log, "PSVR2_LOG", U_LOGGING_WARN)
 
+#undef PSVR2_ERROR
+#undef PSVR2_DEBUG
 #define PSVR2_ERROR(p, ...) U_LOG_IFL_E(p->log_level, __VA_ARGS__)
 #define PSVR2_DEBUG(p, ...) U_LOG_IFL_D(p->log_level, __VA_ARGS__)
 
@@ -176,7 +179,7 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 		} else {
 			xsysd->static_xdevs[xsysd->static_xdev_count++] = left_xdev;
 			t_timing_event_source_add_sink(pb->timing_event_source, timing_sink);
-			// pssense_add_to_constellation_tracker(left_xdev, pb->constellation_tracker);
+			//pssense_add_to_constellation_tracker(left_xdev, pb->constellation_tracker);
 		}
 	}
 
@@ -194,10 +197,11 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 			// pssense_add_to_constellation_tracker(right_xdev, pb->constellation_tracker);
 		}
 	}
-
+	
 	tbrh->left = left_xdev;
 	tbrh->right = right_xdev;
-
+	((struct psvr2_hmd *)head_xdev)->pssense_left = left_xdev;
+	((struct psvr2_hmd *)head_xdev)->pssense_right = right_xdev;
 #endif
 
 	xret = xrt_prober_unlock_list(xp, &xpdevs);

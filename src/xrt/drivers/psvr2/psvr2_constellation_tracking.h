@@ -26,7 +26,7 @@ struct gen_calibration_block {
 
 struct calibration_camera_distortion {
 	__le32 camera_id;
-	__le32 width_pixels;
+	__le16 width_pixels;
 	__le16 height_pixels;
 	// Small implementation detail, this gets moved into a t_camera_calibration.intrinsics, which is `double[3][3]`.
 	// Easier to unpack and cast from float to double if we dont represent it as a `__le_matrix_3x3`
