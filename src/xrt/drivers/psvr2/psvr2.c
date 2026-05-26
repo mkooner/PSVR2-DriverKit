@@ -535,6 +535,25 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	        XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT),
 	};
 
+	struct xrt_space_relation cam0_relation = {
+	    .pose = {.orientation = {.x = __lef32_to_cpu(slam.cam0orient[0]),
+	                             .y = __lef32_to_cpu(slam.cam0orient[1]),
+	                             .z = __lef32_to_cpu(slam.cam0orient[2]),
+	                             .w = __lef32_to_cpu(slam.cam0orient[3])},
+	             .position =
+	                 {
+	                     .x = __lef32_to_cpu(slam.cam0offset[0]),
+	                     .y = __lef32_to_cpu(slam.cam0offset[1]),
+	                     .z = __lef32_to_cpu(slam.cam0offset[2]),
+	                 }},
+	    .relation_flags = (enum xrt_space_relation_flags)(
+	        XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT |
+	        XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT),
+	};
+
+	// Is this the right pose?
+	hmd->constellation_origin_source->current_pose = cam0_relation;
+
 	m_relation_history_push_with_motion_estimation(hmd->slam_relation_history, &relation, pose_sample.timestamp_ns);
 }
 
@@ -686,7 +705,7 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 	while (to_go >= 0x200) {
 		struct gen_data_hdr *data_hdr = (struct gen_data_hdr *)buf;
 
-		PSVR2_TRACE(hmd, "Parsing VD at %lu", (size_t)buf - (size_t)xfer->buffer);
+		PSVR2_TRACE(hmd, "Parsing VD at %zu", (size_t)buf - (size_t)xfer->buffer);
 
 		if (buf[0] != 'V' || buf[1] != 'D' || to_go < data_hdr->len || data_hdr->unk1 != 0x200u) {
 			PSVR2_ERROR(hmd, "Error parsing gendata");
@@ -699,7 +718,8 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 				PSVR2_ERROR(hmd, "Invalid entry %d, %d", entry->offset, entry->size);
 			}
 
-			// PSVR2_DEBUG(hmd, "Entry with offset %u, size %u, type %u", entry->offset, entry->size, entry->type);
+			// PSVR2_DEBUG(hmd, "Entry with offset %u, size %u, type %u", entry->offset, entry->size,
+			// entry->type);
 
 			switch (entry->type) {
 			case GEN_DATA_CAMERA_CALIB_VRTRACE_0: {
@@ -722,9 +742,8 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 				break;
 			}
 			case GEN_DATA_CALIBRATION_BLOCK: {
-				PSVR2_DEBUG(hmd, "WOW");
 				psvr2_parse_gen_calibration_block(hmd, buf + entry->offset, entry->size);
-				//PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
+				// PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
 				break;
 			}
 			case GEN_DATA_12: {
@@ -736,7 +755,10 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 			case GEN_DATA_14: {
 				break;
 			}
-			default: PSVR2_WARN(hmd, "Unknown VD entry type of %d", entry->type); break;
+			default:
+				PSVR2_WARN(hmd, "Unknown VD entry type of %d", entry->type);
+				// PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
+				break;
 			}
 
 			entry++;
@@ -1422,6 +1444,8 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		goto cleanup;
 	}
 
+	psvr2_constellation_tracking_source_create(&hmd->constellation_origin_source);
+
 	// This list should be ordered, most preferred first.
 	size_t idx = 0;
 	hmd->base.hmd->blend_modes[idx++] = XRT_BLEND_MODE_OPAQUE;
@@ -1572,7 +1596,12 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		hmd->camera_mode_btn.ptr = hmd;
 		u_var_add_button(hmd, &hmd->camera_mode_btn, "Camera Mode 0x10");
 	}
-
+	for (int i = 0; i < 3; i++) {
+		char name[32];
+		sprintf(name, "Substream %d", i);
+		u_var_add_sink_debug(hmd, &hmd->debug_sinks[i], name);
+	}
+	u_var_add_sink_debug(hmd, &hmd->debug_sinks[3], "Mode 1 stream");
 
 	/* DROPDOWN */
 	u_var_add_gui_header(hmd, NULL, "Logging");

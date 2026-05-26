@@ -268,41 +268,40 @@ __cpu_to_levec3(struct xrt_vec3 v)
  * 3x3 Matrix
  *
  */
- 
- struct __le_matrix_3x3 {
+
+struct __le_matrix_3x3
+{
 	__lef32 v[XRT_MATRIX_3X3_ELEMENTS];
- };
- 
- static inline struct xrt_matrix_3x3
- __le_matrix_3x3_to_cpu(struct __le_matrix_3x3 m){
-	return XRT_C11_COMPOUND(struct xrt_matrix_3x3){
-		.v = {
-			__lef32_to_cpu(m.v[0]),
-			__lef32_to_cpu(m.v[1]),
-			__lef32_to_cpu(m.v[2]),
-			__lef32_to_cpu(m.v[3]),
-			__lef32_to_cpu(m.v[4]),
-			__lef32_to_cpu(m.v[5]),
-			__lef32_to_cpu(m.v[6]),
-			__lef32_to_cpu(m.v[7]),
-			__lef32_to_cpu(m.v[8]),
-		}
-	};
- }
- 
- static inline struct xrt_matrix_3x3
- __cpu_to_le_matrix_3x3(struct __le_matrix_3x3 m){
-	return XRT_C11_COMPOUND(struct xrt_matrix_3x3){
-		.v = {
-			__lef32_to_cpu(m.v[0]),
-			__lef32_to_cpu(m.v[1]),
-			__lef32_to_cpu(m.v[2]),
-			__lef32_to_cpu(m.v[3]),
-			__lef32_to_cpu(m.v[4]),
-			__lef32_to_cpu(m.v[5]),
-			__lef32_to_cpu(m.v[6]),
-			__lef32_to_cpu(m.v[7]),
-			__lef32_to_cpu(m.v[8]),
-		}
-	};
- }
+};
+
+static inline struct xrt_matrix_3x3
+__le_matrix_3x3_to_cpu(struct __le_matrix_3x3 m)
+{
+	return XRT_C11_COMPOUND(struct xrt_matrix_3x3){.v = {
+	                                                   __lef32_to_cpu(m.v[0]),
+	                                                   __lef32_to_cpu(m.v[1]),
+	                                                   __lef32_to_cpu(m.v[2]),
+	                                                   __lef32_to_cpu(m.v[3]),
+	                                                   __lef32_to_cpu(m.v[4]),
+	                                                   __lef32_to_cpu(m.v[5]),
+	                                                   __lef32_to_cpu(m.v[6]),
+	                                                   __lef32_to_cpu(m.v[7]),
+	                                                   __lef32_to_cpu(m.v[8]),
+	                                               }};
+}
+
+static inline struct xrt_matrix_3x3
+__cpu_to_le_matrix_3x3(struct __le_matrix_3x3 m)
+{
+	return XRT_C11_COMPOUND(struct xrt_matrix_3x3){.v = {
+	                                                   __lef32_to_cpu(m.v[0]),
+	                                                   __lef32_to_cpu(m.v[1]),
+	                                                   __lef32_to_cpu(m.v[2]),
+	                                                   __lef32_to_cpu(m.v[3]),
+	                                                   __lef32_to_cpu(m.v[4]),
+	                                                   __lef32_to_cpu(m.v[5]),
+	                                                   __lef32_to_cpu(m.v[6]),
+	                                                   __lef32_to_cpu(m.v[7]),
+	                                                   __lef32_to_cpu(m.v[8]),
+	                                               }};
+}

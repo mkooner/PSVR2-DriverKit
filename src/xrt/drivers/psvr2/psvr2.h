@@ -18,6 +18,7 @@
  */
 #pragma once
 
+#include "tracking/t_constellation.h"
 #include "tracking/t_time_sync.h"
 #include "xrt/xrt_frameserver.h"
 #ifdef __cplusplus
@@ -288,6 +289,7 @@ struct psvr2_hmd
 	struct psvr2_blobwatch *blobwatch;
 
 	struct t_constellation_tracker *led_tracker;
+	struct psvr2_constellation_tracking_source *constellation_origin_source;
 
 	/* Timing source for sync to pssense */
 	struct t_timing_event_sink *timing_sink;

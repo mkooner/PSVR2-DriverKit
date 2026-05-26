@@ -227,14 +227,16 @@ struct status_record_hdr
 
 struct slam_usb_record
 {
-	char SLAhdr[3];    //< "SLA"
-	uint8_t const1;    //< Constant 0x01?
-	__le32 pkt_size;   //< 0x0200 = 512 bytes;
-	__le32 vts_ts_us;  //< Timestamp
-	__le32 unknown1;   //< Unknown. Constant 3?
-	__lef32 pos[3];    //< 32-bit floats
-	__lef32 orient[4]; //< Orientation quaternion
-	uint8_t remainder[468];
+	char SLAhdr[3];        //< "SLA"
+	uint8_t const1;        //< Constant 0x01?
+	__le32 pkt_size;       //< 0x0200 = 512 bytes;
+	__le32 vts_ts_us;      //< Timestamp
+	__le32 unknown1;       //< Unknown. Constant 3?
+	__lef32 pos[3];        //< 32-bit floats
+	__lef32 orient[4];     //< Orientation quaternion
+	__lef32 cam0offset[3]; //< Offset of cam0, relative to the headset pose
+	__lef32 cam0orient[4]; //< orientation of cam0 relative to its own origin
+	uint8_t remainder[440];
 };
 
 struct sie_ctrl_pkt

@@ -166,7 +166,7 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 	tbrh->eyes = head_xdev;
 	tbrh->face = head_xdev;
 
-#ifdef XRT_BUILD_DRIVER_PSSENSE 
+#ifdef XRT_BUILD_DRIVER_PSSENSE
 
 	struct xrt_device *left_xdev = NULL;
 	struct xrt_prober_device *left_xpdev =
@@ -179,7 +179,7 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 		} else {
 			xsysd->static_xdevs[xsysd->static_xdev_count++] = left_xdev;
 			t_timing_event_source_add_sink(pb->timing_event_source, timing_sink);
-			//pssense_add_to_constellation_tracker(left_xdev, pb->constellation_tracker);
+			// pssense_add_to_constellation_tracker(left_xdev, pb->constellation_tracker);
 		}
 	}
 
@@ -197,7 +197,7 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 			// pssense_add_to_constellation_tracker(right_xdev, pb->constellation_tracker);
 		}
 	}
-	
+
 	tbrh->left = left_xdev;
 	tbrh->right = right_xdev;
 	((struct psvr2_hmd *)head_xdev)->pssense_left = left_xdev;
