@@ -40,28 +40,31 @@ psvr2_blobwatch_mark_blob_device(struct t_blobwatch *tbw,
 void
 led_to_blob(struct ld_led *led, struct t_blob *out_blob)
 {
+	uint16_t left = led->leftmost * 2, right = led->rightmost * 2, top = led->topmost * 2,
+	         bottom = led->bottommost * 2;
+
 	out_blob->matched_device_id = XRT_CONSTELLATION_INVALID_DEVICE_ID;
 	out_blob->matched_device_led_id = XRT_CONSTELLATION_INVALID_LED_ID;
 	out_blob->center = (struct xrt_vec2){
-	    .x = (float)((led->leftmost + led->rightmost) / 2),
-	    .y = (float)((led->topmost + led->bottommost) / 2),
+	    .x = (float)((left + right) / 2),
+	    .y = (float)((top + bottom) / 2),
 	};
 	out_blob->motion_vector = (struct xrt_vec2){0}, // We don't have motion vector data, so set it to 0
 	    out_blob->bounding_box = (struct xrt_rect){
 	        .offset =
 	            {
-	                .w = led->leftmost,
-	                .h = led->topmost,
+	                .w = left,
+	                .h = top,
 	            },
 	        .extent =
 	            {
-	                .w = led->rightmost - led->leftmost,
-	                .h = led->bottommost - led->topmost,
+	                .w = right - left,
+	                .h = bottom - top,
 	            },
 	    };
 	out_blob->size = (struct xrt_vec2){
-	    .x = (float)(led->rightmost - led->leftmost),
-	    .y = (float)(led->bottommost - led->topmost),
+	    .x = (float)(right - left),
+	    .y = (float)(bottom - top),
 	};
 	out_blob->brightness = 1.0;
 }

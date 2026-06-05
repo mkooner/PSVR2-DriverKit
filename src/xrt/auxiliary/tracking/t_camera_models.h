@@ -18,11 +18,13 @@
  */
 
 #pragma once
+#include "math/m_api.h"
 #include "math/m_vec2.h"
 #include "math/m_matrix_2x2.h"
 #include "math/m_mathinclude.h"
 
 #include "t_tracking.h"
+#include "xrt/xrt_defines.h"
 
 #include <assert.h>
 
@@ -61,10 +63,12 @@ struct t_camera_model_params
 	union {
 		struct t_camera_calibration_kb4_params_float fisheye;
 		struct t_camera_calibration_rt8_params_float rt8;
+		struct t_camera_calibration_psvr2_params psvr2;
 	};
 	// This model gets reinterpreted from values in the main t_camera_calibration struct to either
 	// * T_DISTORTION_FISHEYE_KB4
 	// * T_DISTORTION_OPENCV_RADTAN_8
+	// * T_DISTORTION_PSVR2
 	enum t_camera_distortion_model model;
 };
 
@@ -406,6 +410,126 @@ zero_distortion_pinhole_unproject(const struct t_camera_model_params *dist, //
 #endif
 
 /*
+ * PSVR2 projection functions
+ */
+
+#define PSVR2_UNDISTORTION_MAX_ITERATIONS 300
+
+#define PSVR2_UNDISTORTION_TARGET 1e-6f
+
+static inline void
+psvr2_distort(const struct t_camera_model_params *params, const float x, const float y, float *out_x, float *out_y)
+{
+
+
+	const double *p = params->psvr2.params;
+
+	double xSq = x * x;
+	double ySq = y * y;
+	double rSq = xSq + ySq;
+	double twoXY = 2.0 * x * y;
+	double rSqP4 = rSq * rSq * rSq * rSq;
+	double rSqP5 = rSqP4 * rSq;
+
+	double numPoly = 1.0 + (((p[4] * rSq + p[1]) * rSq + p[0]) * rSq) + (p[16] * rSqP5 * rSq) + (p[15] * rSqP5) +
+	                 (p[14] * rSqP4);
+
+	double denPoly = 1.0 + (((p[7] * rSq + p[6]) * rSq + p[5]) * rSq) + (p[19] * rSqP5 * rSq) + (p[18] * rSqP5) +
+	                 (p[17] * rSqP4);
+
+	double radialScale = (fabs(denPoly) > 1e-9) ? (numPoly / denPoly) : 1.0;
+
+	double distortedXTerm =
+	    (((p[9] * rSq + p[8]) * rSq)) + ((xSq + xSq + rSq) * p[3]) + (radialScale * x) + (twoXY * p[2]);
+
+	double distortedYTerm =
+	    (((p[11] * rSq + p[10]) * rSq)) + (twoXY * p[3]) + ((ySq + ySq + rSq) * p[2]) + (radialScale * y);
+
+	struct xrt_vec3 x_axis = {1, 0, 0}, y_axis = {0, 1, 0},
+	                rot_vec = {(float)distortedXTerm, (float)distortedYTerm, 1.0};
+	struct xrt_quat xrot, yrot, full_quat;
+	math_quat_from_angle_vector(p[12], &x_axis, &xrot);
+	math_quat_from_angle_vector(p[13], &y_axis, &yrot);
+	math_quat_rotate(&xrot, &yrot, &full_quat);
+	math_quat_rotate_vec3(&full_quat, &rot_vec, &rot_vec);
+
+	*out_x = rot_vec.x / rot_vec.z;
+	*out_y = rot_vec.y / rot_vec.z;
+}
+
+static inline void
+psvr2_undistort(const struct t_camera_model_params *params, const float u, const float v, float *out_x, float *out_y)
+{
+	float target_u = (u - params->cx) / params->fx;
+	float target_v = (v - params->cy) / params->fy;
+
+
+	*out_x = target_u;
+	*out_y = target_v;
+	float resX, resY;
+	for (int i = 0; i < PSVR2_UNDISTORTION_MAX_ITERATIONS; i++) {
+
+		psvr2_distort(params, *out_x, *out_y, &resX, &resY);
+
+		// find how far off our guess gets from the true value.
+		float dX = target_u - resX;
+		float dY = target_v - resY;
+
+		if (sqrtf(dX * dX + dY * dY) < SQRT_EPSILON) {
+			// Early escape
+			return;
+		}
+		// Im surprised to find that with the real calibration values, a step factor of 2 is able to converge
+		// to an acceptable at a maximum iteration count of ~300, 200 iterations on average, and in less than
+		// 100 when not near the highest distorted areas
+		*out_x += dX * 2;
+		*out_y += dY * 2;
+	}
+}
+
+static inline bool
+psvr2_project(const struct t_camera_model_params *dist, //
+              const float x,                            //
+              const float y,                            //
+              const float z,                            //
+              float *out_x,                             //
+              float *out_y)
+{
+	psvr2_distort(dist, x / z, y / z, out_x, out_y);
+	*out_x = (dist->fx * (*out_x)) + dist->cx;
+	*out_y = (dist->fy * (*out_y)) + dist->cy;
+	return true;
+}
+
+static inline bool
+psvr2_unproject(const struct t_camera_model_params *dist, //
+                const float x,                            //
+                const float y,                            //
+                float *out_x,                             //
+                float *out_y,                             //
+                float *out_z)
+{
+	float xp, yp;
+
+	psvr2_undistort(dist, x, y, &xp, &yp);
+
+	const float mx = (xp - dist->cx) / dist->fx;
+	const float my = (yp - dist->cy) / dist->fy;
+
+	const float r2 = mx * mx + my * my;
+
+	const float norm = sqrtf(1.0f + r2);
+
+	const float norm_inv = 1.0f / norm;
+
+	*out_x = mx * norm_inv;
+	*out_y = my * norm_inv;
+	*out_z = norm_inv;
+
+	// TODO: I dont understand how to evaluate if an unprojection is valid atm.
+	return true;
+}
+/*
  * Misc functions.
  */
 
@@ -487,6 +611,12 @@ t_camera_model_params_from_t_camera_calibration(const struct t_camera_calibratio
 	case T_DISTORTION_OPENCV_RADTAN_5:
 	case T_DISTORTION_OPENCV_RADTAN_8:
 	case T_DISTORTION_WMR: interpret_as_rt8(cc, out_params); break;
+	case T_DISTORTION_PSVR2: {
+		for (int i = 0; i < 20; i++) {
+			out_params->psvr2.params[i] = cc->psvr2.params[i];
+		}
+		break;
+	}
 	default:
 		U_LOG_E("t_camera_un_projections doesn't support camera model %s yet!",
 		        t_stringify_camera_distortion_model(cc->distortion_model));
@@ -508,6 +638,9 @@ t_camera_models_unproject(
 	}; break;
 	case T_DISTORTION_FISHEYE_KB4: {
 		return kb4_unproject(dist, x, y, out_x, out_y, out_z);
+	}; break;
+	case T_DISTORTION_PSVR2: {
+		return psvr2_unproject(dist, x, y, out_x, out_y, out_z);
 	}; break;
 	// Return false so we don't get warnings on Release builds.
 	default: assert(false); return false;
@@ -545,6 +678,9 @@ t_camera_models_undistort(
 	case T_DISTORTION_FISHEYE_KB4: {
 		kb4_undistort(dist, x, y, out_x, out_y);
 	}; break;
+	case T_DISTORTION_PSVR2: {
+		psvr2_undistort(dist, x, y, out_x, out_y);
+	}; break;
 	// Return false so we don't get warnings on Release builds.
 	default: assert(false);
 	}
@@ -569,6 +705,9 @@ t_camera_models_project(const struct t_camera_model_params *dist, //
 	}; break;
 	case T_DISTORTION_FISHEYE_KB4: {
 		return kb4_project(dist, x, y, z, out_x, out_y);
+	}; break;
+	case T_DISTORTION_PSVR2: {
+		return psvr2_project(dist, x, y, z, out_x, out_y);
 	}; break;
 	// Return false so we don't get warnings on Release builds.
 	default: assert(false); return false;

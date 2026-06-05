@@ -156,6 +156,9 @@ struct ld_led
 {
 	uint8_t unk[3];
 	uint16_t unk3;
+	// Guess: From inspecting this closely, the maximum value I was ever able to receive for these
+	// is 507, which implies half the reported camera dimension (1016), so I suspect that these are in a pixel/2 UV
+	// space.
 	uint16_t leftmost;
 	uint16_t rightmost;
 	uint16_t topmost;

@@ -13,6 +13,8 @@
 #include "math/m_api.h"
 #include "psvr2.h"
 #include "psvr2_interface.h"
+#include "tracking/t_tracking.h"
+#include "util/u_sink.h"
 #include "xrt/xrt_byte_order.h"
 #include "xrt/xrt_defines.h"
 #include <string.h>
@@ -103,40 +105,24 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 
 		PSVR2_DEBUG(hmd, "Camera %d calibration: resolution %dx%d", calib->camera_id, calib->width_pixels,
 		            calib->height_pixels);
-		mosaic->cameras[mosaic->num_cameras++] =
-		    (struct t_constellation_tracker_camera){
-		        .calibration =
-		            (struct t_camera_calibration){
-		                // NOTE: These values are normally 1080x1080,
-		                // and yet the actual tracking points from the LD endpoint
-		                // Seem to only range from 0,0 to 600,600?
-		                .image_size_pixels.w = calib->width_pixels,
-		                .image_size_pixels.h = calib->height_pixels,
-		                .distortion_model = T_DISTORTION_OPENCV_RADTAN_14,
-		                .rt14 =
-		                    {
-		                        .k1 = __lef64_to_cpu(calib->distortion_coeffs[0]),
-		                        .k2 = __lef64_to_cpu(calib->distortion_coeffs[1]),
-		                        .p1 = __lef64_to_cpu(calib->distortion_coeffs[2]),
-		                        .p2 = __lef64_to_cpu(calib->distortion_coeffs[3]),
-		                        .k3 = __lef64_to_cpu(calib->distortion_coeffs[4]),
-		                        .k4 = __lef64_to_cpu(calib->distortion_coeffs[5]),
-		                        .k5 = __lef64_to_cpu(calib->distortion_coeffs[6]),
-		                        .k6 = __lef64_to_cpu(calib->distortion_coeffs[7]),
-		                        .s1 = __lef64_to_cpu(calib->distortion_coeffs[8]),
-		                        .s2 = __lef64_to_cpu(calib->distortion_coeffs[9]),
-		                        .s3 = __lef64_to_cpu(calib->distortion_coeffs[10]),
-		                        .s4 = __lef64_to_cpu(calib->distortion_coeffs[11]),
-		                        .tx = __lef64_to_cpu(calib->distortion_coeffs[12]),
-		                        .ty = __lef64_to_cpu(calib->distortion_coeffs[13]),
-		                        // NOTE: There's 6 more terms of coefficients that could be utilized here,
-		                        // but at the moment RADTAN_14 is the most that's even technically supported.
-		                        // and even then, RADTAN_14 just falls back to RADTAN_8 for now.
-		                    }},
-		        .has_concrete_pose = true,
-		        // Only correct for cam zero, we need to derive the rest in the next step
-		        .pose_in_origin = {.position = XRT_VEC3_ZERO, .orientation = {.x = 0, .y = 1, .z = 0, .w = 0}},
-		    };
+
+		mosaic->cameras[mosaic->num_cameras++] = (struct t_constellation_tracker_camera){
+		    .calibration =
+		        (struct t_camera_calibration){
+		            // NOTE: These values are normally 1016x1016,
+		            // but the values returned from the ld endpoint are only within the range of 0-507
+		            .image_size_pixels.w = calib->width_pixels,
+		            .image_size_pixels.h = calib->height_pixels,
+		            .distortion_model = T_DISTORTION_PSVR2,
+		        },
+		    .has_concrete_pose = true,
+		    // Only correct for cam zero, we need to derive the rest in the next step
+		    .pose_in_origin = {.position = XRT_VEC3_ZERO, .orientation = {.x = 0, .y = 1, .z = 0, .w = 0}},
+		};
+
+		for (int j = 0; j < 20; j++) {
+			mosaic->cameras[i].calibration.psvr2.params[j] = __lef64_to_cpu(calib->distortion_coeffs[j]);
+		}
 
 		// intrinsics is double[3][3], pixel_matrix is float[3][3], we have to unpack in a way
 		// that converts between them.
@@ -160,16 +146,6 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 	math_quat_from_euler_angles(&(struct xrt_vec3){15, 145, 0}, &scratch_quat);
 	math_matrix_3x3_from_quat(&scratch_quat, &scratch_3x3);
 	math_matrix_4x4_isometry_from_rt(&scratch_3x3, &(struct xrt_vec3){0, 0, 0}, &camera_relative_poses[0]);
-
-	// Debug position of cameras used to validate some math
-	// This is better handled as part of the camera offset provided by the headset SLAM data
-	/*
-	camera_relative_poses[0]= (struct xrt_matrix_4x4){
-	        0.96592583, -0.14845251, -0.21201215,0,
-	        0, -0.81915204,  0.57357644, 0,
-	        -0.25881905, -0.55403229, -0.79124012, 0,
-	        -0.04, -0.0391993, -0.0808914, 1 };
-	//*/
 
 	struct xrt_matrix_4x4 scratch;
 	for (int i = 0; i < block->camera_relation_count; i++) {

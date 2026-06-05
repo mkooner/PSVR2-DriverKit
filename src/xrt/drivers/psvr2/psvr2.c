@@ -609,7 +609,7 @@ led_xfer_cb(struct libusb_transfer *xfer)
 #if 0
 	FILE *out = fopen("LED_DETECTOR_DATA.bin", "wb");
 	size_t written = 0;
-	while (written < xfer->actual_length) {
+	while (written < (size_t)xfer->actual_length) {
 		written += fwrite(buffer + written, 1, xfer->actual_length - written, out);
 	}
 	fflush(out);
@@ -1601,7 +1601,7 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		sprintf(name, "Substream %d", i);
 		u_var_add_sink_debug(hmd, &hmd->debug_sinks[i], name);
 	}
-	u_var_add_sink_debug(hmd, &hmd->debug_sinks[3], "Mode 1 stream");
+	// u_var_add_sink_debug(hmd, &hmd->debug_sinks[3], "Mode 1 stream");
 
 	/* DROPDOWN */
 	u_var_add_gui_header(hmd, NULL, "Logging");

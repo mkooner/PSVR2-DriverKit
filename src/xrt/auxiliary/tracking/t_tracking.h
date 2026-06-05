@@ -51,7 +51,7 @@ struct xrt_tracked_slam;
  */
 
 //! Maximum size of rectilinear distortion coefficient array
-#define XRT_DISTORTION_MAX_DIM (14)
+#define XRT_DISTORTION_MAX_DIM (20)
 
 /*!
  * @brief The distortion model this camera calibration falls under.
@@ -129,6 +129,15 @@ enum t_camera_distortion_model
 	 * \f[(k_1, k_2, p_1, p_2, k_3, k_4, k_5, k_6, cod_x, cod_y, rpmax)\f]
 	 */
 	T_DISTORTION_WMR,
+
+	/*!
+	 * PlayStation VR2 headset camera model
+	 *
+	 * A custom distortion model for the PSVR2 headset.
+	 *
+	 *
+	 */
+	T_DISTORTION_PSVR2,
 };
 
 
@@ -146,6 +155,7 @@ t_stringify_camera_distortion_model(const enum t_camera_distortion_model model)
 	case T_DISTORTION_OPENCV_RADTAN_14: return "T_DISTORTION_OPENCV_RADTAN_14"; break;
 	case T_DISTORTION_WMR: return "T_DISTORTION_WMR"; break;
 	case T_DISTORTION_FISHEYE_KB4: return "T_DISTORTION_FISHEYE_KB4"; break;
+	case T_DISTORTION_PSVR2: return "T_DISTORTION_PSVR2"; break;
 	default: U_LOG_E("Invalid distortion_model! %d", model); return "INVALID";
 	}
 }
@@ -166,6 +176,7 @@ t_num_params_from_distortion_model(const enum t_camera_distortion_model model)
 	case T_DISTORTION_OPENCV_RADTAN_14: return 14; break;
 	case T_DISTORTION_WMR: return 11; break;
 	case T_DISTORTION_FISHEYE_KB4: return 4; break;
+	case T_DISTORTION_PSVR2: return 20; break;
 	default: U_LOG_E("Invalid distortion_model! %d", model); return 0;
 	}
 }
@@ -178,6 +189,7 @@ t_camera_distortion_model_is_fisheye(enum t_camera_distortion_model model)
 	case T_DISTORTION_OPENCV_RADTAN_5:
 	case T_DISTORTION_OPENCV_RADTAN_8:
 	case T_DISTORTION_OPENCV_RADTAN_14:
+	case T_DISTORTION_PSVR2:
 	case T_DISTORTION_WMR: return false;
 	default: U_LOG_E("Invalid distortion_model! %d", model); return false;
 	}
@@ -229,6 +241,15 @@ struct t_camera_calibration_wmr_params
 };
 
 /*!
+ * Parameters for @ref T_DISTORTION_PSVR2
+ * @ingroup aux_tracking
+ */
+struct t_camera_calibration_psvr2_params
+{
+	double params[20];
+};
+
+/*!
  * @brief Essential calibration data for a single camera, or single lens/sensor
  * of a stereo camera.
  */
@@ -246,6 +267,7 @@ struct t_camera_calibration
 		struct t_camera_calibration_rt14_params rt14;
 		struct t_camera_calibration_kb4_params kb4;
 		struct t_camera_calibration_wmr_params wmr;
+		struct t_camera_calibration_psvr2_params psvr2;
 		double distortion_parameters_as_array[XRT_DISTORTION_MAX_DIM];
 	};
 
@@ -489,12 +511,12 @@ t_convert_in_place_h8s8v8_to_r8g8b8(uint32_t width, uint32_t height, size_t stri
 
 #define T_HSV_DEFAULT_PARAMS()                                                                                         \
 	{                                                                                                              \
-		{                                                                                                      \
-		    {165, 30, 160, 100},                                                                               \
-		    {135, 30, 160, 100},                                                                               \
-		    {95, 30, 160, 100},                                                                                \
-		},                                                                                                     \
-		    {128, 80},                                                                                         \
+	    {                                                                                                          \
+	        {165, 30, 160, 100},                                                                                   \
+	        {135, 30, 160, 100},                                                                                   \
+	        {95, 30, 160, 100},                                                                                    \
+	    },                                                                                                         \
+	    {128, 80},                                                                                                 \
 	}
 
 struct t_hsv_filter_color
