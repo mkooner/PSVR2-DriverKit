@@ -55,6 +55,8 @@
 #include <inttypes.h>
 #include <libusb.h>
 
+#include "bcdec.h"
+
 #include "psvr2.h"
 #include "psvr2_constellation_tracking.h"
 
@@ -409,48 +411,47 @@ img_xfer_cb(struct libusb_transfer *xfer)
 		PSVR2_TRACE_HEX(hmd, xfer->buffer, MIN(256, xfer->actual_length));
 
 		if (xfer->actual_length == USB_CAM_MODE10_XFER_SIZE) {
-			for (int d = 0; d < 3; d++) {
-				if (u_sink_debug_is_active(&hmd->debug_sinks[d])) {
-					struct xrt_frame *xf = NULL;
+			struct xrt_frame *frames[2] = {0};
 
+			uint8_t *src = xfer->buffer + 256;
 
-					int w = 254, h = 508, stride = 256, offset, size_pp;
-					if (d == 0) {
-						offset = d;
-						size_pp = 2;
-						u_frame_create_one_off(XRT_FORMAT_BC4, USB_CAM_MODE10_WIDTH,
-						                       USB_CAM_MODE10_HEIGHT, &xf);
+			const size_t img_size =
+			    BCDEC_BC4_COMPRESSED_SIZE(USB_CAM_MODE10_PIXEL_STRIDE, USB_CAM_MODE10_HEIGHT);
 
-						u_frame_create_one_off(XRT_FORMAT_L8, stride * 2, h, &xf);
-					} else if (d == 1 || d == 2) {
-						offset = (d == 1) ? 2 : 5;
-						size_pp = 3;
-						u_frame_create_one_off(XRT_FORMAT_R8G8B8, stride, h, &xf);
+			int64_t now = os_monotonic_get_ns();
+			for (int i = 0; i < 2; i++) {
+				bool debug_active = u_sink_debug_is_active(&hmd->debug_sinks[i]);
+
+				if (debug_active) {
+					u_frame_create_one_off(XRT_FORMAT_BC4, USB_CAM_MODE10_WIDTH,
+					                       USB_CAM_MODE10_HEIGHT, &frames[i]);
+
+					struct xrt_frame *xf = frames[i];
+
+					// chop off the rightmost pixels, which are corrupt/control data[?]
+					uint8_t *copy_src = src;
+					uint8_t *copy_dst = xf->data;
+					for (uint32_t y = 0; y < USB_CAM_MODE10_HEIGHT; y += 4) {
+						const size_t src_stride =
+						    BCDEC_BC4_BLOCK_SIZE * (USB_CAM_MODE10_PIXEL_STRIDE / 4);
+						const size_t width = BCDEC_BC4_BLOCK_SIZE * (USB_CAM_MODE10_WIDTH / 4);
+						memcpy(copy_dst, copy_src, width);
+
+						copy_src += src_stride;
+						copy_dst += xf->stride;
 					}
 
-					uint8_t *src = xfer->buffer + 256;
-					uint8_t *dest = xf->data;
-					for (int y = 0; y < h; y++) {
-						int x;
+					xf->timestamp = now;
 
-						for (x = 0; x < w; x++) {
-							for (int i = 0; i < size_pp; i++) {
-								*dest++ = src[offset + i];
-							}
-							src += 8;
-						}
-						src += 16; /* Skip 16-bytes at the end of each line */
-						           /* Skip output padding pixels */
-						while (x++ < stride) {
-							for (int i = 0; i < size_pp; i++) {
-								*dest++ = 0;
-							}
-						}
-					}
-					xf->timestamp = os_monotonic_get_ns();
-					u_sink_debug_push_frame(&hmd->debug_sinks[d], xf);
+
+					u_sink_debug_push_frame(&hmd->debug_sinks[i], xf);
+
+
 					xrt_frame_reference(&xf, NULL);
 				}
+
+				// move them padding bytes outta here
+				src += img_size + (BCDEC_BC4_BLOCK_SIZE * (USB_CAM_MODE10_PIXEL_STRIDE / 4) * (24 / 4));
 			}
 		} else if (xfer->actual_length == USB_CAM_MODE1_XFER_SIZE) {
 			if (u_sink_debug_is_active(&hmd->debug_sinks[3])) {
@@ -465,6 +466,27 @@ img_xfer_cb(struct libusb_transfer *xfer)
 				u_sink_debug_push_frame(&hmd->debug_sinks[3], xf);
 				xrt_frame_reference(&xf, NULL);
 			}
+		} else if (xfer->actual_length == USB_CAM_MODE4_XFER_SIZE) {
+			bool debug_sink_active = u_sink_debug_is_active(&hmd->debug_sinks[2]);
+
+
+			if (debug_sink_active) {
+				struct xrt_frame *xf = NULL;
+				u_frame_create_one_off(XRT_FORMAT_L8, 512, 508 * 2, &xf);
+
+				uint8_t *src = xfer->buffer + 256;
+				uint8_t *dest = xf->data;
+
+				memcpy(dest, src, 512 * 508 * 2);
+				xf->timestamp = os_monotonic_get_ns();
+
+				u_sink_debug_push_frame(&hmd->debug_sinks[2], xf);
+
+				xrt_frame_reference(&xf, NULL);
+			}
+		} else {
+			// wa
+			PSVR2_ERROR(hmd, "WAA");
 		}
 	}
 
@@ -1601,7 +1623,7 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		sprintf(name, "Substream %d", i);
 		u_var_add_sink_debug(hmd, &hmd->debug_sinks[i], name);
 	}
-	// u_var_add_sink_debug(hmd, &hmd->debug_sinks[3], "Mode 1 stream");
+	u_var_add_sink_debug(hmd, &hmd->debug_sinks[3], "Mode 1/10 stream");
 
 	/* DROPDOWN */
 	u_var_add_gui_header(hmd, NULL, "Logging");
