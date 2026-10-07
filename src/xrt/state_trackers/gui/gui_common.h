@@ -231,6 +231,14 @@ void
 gui_scene_hand_tracking_demo(struct gui_program *p);
 
 /*!
+ * Test for realsense driver + constellation tracker
+ *
+ * @public @memberof gui_program
+ */
+void
+gui_scene_realsense_constellation(struct gui_program *p);
+
+/*!
  * EuRoC recorder for DepthAI cameras
  *
  * @public @memberof gui_program

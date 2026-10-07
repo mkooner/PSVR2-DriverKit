@@ -271,8 +271,10 @@ if(XRT_BUILD_DRIVER_REALSENSE)
 		realsense/rs_prober.c
 		realsense/rs_driver.h
 		realsense/rs_interface.h
+		realsense/rs_ds.cpp
+		realsense/rs_ds.hpp
 		)
-	target_link_libraries(drv_realsense PRIVATE xrt-interfaces realsense2::realsense2 aux_util)
+	target_link_libraries(drv_realsense PRIVATE xrt-interfaces realsense2::realsense2 aux_util aux_glue base)
 	list(APPEND ENABLED_HEADSET_DRIVERS rs)
 endif()
 

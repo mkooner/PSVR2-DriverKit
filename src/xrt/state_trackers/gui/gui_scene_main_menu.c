@@ -51,6 +51,11 @@ scene_render(struct gui_scene *scene, struct gui_program *p)
 		gui_scene_debug(p);
 	}
 
+	if (igButton("Realsense Constellation", button_dims)) {
+		gui_scene_delete_me(p, scene);
+		gui_scene_realsense_constellation(p);
+	}
+
 	if (igButton("Record (DepthAI Monocular)", button_dims)) {
 		gui_scene_delete_me(p, scene);
 		gui_scene_record(p, "depthai-monocular");

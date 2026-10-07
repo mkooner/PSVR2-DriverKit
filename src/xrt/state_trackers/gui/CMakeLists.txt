@@ -44,6 +44,7 @@ add_library(
 	gui_scene_euroc_playback.c
 	gui_scene_hand_tracking_demo.c
 	gui_scene_main_menu.c
+	gui_scene_realsense_constellation.c
 	gui_scene_record.c
 	gui_scene_record_euroc.c
 	gui_scene_remote.c
@@ -90,6 +91,14 @@ endif()
 
 if(XRT_BUILD_DRIVER_REMOTE)
 	target_link_libraries(st_gui PRIVATE drv_remote)
+endif()
+
+if(XRT_BUILD_DRIVER_REALSENSE)
+	target_link_libraries(st_gui PRIVATE drv_realsense)
+endif()
+
+if(XRT_BUILD_DRIVER_PSSENSE)
+	target_link_libraries(st_gui PRIVATE drv_pssense)
 endif()
 
 if(XRT_HAVE_SDL2)

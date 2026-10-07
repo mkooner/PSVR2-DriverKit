@@ -1,13 +1,19 @@
 // Copyright 2020, Collabora, Ltd.
+// Copyright 2026, Beyley Cardellio
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
  * @brief  Interface to RealSense devices.
  * @author Jakob Bornecrantz <jakob@collabora.com>
+ * @author Beyley Cardellio <ep1cm1n10n123@gmail.com>
  * @ingroup drv_realsense
  */
 
 #pragma once
+
+#include "tracking/t_tracking.h"
+#include "tracking/t_time_sync.h"
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,11 +21,13 @@ extern "C" {
 
 struct xrt_frame_context;
 
+struct rs_ds_context;
+
 /*!
  * @defgroup drv_realsense Intel RealSense driver
  * @ingroup drv
  *
- * @brief Driver for the SLAM-capable Intel Realsense devices.
+ * @brief Driver for the Intel Realsense devices.
  */
 
 #define REALSENSE_MOVIDIUS_VID 0x03E7
@@ -67,6 +75,47 @@ rs_source_create(struct xrt_frame_context *xfctx, int device_idx);
  */
 struct xrt_device *
 rs_create_tracked_device_internal_slam(void);
+
+
+/*
+ *
+ * Generic data source
+ *
+ */
+
+/*!
+ * Creates a data source context for enumerating and creating realsense data sources.
+ */
+struct rs_ds_context *
+rs_ds_context_create(struct xrt_frame_context *xfctx);
+
+/*!
+ * Gets the amount of sensors present in the data source context.
+ */
+uint32_t
+rs_ds_context_sensor_count(struct rs_ds_context *context);
+
+/*!
+ * Gets the amount of data sources present in the sensor.
+ */
+uint32_t
+rs_ds_context_sensor_data_source_count(struct rs_ds_context *context, uint32_t sensor);
+
+/*!
+ * Gets the data source, and optionally the camera calibration, of a sensor's data source.
+ *
+ * @param[in]  context                 The data source context
+ * @param[in]  sensor_idx              The index into the sensor array
+ * @param[in]  data_source_idx         The index into the sensor's data source array
+ * @param[out] out_calib               The camera calibration (optional)
+ * @param[out] out_timing_event_source The camera's timing event source (optional)
+ */
+struct xrt_ds *
+rs_ds_context_sensor_get_data_source(struct rs_ds_context *context,
+                                     uint32_t sensor_idx,
+                                     uint32_t data_source_idx,
+                                     struct t_camera_calibration *out_calib,
+                                     struct t_timing_event_source **out_timing_event_source);
 
 /*!
  * @dir drivers/realsense
