@@ -8,7 +8,7 @@
  */
 
 #include "xrt/xrt_tracking.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 
 #include "math/m_api.h"
 #include "math/m_clock_tracking.h"
@@ -20,7 +20,7 @@
 #include "util/u_sink.h"
 #include "util/u_var.h"
 #include "util/u_trace_marker.h"
-#include "util/u_frameserver.h"
+#include "util/u_data_source.h"
 
 #include "wmr_source.h"
 #include "wmr_camera.h"
@@ -54,12 +54,12 @@ DEBUG_GET_ONCE_LOG_OPTION(wmr_log, "WMR_LOG", U_LOGGING_INFO)
  * Handles all the data sources from the WMR driver
  *
  * @todo Currently only properly handling tracking cameras, move IMU and other sources here
- * @implements xrt_fs
+ * @implements xrt_ds
  * @implements xrt_frame_node
  */
 struct wmr_source
 {
-	struct xrt_fs xfs;
+	struct xrt_ds xds;
 	struct xrt_frame_node node;
 	enum u_logging_level log_level; //!< Log level
 
@@ -171,40 +171,40 @@ void (*receive_imu[XRT_TRACKING_MAX_IMUS])(struct xrt_imu_sink *,
 
 /*
  *
- * Frameserver functionality
+ * DataSource functionality
  *
  */
 
 static inline struct wmr_source *
-wmr_source_from_xfs(struct xrt_fs *xfs)
+wmr_source_from_xds(struct xrt_ds *xds)
 {
-	struct wmr_source *ws = container_of(xfs, struct wmr_source, xfs);
+	struct wmr_source *ws = container_of(xds, struct wmr_source, xds);
 	return ws;
 }
 
 static xrt_result_t
-wmr_source_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+wmr_source_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **out_modes, uint32_t *out_count)
 {
 	//! @todo We should probably implement this with just the base mode.
-	struct wmr_source *ws = wmr_source_from_xfs(xfs);
+	struct wmr_source *ws = wmr_source_from_xds(xds);
 	WMR_ERROR(ws, "Mode enumeration is not implemented.");
 	return XRT_ERROR_NOT_IMPLEMENTED;
 }
 
 static xrt_result_t
-wmr_source_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *cp)
+wmr_source_configure_capture(struct xrt_ds *xds, struct xrt_ds_frame_capture_parameters *cp)
 {
-	struct wmr_source *ws = wmr_source_from_xfs(xfs);
+	struct wmr_source *ws = wmr_source_from_xds(xds);
 	WMR_WARN(ws, "Configuring capture is not implemented.");
 	return XRT_SUCCESS;
 }
 
 static xrt_result_t
-wmr_source_stream_stop(struct xrt_fs *xfs)
+wmr_source_stream_stop(struct xrt_ds *xds)
 {
 	DRV_TRACE_MARKER();
 
-	struct wmr_source *ws = wmr_source_from_xfs(xfs);
+	struct wmr_source *ws = wmr_source_from_xds(xds);
 
 	bool stopped = wmr_camera_stop(ws->camera);
 	if (!stopped) {
@@ -216,28 +216,28 @@ wmr_source_stream_stop(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-wmr_source_is_running(struct xrt_fs *xfs, bool *out_is_running)
+wmr_source_is_running(struct xrt_ds *xds, bool *out_is_running)
 {
 	DRV_TRACE_MARKER();
 
-	struct wmr_source *ws = wmr_source_from_xfs(xfs);
+	struct wmr_source *ws = wmr_source_from_xds(xds);
 	(*out_is_running) = ws->is_running;
 	return XRT_SUCCESS;
 }
 
 static xrt_result_t
-wmr_source_frame_stream_start(struct xrt_fs *xfs,
+wmr_source_frame_stream_start(struct xrt_ds *xds,
                               struct xrt_frame_sink *xs,
-                              enum xrt_fs_capture_type capture_type,
+                              enum xrt_ds_capture_type capture_type,
                               uint32_t frame_mode_index)
 {
 	DRV_TRACE_MARKER();
 
-	struct wmr_source *ws = wmr_source_from_xfs(xfs);
+	struct wmr_source *ws = wmr_source_from_xds(xds);
 
-	if (xs == NULL && capture_type == XRT_FS_CAPTURE_TYPE_TRACKING) {
+	if (xs == NULL && capture_type == XRT_DS_CAPTURE_TYPE_TRACKING) {
 		WMR_INFO(ws, "Starting WMR stream in tracking mode");
-	} else if (xs != NULL && capture_type == XRT_FS_CAPTURE_TYPE_CALIBRATION) {
+	} else if (xs != NULL && capture_type == XRT_DS_CAPTURE_TYPE_CALIBRATION) {
 		WMR_INFO(ws, "Starting WMR stream in calibration mode, will stream only cam0 frames");
 		ws->out_sinks.cam_count = 1;
 		ws->out_sinks.cams[0] = xs;
@@ -256,15 +256,15 @@ wmr_source_frame_stream_start(struct xrt_fs *xfs,
 }
 
 static xrt_result_t
-wmr_source_tracking_streams_start(struct xrt_fs *xfs, struct xrt_tracking_sinks *sinks)
+wmr_source_tracking_streams_start(struct xrt_ds *xds, struct xrt_tracking_sinks *sinks)
 {
 	DRV_TRACE_MARKER();
 
-	struct wmr_source *ws = wmr_source_from_xfs(xfs);
+	struct wmr_source *ws = wmr_source_from_xds(xds);
 	if (sinks != NULL) {
 		ws->out_sinks = *sinks;
 	}
-	return wmr_source_frame_stream_start(xfs, NULL, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
+	return wmr_source_frame_stream_start(xds, NULL, XRT_DS_CAPTURE_TYPE_TRACKING, 0);
 }
 
 
@@ -280,7 +280,7 @@ wmr_source_node_break_apart(struct xrt_frame_node *node)
 	DRV_TRACE_MARKER();
 
 	struct wmr_source *ws = container_of(node, struct wmr_source, node);
-	wmr_source_stream_stop(&ws->xfs);
+	wmr_source_stream_stop(&ws->xds);
 }
 
 static void
@@ -311,8 +311,8 @@ wmr_source_node_destroy(struct xrt_frame_node *node)
  *
  */
 
-//! Create and open the frame server for IMU/camera streaming.
-struct xrt_fs *
+//! Create and open the data source for IMU/camera streaming.
+struct xrt_ds *
 wmr_source_create(struct xrt_frame_context *xfctx, struct xrt_prober_device *dev_holo, struct wmr_hmd_config cfg)
 {
 	DRV_TRACE_MARKER();
@@ -320,20 +320,20 @@ wmr_source_create(struct xrt_frame_context *xfctx, struct xrt_prober_device *dev
 	struct wmr_source *ws = U_TYPED_CALLOC(struct wmr_source);
 	ws->log_level = debug_get_log_option_wmr_log();
 
-	// Setup xrt_fs
-	struct xrt_fs *xfs = &ws->xfs;
-	u_frameserver_populate_function_pointers(xfs);
-	xfs->enumerate_frame_modes = wmr_source_enumerate_frame_modes;
-	xfs->configure_capture = wmr_source_configure_capture;
-	xfs->frame_stream_start = wmr_source_frame_stream_start;
-	xfs->tracking_streams_start = wmr_source_tracking_streams_start;
-	xfs->stream_stop = wmr_source_stream_stop;
-	xfs->is_running = wmr_source_is_running;
-	(void)snprintf(xfs->name, sizeof(xfs->name), WMR_SOURCE_STR);
-	(void)snprintf(xfs->product, sizeof(xfs->product), WMR_SOURCE_STR " Product");
-	(void)snprintf(xfs->manufacturer, sizeof(xfs->manufacturer), WMR_SOURCE_STR " Manufacturer");
-	(void)snprintf(xfs->serial, sizeof(xfs->serial), WMR_SOURCE_STR " Serial");
-	xfs->source_id = *((uint64_t *)"WMR_SRC\0");
+	// Setup xrt_ds
+	struct xrt_ds *xds = &ws->xds;
+	u_data_source_populate_function_pointers(xds);
+	xds->enumerate_frame_modes = wmr_source_enumerate_frame_modes;
+	xds->configure_capture = wmr_source_configure_capture;
+	xds->frame_stream_start = wmr_source_frame_stream_start;
+	xds->tracking_streams_start = wmr_source_tracking_streams_start;
+	xds->stream_stop = wmr_source_stream_stop;
+	xds->is_running = wmr_source_is_running;
+	(void)snprintf(xds->name, sizeof(xds->name), WMR_SOURCE_STR);
+	(void)snprintf(xds->product, sizeof(xds->product), WMR_SOURCE_STR " Product");
+	(void)snprintf(xds->manufacturer, sizeof(xds->manufacturer), WMR_SOURCE_STR " Manufacturer");
+	(void)snprintf(xds->serial, sizeof(xds->serial), WMR_SOURCE_STR " Serial");
+	xds->source_id = *((uint64_t *)"WMR_SRC\0");
 
 	// Setup sinks
 	for (int i = 0; i < XRT_TRACKING_MAX_CAMS; i++) {
@@ -403,15 +403,15 @@ wmr_source_create(struct xrt_frame_context *xfctx, struct xrt_prober_device *dev
 
 	WMR_DEBUG(ws, "WMR Source created");
 
-	return xfs;
+	return xds;
 }
 
 void
 wmr_source_push_imu_packet(
-    struct xrt_fs *xfs, uint32_t imu_index, timepoint_ns t, struct xrt_vec3 accel, struct xrt_vec3 gyro)
+    struct xrt_ds *xds, uint32_t imu_index, timepoint_ns t, struct xrt_vec3 accel, struct xrt_vec3 gyro)
 {
 	DRV_TRACE_MARKER();
-	struct wmr_source *ws = wmr_source_from_xfs(xfs);
+	struct wmr_source *ws = wmr_source_from_xds(xds);
 	struct xrt_vec3_f64 accel_f64 = {accel.x, accel.y, accel.z};
 	struct xrt_vec3_f64 gyro_f64 = {gyro.x, gyro.y, gyro.z};
 	struct xrt_imu_sample sample = {.timestamp_ns = t, .accel_m_s2 = accel_f64, .gyro_rad_secs = gyro_f64};

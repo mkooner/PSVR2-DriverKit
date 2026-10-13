@@ -47,7 +47,7 @@ rift_sensor_destroy(struct rift_sensor *sensor)
 		libusb_unref_device(libusb_get_device(sensor->hid_dev));
 	}
 
-	// @note uvc_fs_destroy is called by the xrt_frame_node destroy callback, so we don't need to call it here
+	// @note uvc_ds_destroy is called by the xrt_frame_node destroy callback, so we don't need to call it here
 }
 
 static void
@@ -479,28 +479,28 @@ rift_sensor_create(struct rift_sensor_context *context,
 
 	sensor->hid_dev = device_handle;
 
-	ret = uvc_fs_create(context->usb_ctx, device_handle, desc, rift_sensor_setup_stream_parameters_callback,
-	                    rift_sensor_post_init_callback, context, xfctx, &sensor->frame_server);
+	ret = uvc_ds_create(context->usb_ctx, device_handle, desc, rift_sensor_setup_stream_parameters_callback,
+	                    rift_sensor_post_init_callback, context, xfctx, &sensor->data_source);
 	if (ret < 0) {
 		libusb_close(device_handle);
-		SENSOR_ERROR(context, "Failed to create UVC frameserver, reason %d", ret);
+		SENSOR_ERROR(context, "Failed to create UVC data source, reason %d", ret);
 		return ret;
 	}
 
-	struct xrt_fs_mode *supported_modes;
+	struct xrt_ds_frame_mode *supported_modes;
 	uint32_t mode_count = 0;
-	xrt_result_t xret = xrt_fs_enumerate_frame_modes(sensor->frame_server, &supported_modes, &mode_count);
+	xrt_result_t xret = xrt_ds_enumerate_frame_modes(sensor->data_source, &supported_modes, &mode_count);
 	if (xret != XRT_SUCCESS || mode_count == 0) {
 		libusb_close(device_handle);
 		SENSOR_ERROR(context,
-		             "Failed to enumerate UVC frameserver for sensor, mode count %d, skipping, got xret %d.",
+		             "Failed to enumerate UVC data source for sensor, mode count %d, skipping, got xret %d.",
 		             mode_count, xret);
 
 		return -1;
 	}
 
 	// Pick the mode we want (the first)
-	struct xrt_fs_mode mode = *supported_modes;
+	struct xrt_ds_frame_mode mode = *supported_modes;
 	free(supported_modes);
 
 	sensor->usb2 = (desc->bcdUSB < 0x300);
@@ -766,10 +766,10 @@ rift_sensor_context_get_sensors(struct rift_sensor_context *context,
 	return 0;
 }
 
-struct xrt_fs *
-rift_sensor_get_frame_server(struct rift_sensor *sensor)
+struct xrt_ds *
+rift_sensor_get_data_source(struct rift_sensor *sensor)
 {
-	return sensor->frame_server;
+	return sensor->data_source;
 }
 
 enum rift_variant
@@ -787,5 +787,5 @@ rift_sensor_get_calibration(struct rift_sensor *sensor, struct t_camera_calibrat
 void
 rift_sensor_setup_frame_timestamp_callback(struct rift_sensor *sensor, struct rift_hmd *hmd)
 {
-	uvc_fs_set_source_timestamp_callback(sensor->frame_server, rift_hmd_frame_timestamp_callback, hmd);
+	uvc_ds_set_source_timestamp_callback(sensor->data_source, rift_hmd_frame_timestamp_callback, hmd);
 }

@@ -26,7 +26,7 @@ extern "C" {
 struct cJSON;
 typedef struct cJSON cJSON;
 
-struct xrt_fs;
+struct xrt_ds;
 struct xrt_frame_context;
 struct xrt_prober;
 struct xrt_prober_entry;
@@ -259,13 +259,13 @@ struct xrt_prober
 	                          struct os_serial_device **out_serial_dev);
 
 	/*!
-	 * Opens the selected video device and returns a @ref xrt_fs, does not
+	 * Opens the selected video device and returns it's associated @ref xrt_ds, does not
 	 * start it.
 	 */
 	int (*open_video_device)(struct xrt_prober *xp,
 	                         struct xrt_prober_device *xpdev,
 	                         struct xrt_frame_context *xfctx,
-	                         struct xrt_fs **out_xfs);
+	                         struct xrt_ds **out_xds);
 
 	/*!
 	 * Iterate through available video devices, calling your callback @p cb with your userdata @p ptr.
@@ -492,9 +492,9 @@ XRT_NONNULL_FIRST static inline int
 xrt_prober_open_video_device(struct xrt_prober *xp,
                              struct xrt_prober_device *xpdev,
                              struct xrt_frame_context *xfctx,
-                             struct xrt_fs **out_xfs)
+                             struct xrt_ds **out_xds)
 {
-	return xp->open_video_device(xp, xpdev, xfctx, out_xfs);
+	return xp->open_video_device(xp, xpdev, xfctx, out_xds);
 }
 
 /*!

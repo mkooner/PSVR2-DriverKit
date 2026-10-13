@@ -122,7 +122,7 @@ struct wmr_hmd
 	struct
 	{
 		//! Source of video/IMU data for tracking
-		struct xrt_fs *source;
+		struct xrt_ds *source;
 
 		//! Context for @ref source
 		struct xrt_frame_context xfctx;

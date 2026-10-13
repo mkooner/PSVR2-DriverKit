@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  DepthAI frameserver implementation.
+ * @brief  DepthAI data source implementation.
  * @author Moshi Turner <moshiturner@protonmail.com>
  * @author Jakob Bornecrantz <jakob@collabora.com>
  * @ingroup drv_depthai
@@ -24,7 +24,7 @@
 #include "util/u_format.h"
 #include "util/u_logging.h"
 #include "util/u_trace_marker.h"
-#include "util/u_frameserver.h"
+#include "util/u_data_source.h"
 
 #ifdef XRT_OS_LINUX
 #include "util/u_linux.h"
@@ -104,7 +104,7 @@ depthai_frame_wrapper_destroy(struct xrt_frame *xf)
 
 /*
  *
- * DepthAI frameserver.
+ * DepthAI data source.
  *
  */
 
@@ -119,13 +119,13 @@ enum depthai_camera_type
 };
 
 /*!
- * DepthAI frameserver support the Luxonis Oak devices.
+ * DepthAI data source support the Luxonis Oak devices.
  *
  * @ingroup drv_depthai
  */
-struct depthai_fs
+struct depthai_ds
 {
-	struct xrt_fs base;
+	struct xrt_ds base;
 	struct xrt_frame_node node;
 	struct os_thread_helper image_thread;
 	struct os_thread_helper imu_thread;
@@ -201,7 +201,7 @@ struct depthai_fs
  */
 
 static bool
-depthai_get_gray_cameras_calibration(struct depthai_fs *depthai, struct t_stereo_camera_calibration **c_ptr)
+depthai_get_gray_cameras_calibration(struct depthai_ds *depthai, struct t_stereo_camera_calibration **c_ptr)
 {
 	/*
 	 * Read out values.
@@ -295,7 +295,7 @@ depthai_get_gray_cameras_calibration(struct depthai_fs *depthai, struct t_stereo
 
 //!@todo this function will look slightly different for an OAK-D Pro with dot projectors - mine only has floodlights
 void
-depthai_guess_ir_drivers(struct depthai_fs *depthai)
+depthai_guess_ir_drivers(struct depthai_ds *depthai)
 {
 	std::vector<std::tuple<std::string, int, int>> list_of_drivers = depthai->device->getIrDrivers();
 	depthai->floodlights.has = false;
@@ -313,7 +313,7 @@ depthai_guess_ir_drivers(struct depthai_fs *depthai)
 }
 
 static void
-depthai_guess_camera_type(struct depthai_fs *depthai)
+depthai_guess_camera_type(struct depthai_ds *depthai)
 {
 	// We could be a lot more pedantic here, but let's just not.
 	// For now, ov7251 == oak-d lite, and ov9282 == oak-d/oak-d S2/oak-d pro
@@ -359,7 +359,7 @@ depthai_guess_camera_type(struct depthai_fs *depthai)
 }
 
 static void
-depthai_print_calib(struct depthai_fs *depthai)
+depthai_print_calib(struct depthai_ds *depthai)
 {
 	if (depthai->log_level > U_LOGGING_DEBUG) {
 		return;
@@ -377,7 +377,7 @@ depthai_print_calib(struct depthai_fs *depthai)
 
 
 static void
-depthai_do_one_frame(struct depthai_fs *depthai)
+depthai_do_one_frame(struct depthai_ds *depthai)
 {
 	std::shared_ptr<dai::ImgFrame> imgFrame = depthai->image_queue->get<dai::ImgFrame>();
 	if (!imgFrame) {
@@ -439,7 +439,7 @@ depthai_do_one_frame(struct depthai_fs *depthai)
 }
 
 static void
-depthai_maybe_send_exposure_command(struct depthai_fs *depthai)
+depthai_maybe_send_exposure_command(struct depthai_ds *depthai)
 {
 	if (!depthai->manual_exposure.active) {
 		return;
@@ -460,7 +460,7 @@ depthai_maybe_send_exposure_command(struct depthai_fs *depthai)
 }
 
 static void
-depthai_maybe_send_floodlight_command(struct depthai_fs *depthai)
+depthai_maybe_send_floodlight_command(struct depthai_ds *depthai)
 {
 	if (!(depthai->floodlights.has && depthai->floodlights.manual_control)) {
 		return;
@@ -478,7 +478,7 @@ depthai_maybe_send_floodlight_command(struct depthai_fs *depthai)
 static void *
 depthai_mainloop(void *ptr)
 {
-	struct depthai_fs *depthai = (struct depthai_fs *)ptr;
+	struct depthai_ds *depthai = (struct depthai_ds *)ptr;
 
 	U_TRACE_SET_THREAD_NAME("DepthAI: Image");
 	os_thread_name_self("DepthAI: Image");
@@ -515,7 +515,7 @@ dai_ts_to_monado_ts(dai::Timestamp &in)
 
 // Look at the WMR driver - that's where these averaging shenanigans come from ;)
 static void
-depthai_do_one_imu_frame(struct depthai_fs *depthai)
+depthai_do_one_imu_frame(struct depthai_ds *depthai)
 {
 	std::shared_ptr<dai::IMUData> imuData = depthai->imu_queue->get<dai::IMUData>();
 
@@ -618,7 +618,7 @@ depthai_do_one_imu_frame(struct depthai_fs *depthai)
 static void *
 depthai_imu_mainloop(void *ptr)
 {
-	struct depthai_fs *depthai = (struct depthai_fs *)ptr;
+	struct depthai_ds *depthai = (struct depthai_ds *)ptr;
 
 	U_TRACE_SET_THREAD_NAME("DepthAI: IMU");
 	os_thread_name_self("DepthAI: IMU");
@@ -647,9 +647,9 @@ depthai_imu_mainloop(void *ptr)
 }
 
 static bool
-depthai_destroy(struct depthai_fs *depthai)
+depthai_destroy(struct depthai_ds *depthai)
 {
-	DEPTHAI_DEBUG(depthai, "DepthAI: Frameserver destroy called");
+	DEPTHAI_DEBUG(depthai, "DepthAI: data source destroy called");
 	os_thread_helper_destroy(&depthai->image_thread);
 	os_thread_helper_destroy(&depthai->imu_thread);
 	u_var_remove_root(depthai);
@@ -672,7 +672,7 @@ depthai_destroy(struct depthai_fs *depthai)
 }
 
 static void
-depthai_setup_monocular_pipeline(struct depthai_fs *depthai, enum depthai_camera_type camera_type)
+depthai_setup_monocular_pipeline(struct depthai_ds *depthai, enum depthai_camera_type camera_type)
 {
 	switch (camera_type) {
 	case (RGB_OV_9782):
@@ -774,7 +774,7 @@ depthai_setup_monocular_pipeline(struct depthai_fs *depthai, enum depthai_camera
 }
 
 static void
-depthai_setup_stereo_grayscale_pipeline(struct depthai_fs *depthai)
+depthai_setup_stereo_grayscale_pipeline(struct depthai_ds *depthai)
 {
 	// Hardcoded to OV_9282 L/R
 	if (!depthai->oak_d_lite) {
@@ -921,7 +921,7 @@ depthai_setup_stereo_grayscale_pipeline(struct depthai_fs *depthai)
 
 #ifdef DEPTHAI_HAS_MULTICAM_SUPPORT
 static void
-depthai_setup_stereo_rgb_pipeline(struct depthai_fs *depthai)
+depthai_setup_stereo_rgb_pipeline(struct depthai_ds *depthai)
 {
 	// Hardcoded to OV_9782 L/R
 	depthai->width = 1280;
@@ -969,26 +969,26 @@ depthai_setup_stereo_rgb_pipeline(struct depthai_fs *depthai)
 
 /*
  *
- * Frame server functions.
+ * Data source functions.
  *
  */
 
 /*!
  * Cast to derived type.
  */
-static inline struct depthai_fs *
-depthai_fs(struct xrt_fs *xfs)
+static inline struct depthai_ds *
+depthai_ds(struct xrt_ds *xds)
 {
-	return (struct depthai_fs *)xfs;
+	return (struct depthai_ds *)xds;
 }
 
 static xrt_result_t
-depthai_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+depthai_ds_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **out_modes, uint32_t *out_count)
 {
-	struct depthai_fs *depthai = depthai_fs(xfs);
+	struct depthai_ds *depthai = depthai_ds(xds);
 	DEPTHAI_DEBUG(depthai, "DepthAI: Enumerate modes called");
 
-	struct xrt_fs_mode *modes = U_TYPED_ARRAY_CALLOC(struct xrt_fs_mode, 1);
+	struct xrt_ds_frame_mode *modes = U_TYPED_ARRAY_CALLOC(struct xrt_ds_frame_mode, 1);
 	if (modes == NULL) {
 		return XRT_ERROR_ALLOCATION;
 	}
@@ -1005,9 +1005,9 @@ depthai_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_mo
 }
 
 static xrt_result_t
-depthai_fs_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *cp)
+depthai_ds_configure_capture(struct xrt_ds *xds, struct xrt_ds_frame_capture_parameters *cp)
 {
-	struct depthai_fs *depthai = depthai_fs(xfs);
+	struct depthai_ds *depthai = depthai_ds(xds);
 	DEPTHAI_DEBUG(depthai, "DepthAI: Configure capture called");
 
 	// Noop, no parameters are supported.
@@ -1015,12 +1015,12 @@ depthai_fs_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameter
 }
 
 static xrt_result_t
-depthai_fs_frame_stream_start(struct xrt_fs *xfs,
+depthai_ds_frame_stream_start(struct xrt_ds *xds,
                               struct xrt_frame_sink *xs,
-                              enum xrt_fs_capture_type capture_type,
+                              enum xrt_ds_capture_type capture_type,
                               uint32_t frame_mode_index)
 {
-	struct depthai_fs *depthai = depthai_fs(xfs);
+	struct depthai_ds *depthai = depthai_ds(xds);
 	DEPTHAI_DEBUG(depthai, "DepthAI: Stream start called");
 
 	if (frame_mode_index != 0) {
@@ -1041,9 +1041,9 @@ depthai_fs_frame_stream_start(struct xrt_fs *xfs,
 }
 
 static xrt_result_t
-depthai_fs_tracking_streams_start(struct xrt_fs *xfs, struct xrt_tracking_sinks *sinks)
+depthai_ds_tracking_streams_start(struct xrt_ds *xds, struct xrt_tracking_sinks *sinks)
 {
-	struct depthai_fs *depthai = depthai_fs(xfs);
+	struct depthai_ds *depthai = depthai_ds(xds);
 	DEPTHAI_DEBUG(depthai, "DepthAI: SLAM stream start called");
 
 	depthai->sink[0] = nullptr;        // 0 == CamA-4L / RGB
@@ -1063,9 +1063,9 @@ depthai_fs_tracking_streams_start(struct xrt_fs *xfs, struct xrt_tracking_sinks 
 }
 
 static xrt_result_t
-depthai_fs_stream_stop(struct xrt_fs *xfs)
+depthai_ds_stream_stop(struct xrt_ds *xds)
 {
-	struct depthai_fs *depthai = depthai_fs(xfs);
+	struct depthai_ds *depthai = depthai_ds(xds);
 	DEPTHAI_DEBUG(depthai, "DepthAI: Stream stop called");
 
 	// This call fully stops the thread.
@@ -1076,9 +1076,9 @@ depthai_fs_stream_stop(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-depthai_fs_is_running(struct xrt_fs *xfs, bool *out_is_running)
+depthai_ds_is_running(struct xrt_ds *xds, bool *out_is_running)
 {
-	struct depthai_fs *depthai = depthai_fs(xfs);
+	struct depthai_ds *depthai = depthai_ds(xds);
 
 	os_thread_helper_lock(&depthai->image_thread);
 	(*out_is_running) = os_thread_helper_is_running_locked(&depthai->image_thread);
@@ -1095,18 +1095,18 @@ depthai_fs_is_running(struct xrt_fs *xfs, bool *out_is_running)
  */
 
 static void
-depthai_fs_node_break_apart(struct xrt_frame_node *node)
+depthai_ds_node_break_apart(struct xrt_frame_node *node)
 {
-	struct depthai_fs *depthai = container_of(node, struct depthai_fs, node);
+	struct depthai_ds *depthai = container_of(node, struct depthai_ds, node);
 	DEPTHAI_DEBUG(depthai, "DepthAI: Node break apart called");
 
-	depthai_fs_stream_stop(&depthai->base);
+	depthai_ds_stream_stop(&depthai->base);
 }
 
 static void
-depthai_fs_node_destroy(struct xrt_frame_node *node)
+depthai_ds_node_destroy(struct xrt_frame_node *node)
 {
-	struct depthai_fs *depthai = container_of(node, struct depthai_fs, node);
+	struct depthai_ds *depthai = container_of(node, struct depthai_ds, node);
 	DEPTHAI_DEBUG(depthai, "DepthAI: Node destroy called");
 
 	// Safe to call, break apart have already stopped the stream.
@@ -1120,7 +1120,7 @@ depthai_fs_node_destroy(struct xrt_frame_node *node)
  *
  */
 
-static struct depthai_fs *
+static struct depthai_ds *
 depthai_create_and_do_minimal_setup(void)
 {
 	// Try to create a device and see if that fail first.
@@ -1133,16 +1133,16 @@ depthai_create_and_do_minimal_setup(void)
 		return nullptr;
 	}
 
-	struct depthai_fs *depthai = U_TYPED_CALLOC(struct depthai_fs);
-	u_frameserver_populate_function_pointers(&depthai->base);
-	depthai->base.enumerate_frame_modes = depthai_fs_enumerate_frame_modes;
-	depthai->base.configure_capture = depthai_fs_configure_capture;
-	depthai->base.frame_stream_start = depthai_fs_frame_stream_start;
-	depthai->base.tracking_streams_start = depthai_fs_tracking_streams_start;
-	depthai->base.stream_stop = depthai_fs_stream_stop;
-	depthai->base.is_running = depthai_fs_is_running;
-	depthai->node.break_apart = depthai_fs_node_break_apart;
-	depthai->node.destroy = depthai_fs_node_destroy;
+	struct depthai_ds *depthai = U_TYPED_CALLOC(struct depthai_ds);
+	u_data_source_populate_function_pointers(&depthai->base);
+	depthai->base.enumerate_frame_modes = depthai_ds_enumerate_frame_modes;
+	depthai->base.configure_capture = depthai_ds_configure_capture;
+	depthai->base.frame_stream_start = depthai_ds_frame_stream_start;
+	depthai->base.tracking_streams_start = depthai_ds_tracking_streams_start;
+	depthai->base.stream_stop = depthai_ds_stream_stop;
+	depthai->base.is_running = depthai_ds_is_running;
+	depthai->node.break_apart = depthai_ds_node_break_apart;
+	depthai->node.destroy = depthai_ds_node_destroy;
 	depthai->log_level = debug_get_log_option_depthai_log();
 	depthai->device = d;
 
@@ -1209,10 +1209,10 @@ depthai_create_and_do_minimal_setup(void)
  *
  */
 
-extern "C" struct xrt_fs *
-depthai_fs_monocular_rgb(struct xrt_frame_context *xfctx)
+extern "C" struct xrt_ds *
+depthai_ds_monocular_rgb(struct xrt_frame_context *xfctx)
 {
-	struct depthai_fs *depthai = depthai_create_and_do_minimal_setup();
+	struct depthai_ds *depthai = depthai_create_and_do_minimal_setup();
 	if (depthai == nullptr) {
 		return nullptr;
 	}
@@ -1235,10 +1235,10 @@ depthai_fs_monocular_rgb(struct xrt_frame_context *xfctx)
 	return &depthai->base;
 }
 
-extern "C" struct xrt_fs *
-depthai_fs_slam(struct xrt_frame_context *xfctx, struct depthai_slam_startup_settings *settings)
+extern "C" struct xrt_ds *
+depthai_ds_slam(struct xrt_frame_context *xfctx, struct depthai_slam_startup_settings *settings)
 {
-	struct depthai_fs *depthai = depthai_create_and_do_minimal_setup();
+	struct depthai_ds *depthai = depthai_create_and_do_minimal_setup();
 	if (depthai == nullptr) {
 		return nullptr;
 	}
@@ -1260,10 +1260,10 @@ depthai_fs_slam(struct xrt_frame_context *xfctx, struct depthai_slam_startup_set
 	return &depthai->base;
 }
 
-extern "C" struct xrt_fs *
-depthai_fs_stereo_grayscale_and_imu(struct xrt_frame_context *xfctx)
+extern "C" struct xrt_ds *
+depthai_ds_stereo_grayscale_and_imu(struct xrt_frame_context *xfctx)
 {
-	struct depthai_fs *depthai = depthai_create_and_do_minimal_setup();
+	struct depthai_ds *depthai = depthai_create_and_do_minimal_setup();
 	if (depthai == nullptr) {
 		return nullptr;
 	}
@@ -1284,10 +1284,10 @@ depthai_fs_stereo_grayscale_and_imu(struct xrt_frame_context *xfctx)
 }
 
 
-extern "C" struct xrt_fs *
-depthai_fs_just_imu(struct xrt_frame_context *xfctx)
+extern "C" struct xrt_ds *
+depthai_ds_just_imu(struct xrt_frame_context *xfctx)
 {
-	struct depthai_fs *depthai = depthai_create_and_do_minimal_setup();
+	struct depthai_ds *depthai = depthai_create_and_do_minimal_setup();
 	if (depthai == nullptr) {
 		return nullptr;
 	}
@@ -1308,10 +1308,10 @@ depthai_fs_just_imu(struct xrt_frame_context *xfctx)
 }
 
 #ifdef DEPTHAI_HAS_MULTICAM_SUPPORT
-extern "C" struct xrt_fs *
-depthai_fs_stereo_rgb(struct xrt_frame_context *xfctx)
+extern "C" struct xrt_ds *
+depthai_ds_stereo_rgb(struct xrt_frame_context *xfctx)
 {
-	struct depthai_fs *depthai = depthai_create_and_do_minimal_setup();
+	struct depthai_ds *depthai = depthai_create_and_do_minimal_setup();
 	if (depthai == nullptr) {
 		return nullptr;
 	}
@@ -1328,9 +1328,9 @@ depthai_fs_stereo_rgb(struct xrt_frame_context *xfctx)
 #endif
 
 extern "C" bool
-depthai_fs_get_stereo_calibration(struct xrt_fs *xfs, struct t_stereo_camera_calibration **c_ptr)
+depthai_ds_get_stereo_calibration(struct xrt_ds *xds, struct t_stereo_camera_calibration **c_ptr)
 {
-	struct depthai_fs *depthai = depthai_fs(xfs);
+	struct depthai_ds *depthai = depthai_ds(xds);
 
 	return depthai_get_gray_cameras_calibration(depthai, c_ptr);
 }

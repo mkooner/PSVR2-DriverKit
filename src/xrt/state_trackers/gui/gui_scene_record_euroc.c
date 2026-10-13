@@ -62,9 +62,9 @@ gui_scene_record_euroc(struct gui_program *p)
 	settings.want_cameras = true;
 	settings.want_imu = true;
 
-	struct xrt_fs *the_fs = depthai_fs_slam(&xfctx, &settings);
+	struct xrt_ds *the_ds = depthai_ds_slam(&xfctx, &settings);
 
-	if (the_fs == NULL) {
+	if (the_ds == NULL) {
 		xrt_system_devices_destroy(&xsysd);
 		return;
 	}
@@ -87,7 +87,7 @@ gui_scene_record_euroc(struct gui_program *p)
 
 	gen_lock.imu = slam_sinks->imu;
 
-	xrt_fs_tracking_streams_start(the_fs, &gen_lock);
+	xrt_ds_tracking_streams_start(the_ds, &gen_lock);
 
 	gui_scene_debug(p);
 }

@@ -39,7 +39,7 @@ struct xrt_frame
 	int64_t timestamp;
 	int64_t source_timestamp;
 	uint64_t source_sequence; //!< sequence id
-	uint64_t source_id;       //!< Which @ref xrt_fs this frame originated from.
+	uint64_t source_id;       //!< Which @ref xrt_ds this frame originated from.
 };
 
 

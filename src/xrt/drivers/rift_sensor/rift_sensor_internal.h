@@ -34,7 +34,7 @@ struct rift_sensor_context
 struct rift_sensor
 {
 	enum rift_variant variant;
-	struct xrt_fs *frame_server;
+	struct xrt_ds *data_source;
 	struct t_camera_calibration calibration;
 	struct libusb_device_handle *hid_dev;
 	bool usb2;

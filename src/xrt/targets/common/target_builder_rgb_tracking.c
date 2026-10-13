@@ -14,7 +14,7 @@
 
 #include "xrt/xrt_prober.h"
 #include "xrt/xrt_settings.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_system.h"
 
 #include "util/u_sink.h" // IWYU pragma: keep
@@ -84,7 +84,7 @@ struct build_state
 
 	struct xrt_frame_context *xfctx;
 	struct xrt_tracking_origin *origin;
-	struct xrt_fs *xfs;
+	struct xrt_ds *xds;
 	struct xrt_tracked_psvr *psvr;
 	struct xrt_tracked_psmv *psmv_red;
 	struct xrt_tracked_psmv *psmv_purple;
@@ -101,7 +101,7 @@ on_video_device(struct xrt_prober *xp,
 {
 	struct build_state *build = (struct build_state *)ptr;
 
-	if (build->xfs != NULL || product == NULL) {
+	if (build->xds != NULL || product == NULL) {
 		return;
 	}
 
@@ -109,7 +109,7 @@ on_video_device(struct xrt_prober *xp,
 		return;
 	}
 
-	xrt_prober_open_video_device(xp, pdev, build->xfctx, &build->xfs);
+	xrt_prober_open_video_device(xp, pdev, build->xfctx, &build->xds);
 }
 
 static void
@@ -119,7 +119,7 @@ setup_pipeline(struct xrt_prober *xp, struct build_state *build)
 
 	xrt_prober_list_video_devices(xp, on_video_device, build);
 
-	if (build->xfs == NULL) {
+	if (build->xds == NULL) {
 		return;
 	}
 
@@ -194,7 +194,7 @@ setup_pipeline(struct xrt_prober *xp, struct build_state *build)
 	u_sink_quirk_create(build->xfctx, xsink, &qp, &xsink);
 
 	// Start the stream now.
-	xrt_fs_frame_stream_start(build->xfs, xsink, XRT_FS_CAPTURE_TYPE_TRACKING, build->settings.camera_mode);
+	xrt_ds_frame_stream_start(build->xds, xsink, XRT_DS_CAPTURE_TYPE_TRACKING, build->settings.camera_mode);
 }
 #endif
 

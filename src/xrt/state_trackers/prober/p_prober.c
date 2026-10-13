@@ -123,7 +123,7 @@ static int
 p_open_video_device(struct xrt_prober *xp,
                     struct xrt_prober_device *xpdev,
                     struct xrt_frame_context *xfctx,
-                    struct xrt_fs **out_xfs);
+                    struct xrt_ds **out_xds);
 
 static int
 p_list_video_devices(struct xrt_prober *xp, xrt_prober_list_video_func_t cb, void *ptr);
@@ -1332,7 +1332,7 @@ static int
 p_open_video_device(struct xrt_prober *xp,
                     struct xrt_prober_device *xpdev,
                     struct xrt_frame_context *xfctx,
-                    struct xrt_fs **out_xfs)
+                    struct xrt_ds **out_xds)
 {
 	XRT_TRACE_MARKER();
 
@@ -1341,9 +1341,9 @@ p_open_video_device(struct xrt_prober *xp,
 #if defined(XRT_BUILD_DRIVER_VF)
 	const char *path = debug_get_option_vf_path();
 	if (path != NULL) {
-		struct xrt_fs *xfs = vf_fs_open_file(xfctx, path);
-		if (xfs) {
-			*out_xfs = xfs;
+		struct xrt_ds *xds = vf_ds_open_file(xfctx, path);
+		if (xds) {
+			*out_xds = xds;
 			return 0;
 		}
 	}
@@ -1352,7 +1352,7 @@ p_open_video_device(struct xrt_prober *xp,
 #if defined(XRT_BUILD_DRIVER_EUROC)
 	const char *euroc_path = debug_get_option_euroc_path();
 	if (euroc_path != NULL) {
-		*out_xfs = euroc_player_create(xfctx, euroc_path, NULL); // Euroc will exit if it can't be created
+		*out_xds = euroc_player_create(xfctx, euroc_path, NULL); // Euroc will exit if it can't be created
 		return 0;
 	}
 #endif
@@ -1360,7 +1360,7 @@ p_open_video_device(struct xrt_prober *xp,
 #if defined(XRT_BUILD_DRIVER_REALSENSE)
 	int rs_source_index = debug_get_num_option_rs_source_index();
 	if (rs_source_index != -1) {
-		*out_xfs = rs_source_create(xfctx, rs_source_index);
+		*out_xds = rs_source_create(xfctx, rs_source_index);
 		return 0;
 	}
 #endif
@@ -1370,13 +1370,13 @@ p_open_video_device(struct xrt_prober *xp,
 		return -1;
 	}
 
-	struct xrt_fs *xfs =
-	    v4l2_fs_create(xfctx, pdev->v4ls[0].path, pdev->usb.product, pdev->usb.manufacturer, pdev->usb.serial);
-	if (xfs == NULL) {
+	struct xrt_ds *xds =
+	    v4l2_ds_create(xfctx, pdev->v4ls[0].path, pdev->usb.product, pdev->usb.manufacturer, pdev->usb.serial);
+	if (xds == NULL) {
 		return -1;
 	}
 
-	*out_xfs = xfs;
+	*out_xds = xds;
 	return 0;
 #else
 	return -1;

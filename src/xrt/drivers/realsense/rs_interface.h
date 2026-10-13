@@ -33,6 +33,13 @@ struct xrt_frame_context;
 #define RS_TRACKING_DEVICE_SLAM 1
 #define RS_TRACKING_HOST_SLAM 2
 
+
+/*
+ *
+ * SLAM tracking data source/xrt_device
+ *
+ */
+
 /*!
  * Create a auto prober for rs devices.
  *
@@ -45,12 +52,12 @@ rs_create_auto_prober(void);
  * Creates a RealSense SLAM source from the appropriate @p device_idx.
  * The streaming configuration is loaded from the global config file.
  *
- * @param xfctx Frame context this frameserver lifetime is tied to.
+ * @param xfctx Frame context this data source lifetime is tied to.
  * @param device_idx Index of the realsense device to use. Usually 0 if you only
  * have one RealSense device.
- * @return Frameserver with SLAM streaming capabilities.
+ * @return DataSource with SLAM streaming capabilities.
  */
-struct xrt_fs *
+struct xrt_ds *
 rs_source_create(struct xrt_frame_context *xfctx, int device_idx);
 
 /*!

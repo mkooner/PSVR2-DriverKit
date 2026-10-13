@@ -12,8 +12,10 @@
  */
 #pragma once
 
+#include "xrt/xrt_data_source.h"
+
 #include "wmr_controller_base.h"
-#include "xrt/xrt_frameserver.h"
+
 
 struct wmr_controller_base *
 wmr_controller_create(struct wmr_controller_connection *conn,
@@ -21,4 +23,4 @@ wmr_controller_create(struct wmr_controller_connection *conn,
                       uint16_t vid,
                       uint16_t pid,
                       enum u_logging_level log_level,
-                      struct xrt_fs *src);
+                      struct xrt_ds *src);

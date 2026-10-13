@@ -9,7 +9,7 @@
 
 #pragma once
 
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 
 
 #ifdef __cplusplus
@@ -17,27 +17,27 @@ extern "C" {
 #endif
 
 /*!
- * @defgroup drv_vf Video Fileframeserver driver
+ * @defgroup drv_vf Video File data source driver
  * @ingroup drv
  *
- * @brief Frameserver using a video file.
+ * @brief DataSource using a video file.
  */
 
 /*!
- * Create a vf frameserver by opening a video file.
+ * Create a vf data source by opening a video file.
  *
  * @ingroup drv_vf
  */
-struct xrt_fs *
-vf_fs_open_file(struct xrt_frame_context *xfctx, const char *path);
+struct xrt_ds *
+vf_ds_open_file(struct xrt_frame_context *xfctx, const char *path);
 
 /*!
- * Create a vf frameserver that uses the videotestsource.
+ * Create a vf data source that uses the videotestsource.
  *
  * @ingroup drv_vf
  */
-struct xrt_fs *
-vf_fs_videotestsource(struct xrt_frame_context *xfctx, uint32_t width, uint32_t height);
+struct xrt_ds *
+vf_ds_videotestsource(struct xrt_frame_context *xfctx, uint32_t width, uint32_t height);
 
 
 #ifdef __cplusplus

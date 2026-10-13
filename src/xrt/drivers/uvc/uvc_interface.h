@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  Public interface for userspace UVC frameserver implementation
+ * @brief  Public interface for userspace UVC data source implementation
  * @author Philipp Zabel <philipp.zabel@gmail.com>
  * @author Jan Schmidt <jan@centricular.com>
  * @author Beyley Cardellio <ep1cm1n10n123@gmail.com>
@@ -15,7 +15,7 @@
 
 #include "xrt/xrt_byte_order.h"
 #include "xrt/xrt_frame.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 
 #include "util/u_time.h"
 
@@ -73,7 +73,7 @@ struct uvc_stream_parameters
 	size_t stride;
 };
 
-struct uvc_fs;
+struct uvc_ds;
 
 int
 uvc_set_cur(libusb_device_handle *devh,
@@ -112,17 +112,17 @@ typedef bool (*post_init_callback_t)(uint16_t vid,               //< The VID of 
 );
 
 int
-uvc_fs_create(libusb_context *usb_ctx,
+uvc_ds_create(libusb_context *usb_ctx,
               libusb_device_handle *devh,
               const struct libusb_device_descriptor *desc,
               setup_stream_parameters_callback_t setup_stream_parameters_callback,
               post_init_callback_t post_init_callback,
               void *user_data,
               struct xrt_frame_context *xfctx,
-              struct xrt_fs **stream);
+              struct xrt_ds **stream);
 
 int
-uvc_fs_destroy(struct xrt_fs *stream);
+uvc_ds_destroy(struct xrt_ds *stream);
 
 void
-uvc_fs_set_source_timestamp_callback(struct xrt_fs *stream, get_frame_timestamp_t callback, void *user_data);
+uvc_ds_set_source_timestamp_callback(struct xrt_ds *stream, get_frame_timestamp_t callback, void *user_data);

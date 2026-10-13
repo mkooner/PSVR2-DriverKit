@@ -9,6 +9,11 @@
  */
 
 #include "xrt/xrt_config_have.h"
+#include "xrt/xrt_frame.h"
+#include "xrt/xrt_prober.h"
+#include "xrt/xrt_tracking.h"
+#include "xrt/xrt_settings.h"
+#include "xrt/xrt_data_source.h"
 
 #include "os/os_time.h"
 
@@ -21,12 +26,6 @@
 #ifdef XRT_HAVE_OPENCV
 #include "tracking/t_tracking.h"
 #endif
-
-#include "xrt/xrt_frame.h"
-#include "xrt/xrt_prober.h"
-#include "xrt/xrt_tracking.h"
-#include "xrt/xrt_settings.h"
-#include "xrt/xrt_frameserver.h"
 
 #include "math/m_api.h"
 #include "math/m_filter_fifo.h"
@@ -883,7 +882,7 @@ curated_on_root_enter(struct u_var_root_info *info, void *priv)
 	CHECK_RAW("Prober", SEARCH_INVALID);
 	CHECK_RAW("SLAM Tracker", SEARCH_SLAM_TRACKER);
 	CHECK_RAW("Vive Device", SEARCH_INVALID);
-	CHECK_RAW("V4L2 Frameserver", SEARCH_INVALID);
+	CHECK_RAW("V4L2 Data Source", SEARCH_INVALID);
 	CHECK_RAW("Hand-tracking async shim!", SEARCH_INVALID);
 	CHECK_RAW("Controller emulation!", SEARCH_INVALID);
 	CHECK_RAW("Camera-based Hand Tracker", SEARCH_HAND_TRACKER);

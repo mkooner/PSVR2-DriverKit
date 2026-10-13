@@ -11,7 +11,7 @@
 
 #include "util/u_sink.h"
 #include "xrt/xrt_defines.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_results.h"
 #include "xrt/xrt_tracking.h"
 #include "xrt/xrt_config_have.h"

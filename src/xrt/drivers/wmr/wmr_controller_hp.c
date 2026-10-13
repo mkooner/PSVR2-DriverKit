@@ -288,7 +288,7 @@ struct wmr_controller_base *
 wmr_controller_hp_create(struct wmr_controller_connection *conn,
                          enum xrt_device_type controller_type,
                          enum u_logging_level log_level,
-                         struct xrt_fs *src)
+                         struct xrt_ds *src)
 {
 	DRV_TRACE_MARKER();
 

@@ -23,7 +23,7 @@
 #include "xrt/xrt_prober.h"
 #include "xrt/xrt_settings.h"
 #include "xrt/xrt_tracking.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 
 #include "gui_common.h"
 #include "gui_imgui.h"
@@ -45,7 +45,7 @@ struct calibration_scene
 #endif
 
 	struct xrt_frame_context *xfctx;
-	struct xrt_fs *xfs;
+	struct xrt_ds *xds;
 	struct xrt_settings_tracking *settings;
 
 	char filename[16];
@@ -370,9 +370,9 @@ scene_render_select(struct gui_scene *scene, struct gui_program *p)
 		sinks.cam_count = 2;
 		u_sink_combiner_create(cs->xfctx, tmp, &sinks.cams[0], &sinks.cams[1]);
 
-		xrt_fs_tracking_streams_start(cs->xfs, &sinks);
+		xrt_ds_tracking_streams_start(cs->xds, &sinks);
 	} else {
-		xrt_fs_frame_stream_start(cs->xfs, cali, XRT_FS_CAPTURE_TYPE_CALIBRATION, cs->settings->camera_mode);
+		xrt_ds_frame_stream_start(cs->xds, cali, XRT_DS_CAPTURE_TYPE_CALIBRATION, cs->settings->camera_mode);
 	}
 
 #else
@@ -411,7 +411,7 @@ scene_destroy(struct gui_scene *scene, struct gui_program *p)
 void
 gui_scene_calibrate(struct gui_program *p,
                     struct xrt_frame_context *xfctx,
-                    struct xrt_fs *xfs,
+                    struct xrt_ds *xds,
                     struct xrt_settings_tracking *s)
 {
 	struct calibration_scene *cs = U_TYPED_CALLOC(struct calibration_scene);
@@ -419,7 +419,7 @@ gui_scene_calibrate(struct gui_program *p,
 	cs->base.render = scene_render_select;
 	cs->base.destroy = scene_destroy;
 	cs->xfctx = xfctx;
-	cs->xfs = xfs;
+	cs->xds = xds;
 	cs->settings = s;
 
 #ifdef XRT_HAVE_OPENCV
@@ -430,7 +430,7 @@ gui_scene_calibrate(struct gui_program *p,
 	 */
 
 	// PS4 Camera.
-	if (strcmp(xfs->name, "USB Camera-OV580: USB Camera-OV") == 0) {
+	if (strcmp(xds->name, "USB Camera-OV580: USB Camera-OV") == 0) {
 		// It's one speedy camera. :)
 		cs->params.num_cooldown_frames = 240;
 		cs->params.num_wait_for = 10;
@@ -440,15 +440,15 @@ gui_scene_calibrate(struct gui_program *p,
 	}
 
 	// Leap Motion.
-	if (strcmp(xfs->name, "Leap Motion Controller") == 0) {
+	if (strcmp(xds->name, "Leap Motion Controller") == 0) {
 		cs->params.use_fisheye = true;
 		cs->params.stereo_sbs = true;
 		cs->settings->camera_type = XRT_SETTINGS_CAMERA_TYPE_LEAP_MOTION;
 		snprintf(cs->filename, sizeof(cs->filename), "LeapMotion");
 	}
 
-	bool valve = strcmp(xfs->name, "3D Camera: eTronVideo") == 0;
-	bool elp = strcmp(xfs->name, "3D USB Camera: 3D USB Camera") == 0;
+	bool valve = strcmp(xds->name, "3D Camera: eTronVideo") == 0;
+	bool elp = strcmp(xds->name, "3D USB Camera: 3D USB Camera") == 0;
 
 	if (valve) {
 		snprintf(cs->filename, sizeof(cs->filename), "Index");

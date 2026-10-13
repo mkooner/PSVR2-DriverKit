@@ -21,7 +21,7 @@ This page covers how they work, how to use them, and their limitations.
 |---------|--------|-------------|-----------------|
 | `@ref DeviceBase` | `glue/g_device.hpp` | `@ref xrt_device` | `fromXDev()` |
 | `@ref HandTrackerBase` | `glue/g_hand_tracker.hpp` | `@ref xrt_hand_tracker` | `fromXHT()` |
-| `@ref FrameServerBase` | `glue/g_frameserver.hpp` | `@ref xrt_fs` | `fromXFS()` |
+| `@ref DataSourceBase` | `glue/g_data_source.hpp` | `@ref xrt_ds` | `fromXDS()` |
 | `@ref FrameNodeBase` | `glue/g_frame_node.hpp` | `@ref xrt_frame_node` | `fromFrameNode()` |
 
 All wrappers live in namespace `xrt::util`. The callback wrappers use

@@ -10,7 +10,7 @@
 #include "xrt/xrt_config_build.h"
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_frame.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_tracking.h"
 
 #include "os/os_time.h"
@@ -108,8 +108,8 @@ euroc_run_dataset(const char *euroc_path,
 	t_slam_start(xts);
 
 	// Stream euroc player into the tracker
-	struct xrt_fs *xfs = euroc_player_create(&xfctx, euroc_path, ep_config);
-	xrt_fs_tracking_streams_start(xfs, sinks);
+	struct xrt_ds *xds = euroc_player_create(&xfctx, euroc_path, ep_config);
+	xrt_ds_tracking_streams_start(xds, sinks);
 
 	// Let's loop until both the player and the tracker finish
 
@@ -120,7 +120,7 @@ euroc_run_dataset(const char *euroc_path,
 
 	bool tracking = true;
 	bool streaming = false;
-	xrt_result_t xret = xrt_fs_is_running(xfs, &streaming);
+	xrt_result_t xret = xrt_ds_is_running(xds, &streaming);
 	if (xret != XRT_SUCCESS) {
 		streaming = false;
 		U_LOG_E("Failed to get state of stream, got %s", u_str_xrt_result(xret));
@@ -132,7 +132,7 @@ euroc_run_dataset(const char *euroc_path,
 		xrt_tracked_slam_get_tracked_pose(xts, os_monotonic_get_ns(), &b);
 		tracking = memcmp(&a, &b, sizeof(struct xrt_space_relation)) != 0;
 
-		xret = xrt_fs_is_running(xfs, &streaming);
+		xret = xrt_ds_is_running(xds, &streaming);
 		if (xret != XRT_SUCCESS) {
 			streaming = false;
 			U_LOG_E("Failed to get state of stream, got %s", u_str_xrt_result(xret));

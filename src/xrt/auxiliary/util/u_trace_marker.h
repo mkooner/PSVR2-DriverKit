@@ -366,7 +366,7 @@ u_trace_scope_cleanup(TracyCZoneCtx *ctx_ptr)
 	C(drv, "drv")       /* Driver calls */                                                                         \
 	C(ipc, "ipc")       /* IPC calls */                                                                            \
 	C(oxr, "st/oxr")    /* OpenXR State Tracker calls */                                                           \
-	C(sink, "sink")     /* Sink/frameserver calls */                                                               \
+	C(sink, "sink")     /* Sink/data source calls */                                                               \
 	C(comp, "comp")     /* Compositor calls  */                                                                    \
 	C(sc, "sc")         /* Swapchain calls  */                                                                     \
 	C(track, "track")   /* Tracking calls  */                                                                      \

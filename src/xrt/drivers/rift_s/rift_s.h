@@ -21,7 +21,6 @@
 #include "util/u_logging.h"
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_frame.h"
-#include "xrt/xrt_frameserver.h"
 #include "xrt/xrt_prober.h"
 #include "xrt/xrt_tracking.h"
 

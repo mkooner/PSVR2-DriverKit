@@ -8,7 +8,7 @@
  */
 
 #include "xrt/xrt_config_drivers.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_tracking.h"
 
 #include "util/u_debug.h"
@@ -46,11 +46,11 @@ gui_scene_euroc_playback(struct gui_program *p, const char *path)
 	struct xrt_system_devices *xsysd = &bsysd->base;
 
 	// Aborts if path isn't a valid EuRoC dataset.
-	struct xrt_fs *xfs = euroc_player_create(&bsysd->xfctx, path, NULL);
+	struct xrt_ds *xds = euroc_player_create(&bsysd->xfctx, path, NULL);
 
 	// No downstream consumers, the player still feeds its own UI sinks and IMU plots.
-	struct xrt_slam_sinks sinks = {0};
-	xrt_result_t xret = xrt_fs_slam_stream_start(xfs, &sinks);
+	struct xrt_tracking_sinks sinks = {0};
+	xrt_result_t xret = xrt_ds_tracking_streams_start(xds, &sinks);
 	if (xret != XRT_SUCCESS) {
 		U_LOG_E("Failed to start EuRoC playback: %s", u_str_xrt_result(xret));
 		xrt_system_devices_destroy(&xsysd);

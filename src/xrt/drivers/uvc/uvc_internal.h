@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  Userspace UVC frameserver implementation
+ * @brief  Userspace UVC data source implementation
  * @author Philipp Zabel <philipp.zabel@gmail.com>
  * @author Jan Schmidt <jan@centricular.com>
  * @author Beyley Cardellio <ep1cm1n10n123@gmail.com>
@@ -22,9 +22,9 @@
 #include "uvc_interface.h"
 
 
-struct uvc_fs
+struct uvc_ds
 {
-	struct xrt_fs base;
+	struct xrt_ds base;
 
 	struct xrt_frame_node node;
 
@@ -32,7 +32,7 @@ struct uvc_fs
 
 	enum u_logging_level log_level;
 
-	struct xrt_fs_mode mode;
+	struct xrt_ds_frame_mode mode;
 
 	//! Target sink
 	struct xrt_frame_sink *sink;

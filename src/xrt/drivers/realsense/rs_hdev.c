@@ -14,7 +14,7 @@
  */
 
 #include "xrt/xrt_device.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_frame.h"
 #include "xrt/xrt_prober.h"
 #include "xrt/xrt_config_have.h"
@@ -32,7 +32,7 @@
 #include "util/u_sink.h"
 #include "util/u_config_json.h"
 #include "util/u_format.h"
-#include "util/u_frameserver.h"
+#include "util/u_data_source.h"
 
 #include "tracking/t_tracking.h"
 
@@ -133,12 +133,12 @@ struct rs_hdev
 /*!
  * RealSense source of camera and IMU data.
  *
- * @implements xrt_fs
+ * @implements xrt_ds
  * @implements xrt_frame_node
  */
 struct rs_source
 {
-	struct xrt_fs xfs;
+	struct xrt_ds xds;
 	struct xrt_frame_node node;
 	enum u_logging_level log_level; //!< Log level
 
@@ -599,7 +599,7 @@ rs2xrt_frame(struct rs_source *rs, rs2_frame *rframe, struct xrt_frame **out_xfr
 	// xf->timestamp = timestamp_ns;
 	xf->source_timestamp = timestamp_ns;
 	xf->source_sequence = number;
-	xf->source_id = rs->xfs.source_id;
+	xf->source_id = rs->xds.source_id;
 
 	*out_xframe = xf;
 }
@@ -803,22 +803,22 @@ rs_source_apply_changes_ctn_cb(void *ptr)
 
 /*
  *
- * Frameserver functionality
+ * DataSource functionality
  *
  */
 
 static inline struct rs_source *
-rs_source_from_xfs(struct xrt_fs *xfs)
+rs_source_from_xds(struct xrt_ds *xds)
 {
-	struct rs_source *rs = container_of(xfs, struct rs_source, xfs);
+	struct rs_source *rs = container_of(xds, struct rs_source, xds);
 	return rs;
 }
 
 static xrt_result_t
-rs_source_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+rs_source_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **out_modes, uint32_t *out_count)
 {
-	struct rs_source *rs = container_of(xfs, struct rs_source, xfs);
-	struct xrt_fs_mode *modes = U_TYPED_ARRAY_CALLOC(struct xrt_fs_mode, 1);
+	struct rs_source *rs = container_of(xds, struct rs_source, xds);
+	struct xrt_ds_frame_mode *modes = U_TYPED_ARRAY_CALLOC(struct xrt_ds_frame_mode, 1);
 	if (modes == NULL) {
 		RS_ERROR(rs, "Unable to calloc rs_source playback modes");
 		return XRT_ERROR_ALLOCATION;
@@ -826,7 +826,7 @@ rs_source_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_mod
 
 	//! @todo only exposing the one stream configuration the user provided through
 	//! the json configuration but we could show all possible stream setups.
-	modes[0] = (struct xrt_fs_mode){
+	modes[0] = (struct xrt_ds_frame_mode){
 	    .width = rs->video_width,
 	    .height = rs->video_height,
 	    .format = rs->xrt_video_format,
@@ -842,18 +842,18 @@ rs_source_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_mod
 }
 
 static xrt_result_t
-rs_source_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *cp)
+rs_source_configure_capture(struct xrt_ds *xds, struct xrt_ds_frame_capture_parameters *cp)
 {
 	//! @todo implement
-	struct rs_source *rs = rs_source_from_xfs(xfs);
+	struct rs_source *rs = rs_source_from_xds(xds);
 	RS_WARN(rs, "Capture parameters is not implemented.");
 	return XRT_SUCCESS;
 }
 
 static xrt_result_t
-rs_source_stream_stop(struct xrt_fs *xfs)
+rs_source_stream_stop(struct xrt_ds *xds)
 {
-	struct rs_source *rs = rs_source_from_xfs(xfs);
+	struct rs_source *rs = rs_source_from_xds(xds);
 	if (rs->is_running) {
 		DO(rs2_pipeline_stop, rs->rsc.pipeline);
 		rs->is_running = false;
@@ -862,24 +862,24 @@ rs_source_stream_stop(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-rs_source_is_running(struct xrt_fs *xfs, bool *out_is_running)
+rs_source_is_running(struct xrt_ds *xds, bool *out_is_running)
 {
-	struct rs_source *rs = rs_source_from_xfs(xfs);
+	struct rs_source *rs = rs_source_from_xds(xds);
 	(*out_is_running) = rs->is_running;
 	return XRT_SUCCESS;
 }
 
 static xrt_result_t
-rs_source_frame_stream_start(struct xrt_fs *xfs,
+rs_source_frame_stream_start(struct xrt_ds *xds,
                              struct xrt_frame_sink *xs,
-                             enum xrt_fs_capture_type capture_type,
+                             enum xrt_ds_capture_type capture_type,
                              uint32_t frame_mode_index)
 {
-	struct rs_source *rs = rs_source_from_xfs(xfs);
-	if (xs == NULL && capture_type == XRT_FS_CAPTURE_TYPE_TRACKING) {
+	struct rs_source *rs = rs_source_from_xds(xds);
+	if (xs == NULL && capture_type == XRT_DS_CAPTURE_TYPE_TRACKING) {
 		RS_ASSERT(rs->out_sinks.cams[0] != NULL, "No left sink provided");
 		RS_INFO(rs, "Starting RealSense stream in tracking mode");
-	} else if (xs != NULL && capture_type == XRT_FS_CAPTURE_TYPE_CALIBRATION) {
+	} else if (xs != NULL && capture_type == XRT_DS_CAPTURE_TYPE_CALIBRATION) {
 		RS_INFO(rs, "Starting RealSense stream in calibration mode, will stream only left frames");
 		rs->out_sinks.cam_count = 1;
 		rs->out_sinks.cams[0] = xs;
@@ -901,11 +901,11 @@ rs_source_frame_stream_start(struct xrt_fs *xfs,
 }
 
 static xrt_result_t
-rs_source_tracking_streams_start(struct xrt_fs *xfs, struct xrt_tracking_sinks *sinks)
+rs_source_tracking_streams_start(struct xrt_ds *xds, struct xrt_tracking_sinks *sinks)
 {
-	struct rs_source *rs = rs_source_from_xfs(xfs);
+	struct rs_source *rs = rs_source_from_xds(xds);
 	rs->out_sinks = *sinks;
-	return rs_source_frame_stream_start(xfs, NULL, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
+	return rs_source_frame_stream_start(xds, NULL, XRT_DS_CAPTURE_TYPE_TRACKING, 0);
 }
 
 
@@ -970,7 +970,7 @@ static void
 rs_source_node_break_apart(struct xrt_frame_node *node)
 {
 	struct rs_source *rs = container_of(node, struct rs_source, node);
-	rs_source_stream_stop(&rs->xfs);
+	rs_source_stream_stop(&rs->xds);
 }
 
 static void
@@ -1041,27 +1041,27 @@ rs_hdev_create(struct xrt_prober *xp, int device_idx)
 	return xd;
 }
 
-//! Create and open the frame server for IMU/camera streaming.
-struct xrt_fs *
+//! Create and open the data source for IMU/camera streaming.
+struct xrt_ds *
 rs_source_create(struct xrt_frame_context *xfctx, int device_idx)
 {
 	struct rs_source *rs = U_TYPED_CALLOC(struct rs_source);
 	rs->log_level = debug_get_log_option_rs_log();
 
-	// Setup xrt_fs
-	struct xrt_fs *xfs = &rs->xfs;
-	u_frameserver_populate_function_pointers(xfs);
-	xfs->enumerate_frame_modes = rs_source_enumerate_frame_modes;
-	xfs->configure_capture = rs_source_configure_capture;
-	xfs->frame_stream_start = rs_source_frame_stream_start;
-	xfs->tracking_streams_start = rs_source_tracking_streams_start;
-	xfs->stream_stop = rs_source_stream_stop;
-	xfs->is_running = rs_source_is_running;
-	snprintf(xfs->name, sizeof(xfs->name), RS_SOURCE_STR);
-	snprintf(xfs->product, sizeof(xfs->product), RS_SOURCE_STR " Product");
-	snprintf(xfs->manufacturer, sizeof(xfs->manufacturer), RS_SOURCE_STR " Manufacturer");
-	snprintf(xfs->serial, sizeof(xfs->serial), RS_SOURCE_STR " Serial");
-	xfs->source_id = 0x2EA15E115E;
+	// Setup xrt_ds
+	struct xrt_ds *xds = &rs->xds;
+	u_data_source_populate_function_pointers(xds);
+	xds->enumerate_frame_modes = rs_source_enumerate_frame_modes;
+	xds->configure_capture = rs_source_configure_capture;
+	xds->frame_stream_start = rs_source_frame_stream_start;
+	xds->tracking_streams_start = rs_source_tracking_streams_start;
+	xds->stream_stop = rs_source_stream_stop;
+	xds->is_running = rs_source_is_running;
+	snprintf(xds->name, sizeof(xds->name), RS_SOURCE_STR);
+	snprintf(xds->product, sizeof(xds->product), RS_SOURCE_STR " Product");
+	snprintf(xds->manufacturer, sizeof(xds->manufacturer), RS_SOURCE_STR " Manufacturer");
+	snprintf(xds->serial, sizeof(xds->serial), RS_SOURCE_STR " Serial");
+	xds->source_id = 0x2EA15E115E;
 
 	// Setup realsense pipeline data
 	struct rs_container *rsc = &rs->rsc;
@@ -1146,5 +1146,5 @@ rs_source_create(struct xrt_frame_context *xfctx, int device_idx)
 	// Setup IMU synchronizer lock
 	os_mutex_init(&rs->partial_imu_sample.mutex);
 
-	return xfs;
+	return xds;
 }

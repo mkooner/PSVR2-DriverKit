@@ -282,7 +282,7 @@ typedef enum xrt_result
 	XRT_ERROR_USB_COMMAND_FAILED = -46,
 
 	/*!
-	 * The frameserver stream failed to start for some unknown reason, check the logs for more information.
+	 * The data source stream failed to start for some unknown reason, check the logs for more information.
 	 *
 	 * This does not, however, indicate a permanent inability to start the stream. Other modes may work.
 	 */

@@ -313,7 +313,7 @@ rift_s_tracker_add_debug_ui(struct rift_s_tracker *t, void *root)
  *
  * Determines which trackers to initialize
  *
- * @param xfctx the frame server that will own processing nodes
+ * @param xfctx the frame context that will own processing nodes
  * @param hmd_config HMD configuration and firmware info
  *
  * @return initialised tracker on success, NULL if creation fails

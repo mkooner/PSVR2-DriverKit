@@ -2,16 +2,18 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  V4L2 frameserver common definitions
+ * @brief  V4L2 data source common definitions
  * @author Pete Black <pblack@collabora.com>
  * @author Jakob Bornecrantz <jakob@collabora.com>
  * @ingroup drv_v4l2
  */
 
 
+#include "xrt/xrt_data_source.h"
+
 #include "util/u_logging.h"
 #include "util/u_sink.h"
-#include "xrt/xrt_frameserver.h"
+
 #include <linux/videodev2.h>
 
 
@@ -74,11 +76,11 @@ struct v4l2_control_state
  * A single open v4l2 capture device, starts its own thread and waits on it.
  *
  * @implements xrt_frame_node
- * @implements xrt_fs
+ * @implements xrt_ds
  */
-struct v4l2_fs
+struct v4l2_ds
 {
-	struct xrt_fs base;
+	struct xrt_ds base;
 
 	struct xrt_frame_node node;
 
@@ -92,7 +94,7 @@ struct v4l2_fs
 		bool timeperframe;
 	} has;
 
-	enum xrt_fs_capture_type capture_type;
+	enum xrt_ds_capture_type capture_type;
 	struct v4l2_control_state states[256];
 	size_t num_states;
 
@@ -118,7 +120,7 @@ struct v4l2_fs
 	uint32_t num_descriptors;
 	uint32_t selected;
 
-	struct xrt_fs_capture_parameters capture_params;
+	struct xrt_ds_frame_capture_parameters capture_params;
 
 	bool is_configured;
 	bool is_running;
@@ -128,8 +130,8 @@ struct v4l2_fs
 /*!
  * Cast to derived type.
  */
-static inline struct v4l2_fs *
-v4l2_fs(struct xrt_fs *xfs)
+static inline struct v4l2_ds *
+v4l2_ds(struct xrt_ds *xds)
 {
-	return (struct v4l2_fs *)xfs;
+	return (struct v4l2_ds *)xds;
 }

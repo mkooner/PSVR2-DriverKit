@@ -11,7 +11,7 @@
 
 #include "xrt/xrt_frame.h"
 #include "xrt/xrt_tracking.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 
 #include "os/os_threading.h"
 
@@ -20,8 +20,8 @@
 #include "util/u_time.h"
 #include "util/u_var.h"
 #include "util/u_sink.h"
-#include "util/u_frameserver.h"
 #include "util/u_json.hpp"
+#include "util/u_data_source.h"
 
 #include "tracking/t_frame_cv_mat_wrapper.hpp"
 #include "tracking/t_tracking.h"
@@ -159,12 +159,12 @@ enum euroc_player_ui_state : std::uint8_t
 /*!
  * Euroc player is in charge of the playback of a particular dataset.
  *
- * @implements xrt_fs
+ * @implements xrt_ds
  * @implements xrt_frame_node
  */
 struct euroc_player
 {
-	xrt_fs base;
+	xrt_ds base;
 	xrt_frame_node node;
 
 	// Sinks
@@ -176,7 +176,7 @@ struct euroc_player
 	u_logging_level log_level;             //!< Log messages with this priority and onwards
 	euroc_player_dataset_info dataset;     //!< Contains information about the source dataset
 	euroc_player_playback_config playback; //!< Playback information. Prefer to fill it before stream start
-	xrt_fs_mode mode;                      //!< The only fs mode the euroc dataset provides
+	xrt_ds_frame_mode mode;                //!< The only fs mode the euroc dataset provides
 	bool is_running;                       //!< Set only at start, stop and end of frameserver stream
 	os_thread_helper play_thread;
 
@@ -198,9 +198,9 @@ struct euroc_player
 	m_ff_vec3_f32 *accel_ffs[XRT_TRACKING_MAX_IMUS];  //!< Same as `gyro_ff`
 
 	static euroc_player *
-	fromXfs(xrt_fs *xfs)
+	fromXds(xrt_ds *xds)
 	{
-		return reinterpret_cast<euroc_player *>(xfs);
+		return reinterpret_cast<euroc_player *>(xds);
 	}
 };
 
@@ -815,8 +815,8 @@ euroc_player_sleep_until_next_sample(euroc_player *ep)
 static void *
 euroc_player_stream(void *ptr)
 {
-	xrt_fs *xfs = (xrt_fs *)ptr;
-	euroc_player *ep = euroc_player::fromXfs(xfs);
+	xrt_ds *xds = (xrt_ds *)ptr;
+	euroc_player *ep = euroc_player::fromXds(xds);
 	EUROC_INFO(ep, "Starting euroc playback");
 
 	euroc_player_preload(ep);
@@ -880,15 +880,15 @@ euroc_player_stream(void *ptr)
 }
 
 
-// Frame server functionality
+// Data source functionality
 
 static xrt_result_t
-euroc_player_enumerate_frame_modes(xrt_fs *xfs, xrt_fs_mode **out_modes, uint32_t *out_count)
+euroc_player_enumerate_frame_modes(xrt_ds *xds, xrt_ds_frame_mode **out_modes, uint32_t *out_count)
 {
-	euroc_player *ep = euroc_player::fromXfs(xfs);
+	euroc_player *ep = euroc_player::fromXds(xds);
 
 	// Should be freed by caller
-	xrt_fs_mode *modes = U_TYPED_ARRAY_CALLOC(xrt_fs_mode, 1);
+	xrt_ds_frame_mode *modes = U_TYPED_ARRAY_CALLOC(xrt_ds_frame_mode, 1);
 	if (modes == nullptr) {
 		EUROC_ERROR(ep, "Unable to calloc euroc playback modes");
 		return XRT_ERROR_ALLOCATION;
@@ -897,7 +897,7 @@ euroc_player_enumerate_frame_modes(xrt_fs *xfs, xrt_fs_mode **out_modes, uint32_
 	// At first, it would sound like a good idea to list all possible playback
 	// modes here, however it gets more troublesome than it is worth, and there
 	// doesn't seem to be a good reason to use this feature here. Having said
-	// that, a basic fs mode will be provided, which consists of only the original
+	// that, a basic frame mode will be provided, which consists of only the original
 	// properties of the dataset, and ignores the other playback options that can
 	// be tweaked in the UI.
 	modes[0] = ep->mode;
@@ -909,7 +909,7 @@ euroc_player_enumerate_frame_modes(xrt_fs *xfs, xrt_fs_mode **out_modes, uint32_
 }
 
 static xrt_result_t
-euroc_player_configure_capture(xrt_fs *xfs, xrt_fs_capture_parameters *cp)
+euroc_player_configure_capture(xrt_ds *xds, xrt_ds_frame_capture_parameters *cp)
 {
 	// Noop, this is a playback routine, there's no parameters to support.
 	return XRT_SUCCESS;
@@ -955,20 +955,20 @@ XRT_TRACKING_FOR_EACH_IMU(DEFINE_RECEIVE_IMU)
 #undef DEFINE_RECEIVE_IMU
 
 /*!
- * This is the @ref xrt_fs stream start method, however as the euroc playback
+ * This is the @ref xrt_ds stream start method, however as the euroc playback
  * is heavily customizable, it will be managed through the UI. So, unless
  * EUROC_PLAY_FROM_START is set, this will not start outputting frames until
  * the user clicks the start button.
  */
 static xrt_result_t
-euroc_player_frame_stream_start(xrt_fs *xfs,
+euroc_player_frame_stream_start(xrt_ds *xds,
                                 xrt_frame_sink *xs,
-                                xrt_fs_capture_type capture_type,
+                                xrt_ds_capture_type capture_type,
                                 uint32_t descriptor_index)
 {
-	euroc_player *ep = euroc_player::fromXfs(xfs);
+	euroc_player *ep = euroc_player::fromXds(xds);
 
-	if (xs == nullptr && capture_type == XRT_FS_CAPTURE_TYPE_TRACKING) {
+	if (xs == nullptr && capture_type == XRT_DS_CAPTURE_TYPE_TRACKING) {
 		EUROC_INFO(ep, "Starting Euroc Player in tracking mode");
 		if (ep->out_sinks.cams[0] == nullptr) {
 			EUROC_WARN(ep, "No cam0 sink provided, will keep running but tracking is unlikely to work");
@@ -976,7 +976,7 @@ euroc_player_frame_stream_start(xrt_fs *xfs,
 		if (ep->playback.play_from_start) {
 			euroc_player_start_btn_cb(ep);
 		}
-	} else if (xs != nullptr && capture_type == XRT_FS_CAPTURE_TYPE_CALIBRATION) {
+	} else if (xs != nullptr && capture_type == XRT_DS_CAPTURE_TYPE_CALIBRATION) {
 		EUROC_INFO(ep, "Starting Euroc Player in calibration mode, will stream only cam0 frames right away");
 		ep->out_sinks.cams[0] = xs;
 		euroc_player_start_btn_cb(ep);
@@ -991,17 +991,17 @@ euroc_player_frame_stream_start(xrt_fs *xfs,
 }
 
 static xrt_result_t
-euroc_player_tracking_streams_start(xrt_fs *xfs, xrt_tracking_sinks *sinks)
+euroc_player_tracking_streams_start(xrt_ds *xds, xrt_tracking_sinks *sinks)
 {
-	euroc_player *ep = euroc_player::fromXfs(xfs);
+	euroc_player *ep = euroc_player::fromXds(xds);
 	ep->out_sinks = *sinks;
-	return euroc_player_frame_stream_start(xfs, nullptr, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
+	return euroc_player_frame_stream_start(xds, nullptr, XRT_DS_CAPTURE_TYPE_TRACKING, 0);
 }
 
 static xrt_result_t
-euroc_player_stream_stop(xrt_fs *xfs)
+euroc_player_stream_stop(xrt_ds *xds)
 {
-	euroc_player *ep = euroc_player::fromXfs(xfs);
+	euroc_player *ep = euroc_player::fromXds(xds);
 	ep->is_running = false;
 
 	// Destroy also stops the thread.
@@ -1011,9 +1011,9 @@ euroc_player_stream_stop(xrt_fs *xfs)
 }
 
 static xrt_result_t
-euroc_player_is_running(xrt_fs *xfs, bool *out_is_running)
+euroc_player_is_running(xrt_ds *xds, bool *out_is_running)
 {
-	euroc_player *ep = euroc_player::fromXfs(xfs);
+	euroc_player *ep = euroc_player::fromXds(xds);
 	(*out_is_running) = ep->is_running;
 	return XRT_SUCCESS;
 }
@@ -1192,7 +1192,7 @@ euroc_player_fill_default_config_for(euroc_player_config *config, const char *da
 
 // Euroc driver creation
 
-extern "C" xrt_fs *
+extern "C" xrt_ds *
 euroc_player_create(xrt_frame_context *xfctx, const char *path, euroc_player_config *config)
 {
 	// Value-initialize so all the C members are zeroed, can't use braces as that would define a new struct.
@@ -1218,12 +1218,12 @@ euroc_player_create(xrt_frame_context *xfctx, const char *path, euroc_player_con
 		free(default_config);
 	}
 
-	ep->mode = xrt_fs_mode{
+	ep->mode = xrt_ds_frame_mode{
 	    ep->dataset.width,
 	    ep->dataset.height,
 	    ep->dataset.is_colored ? XRT_FORMAT_R8G8B8 : XRT_FORMAT_R8,
 	    // Stereo euroc *is* supported, but we don't expose that through the
-	    // xrt_fs interface as it will be managed through two different sinks.
+	    // xrt_ds interface as it will be managed through two different sinks.
 	    XRT_STEREO_FORMAT_NONE,
 	};
 	EUROC_INFO(ep, "dataset information\n\tpath: %s\n\tcam_count: %d, is_colored: %d, width: %d, height: %d",
@@ -1253,20 +1253,20 @@ euroc_player_create(xrt_frame_context *xfctx, const char *path, euroc_player_con
 	XRT_TRACKING_FOR_EACH_IMU(DEFINE_RECEIVE_IMU)
 #undef DEFINE_RECEIVE_IMU
 
-	xrt_fs *xfs = &ep->base;
-	u_frameserver_populate_function_pointers(xfs);
-	xfs->enumerate_frame_modes = euroc_player_enumerate_frame_modes;
-	xfs->configure_capture = euroc_player_configure_capture;
-	xfs->frame_stream_start = euroc_player_frame_stream_start;
-	xfs->tracking_streams_start = euroc_player_tracking_streams_start;
-	xfs->stream_stop = euroc_player_stream_stop;
-	xfs->is_running = euroc_player_is_running;
+	xrt_ds *xds = &ep->base;
+	u_data_source_populate_function_pointers(xds);
+	xds->enumerate_frame_modes = euroc_player_enumerate_frame_modes;
+	xds->configure_capture = euroc_player_configure_capture;
+	xds->frame_stream_start = euroc_player_frame_stream_start;
+	xds->tracking_streams_start = euroc_player_tracking_streams_start;
+	xds->stream_stop = euroc_player_stream_stop;
+	xds->is_running = euroc_player_is_running;
 
-	(void)snprintf(xfs->name, sizeof(xfs->name), EUROC_PLAYER_STR);
-	(void)snprintf(xfs->product, sizeof(xfs->product), EUROC_PLAYER_STR " Product");
-	(void)snprintf(xfs->manufacturer, sizeof(xfs->manufacturer), EUROC_PLAYER_STR " Manufacturer");
-	(void)snprintf(xfs->serial, sizeof(xfs->serial), EUROC_PLAYER_STR " Serial");
-	xfs->source_id = 0xECD0FEED;
+	(void)snprintf(xds->name, sizeof(xds->name), EUROC_PLAYER_STR);
+	(void)snprintf(xds->product, sizeof(xds->product), EUROC_PLAYER_STR " Product");
+	(void)snprintf(xds->manufacturer, sizeof(xds->manufacturer), EUROC_PLAYER_STR " Manufacturer");
+	(void)snprintf(xds->serial, sizeof(xds->serial), EUROC_PLAYER_STR " Serial");
+	xds->source_id = 0xECD0FEED;
 
 	xrt_frame_node *xfn = &ep->node;
 	xfn->break_apart = euroc_player_break_apart;
@@ -1276,13 +1276,13 @@ euroc_player_create(xrt_frame_context *xfctx, const char *path, euroc_player_con
 
 	EUROC_DEBUG(ep, "Euroc player created");
 
-	return xfs;
+	return xds;
 }
 
 void
-euroc_player_get_dataset_info(struct xrt_fs *xfs, const struct euroc_player_dataset_info **out_dataset_info)
+euroc_player_get_dataset_info(xrt_ds *xds, const euroc_player_dataset_info **out_dataset_info)
 {
-	euroc_player *ep = euroc_player::fromXfs(xfs);
+	euroc_player *ep = euroc_player::fromXds(xds);
 
 	(*out_dataset_info) = &ep->dataset;
 }

@@ -25,7 +25,7 @@ namespace xrt::util {
  * limitations because of that. See @ref cpp-glue-wrappers for the guide and
  * conventions for these wrappers.
  *
- * Usually inherited alongside another glue base such as @ref FrameServerBase,
+ * Usually inherited alongside another glue base such as @ref DataSourceBase,
  * so that the object is destroyed together with the @ref xrt_frame_context it
  * is added to.
  */

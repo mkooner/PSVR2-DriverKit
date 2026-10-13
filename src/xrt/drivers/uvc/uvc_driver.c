@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  Userspace UVC frameserver implementation
+ * @brief  Userspace UVC data source implementation
  * @author Philipp Zabel <philipp.zabel@gmail.com>
  * @author Jan Schmidt <jan@centricular.com>
  * @author Beyley Cardellio <ep1cm1n10n123@gmail.com>
@@ -19,7 +19,7 @@
 #endif
 
 #include "util/u_debug.h"
-#include "util/u_frameserver.h"
+#include "util/u_data_source.h"
 #include "util/u_time.h"
 
 #include "math/m_api.h"
@@ -58,16 +58,16 @@ DEBUG_GET_ONCE_LOG_OPTION(uvc_log, "UVC_LOG", U_LOGGING_WARN)
 /*!
  * Cast to derived type.
  */
-static inline struct uvc_fs *
-uvc_fs(struct xrt_fs *xfs)
+static inline struct uvc_ds *
+uvc_ds(struct xrt_ds *xds)
 {
-	return (struct uvc_fs *)xfs;
+	return (struct uvc_ds *)xds;
 }
 
 static void
 uvc_stream_release_frame(struct xrt_frame *frame)
 {
-	struct uvc_fs *stream = (struct uvc_fs *)frame->owner;
+	struct uvc_ds *stream = (struct uvc_ds *)frame->owner;
 
 	assert(frame->owner == stream);
 	assert(stream->num_free_frames < stream->num_alloced_frames);
@@ -126,7 +126,7 @@ uvc_get_cur(libusb_device_handle *dev,
 }
 
 static void
-process_payload(struct uvc_fs *stream, unsigned char *payload, size_t len)
+process_payload(struct uvc_ds *stream, unsigned char *payload, size_t len)
 {
 	struct uvc_payload_header *h = (struct uvc_payload_header *)payload;
 	size_t payload_len;
@@ -303,9 +303,9 @@ process_payload(struct uvc_fs *stream, unsigned char *payload, size_t len)
 }
 
 void
-uvc_fs_set_source_timestamp_callback(struct xrt_fs *fs, get_frame_timestamp_t callback, void *user_data)
+uvc_ds_set_source_timestamp_callback(struct xrt_ds *ds, get_frame_timestamp_t callback, void *user_data)
 {
-	struct uvc_fs *stream = uvc_fs(fs);
+	struct uvc_ds *stream = uvc_ds(ds);
 
 	stream->get_frame_timestamp = callback;
 	stream->get_frame_timestamp_user_data = user_data;
@@ -314,7 +314,7 @@ uvc_fs_set_source_timestamp_callback(struct xrt_fs *fs, get_frame_timestamp_t ca
 static void
 iso_transfer_cb(struct libusb_transfer *transfer)
 {
-	struct uvc_fs *stream = transfer->user_data;
+	struct uvc_ds *stream = transfer->user_data;
 	int ret;
 	int i;
 
@@ -370,43 +370,43 @@ iso_transfer_cb(struct libusb_transfer *transfer)
 }
 
 static xrt_result_t
-uvc_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+uvc_ds_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **out_modes, uint32_t *out_count)
 {
-	struct uvc_fs *fs = uvc_fs(xfs);
+	struct uvc_ds *ds = uvc_ds(xds);
 
-	*out_modes = U_TYPED_ARRAY_CALLOC(struct xrt_fs_mode, *out_count);
+	*out_modes = U_TYPED_ARRAY_CALLOC(struct xrt_ds_frame_mode, *out_count);
 	if ((*out_modes) == NULL) {
 		return XRT_ERROR_ALLOCATION;
 	}
 	*out_count = 1;
 
-	(**out_modes) = fs->mode;
+	(**out_modes) = ds->mode;
 
 	return XRT_SUCCESS;
 }
 
 static xrt_result_t
-uvc_fs_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *cp)
+uvc_ds_configure_capture(struct xrt_ds *xds, struct xrt_ds_frame_capture_parameters *cp)
 {
 	// @todo
 	return XRT_SUCCESS;
 }
 
 static xrt_result_t
-uvc_fs_is_running(struct xrt_fs *xfs, bool *out_is_running)
+uvc_ds_is_running(struct xrt_ds *xds, bool *out_is_running)
 {
-	struct uvc_fs *fs = uvc_fs(xfs);
+	struct uvc_ds *ds = uvc_ds(xds);
 
-	(*out_is_running) = fs->is_running;
+	(*out_is_running) = ds->is_running;
 
 	return XRT_SUCCESS;
 }
 
 static xrt_result_t
-uvc_fs_stream_stop(struct xrt_fs *xfs)
+uvc_ds_stream_stop(struct xrt_ds *xds)
 {
 	int ret;
-	struct uvc_fs *stream = uvc_fs(xfs);
+	struct uvc_ds *stream = uvc_ds(xds);
 
 	stream->is_running = false;
 
@@ -451,13 +451,13 @@ uvc_fs_stream_stop(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-uvc_fs_frame_stream_start(struct xrt_fs *xfs,
+uvc_ds_frame_stream_start(struct xrt_ds *xds,
                           struct xrt_frame_sink *xs,
-                          enum xrt_fs_capture_type capture_type,
+                          enum xrt_ds_capture_type capture_type,
                           uint32_t frame_mode_index)
 {
 	int ret;
-	struct uvc_fs *stream = uvc_fs(xfs);
+	struct uvc_ds *stream = uvc_ds(xds);
 
 	assert(!stream->is_running);
 
@@ -505,7 +505,7 @@ uvc_fs_frame_stream_start(struct xrt_fs *xfs,
 			UVC_ERROR(stream, "failed to submit iso transfer %zu. Error %d errno %d", i, ret, errno);
 			stream->active_transfers = i;
 
-			uvc_fs_stream_stop((struct xrt_fs *)stream);
+			uvc_ds_stream_stop((struct xrt_ds *)stream);
 			return XRT_ERROR_USB_COMMAND_FAILED;
 		}
 	}
@@ -515,17 +515,17 @@ uvc_fs_frame_stream_start(struct xrt_fs *xfs,
 }
 
 static void
-uvc_fs_node_break_apart(struct xrt_frame_node *node)
+uvc_ds_node_break_apart(struct xrt_frame_node *node)
 {
-	struct uvc_fs *vid = container_of(node, struct uvc_fs, node);
-	uvc_fs_stream_stop(&vid->base);
+	struct uvc_ds *vid = container_of(node, struct uvc_ds, node);
+	uvc_ds_stream_stop(&vid->base);
 }
 
 static void
-uvc_fs_node_destroy(struct xrt_frame_node *node)
+uvc_ds_node_destroy(struct xrt_frame_node *node)
 {
-	struct uvc_fs *vid = container_of(node, struct uvc_fs, node);
-	uvc_fs_destroy(&vid->base);
+	struct uvc_ds *vid = container_of(node, struct uvc_ds, node);
+	uvc_ds_destroy(&vid->base);
 }
 
 static int
@@ -547,27 +547,27 @@ uvc_get_descriptor_ascii(libusb_device_handle *devh, uint8_t index, unsigned cha
 }
 
 int
-uvc_fs_create(libusb_context *usb_ctx,
+uvc_ds_create(libusb_context *usb_ctx,
               libusb_device_handle *devh,
               const struct libusb_device_descriptor *desc,
               setup_stream_parameters_callback_t setup_stream_parameters_callback,
               post_init_callback_t post_init_callback,
               void *user_data,
               struct xrt_frame_context *xfctx,
-              struct xrt_fs **out_stream)
+              struct xrt_ds **out_stream)
 {
 	int ret;
 
-	struct uvc_fs *stream = U_TYPED_CALLOC(struct uvc_fs);
+	struct uvc_ds *stream = U_TYPED_CALLOC(struct uvc_ds);
 	stream->log_level = debug_get_log_option_uvc_log();
-	u_frameserver_populate_function_pointers(&stream->base);
-	stream->base.enumerate_frame_modes = uvc_fs_enumerate_frame_modes;
-	stream->base.configure_capture = uvc_fs_configure_capture;
-	stream->base.frame_stream_start = uvc_fs_frame_stream_start;
-	stream->base.stream_stop = uvc_fs_stream_stop;
-	stream->base.is_running = uvc_fs_is_running;
-	stream->node.break_apart = uvc_fs_node_break_apart;
-	stream->node.destroy = uvc_fs_node_destroy;
+	u_data_source_populate_function_pointers(&stream->base);
+	stream->base.enumerate_frame_modes = uvc_ds_enumerate_frame_modes;
+	stream->base.configure_capture = uvc_ds_configure_capture;
+	stream->base.frame_stream_start = uvc_ds_frame_stream_start;
+	stream->base.stream_stop = uvc_ds_stream_stop;
+	stream->base.is_running = uvc_ds_is_running;
+	stream->node.break_apart = uvc_ds_node_break_apart;
+	stream->node.destroy = uvc_ds_node_destroy;
 
 	// we're just ignoring errors...
 	uvc_get_descriptor_ascii(devh, desc->iProduct, (unsigned char *)stream->base.product,
@@ -680,7 +680,7 @@ uvc_fs_create(libusb_context *usb_ctx,
 		libusb_set_iso_packet_lengths(stream->transfer[i], packet_size);
 	}
 
-	stream->mode = (struct xrt_fs_mode){
+	stream->mode = (struct xrt_ds_frame_mode){
 	    .format = stream->parameters.format,
 	    .width = stream->parameters.width,
 	    .height = stream->parameters.height,
@@ -691,7 +691,7 @@ uvc_fs_create(libusb_context *usb_ctx,
 
 	// Start the variable tracking after we know what device we have.
 	u_sink_debug_init(&stream->usd);
-	u_var_add_root(stream, "UVC Frameserver", true);
+	u_var_add_root(stream, "UVC Data Source", true);
 	u_var_add_ro_text(stream, stream->base.product, "Card");
 	u_var_add_log_level(stream, &stream->log_level, "Log Level");
 	u_var_add_sink_debug(stream, &stream->usd, "Output");
@@ -705,9 +705,9 @@ error:
 }
 
 int
-uvc_fs_destroy(struct xrt_fs *xfs)
+uvc_ds_destroy(struct xrt_ds *xds)
 {
-	struct uvc_fs *stream = uvc_fs(xfs);
+	struct uvc_ds *stream = uvc_ds(xds);
 
 	u_var_remove_root(stream);
 

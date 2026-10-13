@@ -15,7 +15,7 @@
 #include "util/u_var.h"
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_frame.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_prober.h"
 
 #include "util/u_device.h"

@@ -8,15 +8,20 @@
  * @ingroup xrt_iface
  */
 
-#include "multi_wrapper/multi.h"
-#include "realsense/rs_interface.h"
-#include "tracking/t_hand_tracking.h"
-#include "tracking/t_tracking.h"
-
 #include "xrt/xrt_config_drivers.h"
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_prober.h"
+#include "xrt/xrt_results.h"
 #include "xrt/xrt_system.h"
+#include "xrt/xrt_tracking.h"
+
+#include "multi_wrapper/multi.h"
+
+#include "realsense/rs_interface.h"
+
+#include "tracking/t_hand_tracking.h"
+#include "tracking/t_tracking.h"
+
 
 #include "util/u_config_json.h"
 #include "util/u_debug.h"
@@ -29,13 +34,11 @@
 #include "target_builder_interface.h"
 
 #include "simula/svr_interface.h"
+
 #include "v4l2/v4l2_interface.h"
 
-#include "xrt/xrt_frameserver.h"
-#include "xrt/xrt_results.h"
-#include "xrt/xrt_tracking.h"
-
 #include <assert.h>
+
 
 DEBUG_GET_ONCE_OPTION(simula_config_path, "SIMULA_CONFIG_PATH", NULL)
 DEBUG_GET_ONCE_LOG_OPTION(svr_log, "SIMULA_LOG", U_LOGGING_WARN)

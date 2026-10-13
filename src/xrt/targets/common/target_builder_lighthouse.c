@@ -9,18 +9,21 @@
  * @ingroup xrt_iface
  */
 
-#include "tracking/t_hand_tracking.h"
-#include "tracking/t_tracking.h"
-
 #include "xrt/xrt_config_drivers.h"
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_prober.h"
+#include "xrt/xrt_data_source.h"
+#include "xrt/xrt_results.h"
+#include "xrt/xrt_tracking.h"
 
 #include "util/u_config_json.h"
 #include "util/u_debug.h"
 #include "util/u_device.h"
 #include "util/u_sink.h"
 #include "util/u_system_helpers.h"
+
+#include "tracking/t_hand_tracking.h"
+#include "tracking/t_tracking.h"
 
 #include "target_builder_helpers.h"
 #include "target_builder_interface.h"
@@ -32,10 +35,6 @@
 #include "vive/vive_device.h"
 #include "vive/vive_source.h"
 #include "v4l2/v4l2_interface.h"
-
-#include "xrt/xrt_frameserver.h"
-#include "xrt/xrt_results.h"
-#include "xrt/xrt_tracking.h"
 
 
 #include <assert.h>
@@ -115,7 +114,7 @@ struct lighthouse_system
 	enum lighthouse_driver driver; //!< Which lighthouse implementation we are using
 	bool is_valve_index; //!< Is our HMD a Valve Index? If so, try to set up hand-tracking and SLAM as needed
 	struct vive_tracking_status vive_tstatus; //!< Visual tracking status for Index under Vive driver
-	struct xrt_fs *xfs;                       //!< Frameserver for Valve Index camera, if we have one.
+	struct xrt_ds *xds;                       //!< Data source for Valve Index camera, if we have one.
 	struct vive_config *hmd_config;
 	struct t_slam_calibration slam_calib; //!< Calibration data for SLAM
 };
@@ -128,11 +127,11 @@ struct lighthouse_system
  */
 
 static uint32_t
-get_selected_mode(struct xrt_fs *xfs)
+get_selected_mode(struct xrt_ds *xds)
 {
-	struct xrt_fs_mode *modes = NULL;
+	struct xrt_ds_frame_mode *modes = NULL;
 	uint32_t count = 0;
-	xrt_fs_enumerate_frame_modes(xfs, &modes, &count);
+	xrt_ds_enumerate_frame_modes(xds, &modes, &count);
 
 	LH_ASSERT(count != 0, "No stream modes found in Index camera");
 
@@ -161,7 +160,7 @@ on_video_device(struct xrt_prober *xp,
 	// Hardcoded for the Index.
 	if (product != NULL && manufacturer != NULL) {
 		if ((strcmp(product, "3D Camera") == 0) && (strcmp(manufacturer, "Etron Technology, Inc.") == 0)) {
-			xrt_prober_open_video_device(xp, pdev, lhs->xfctx, &lhs->xfs);
+			xrt_prober_open_video_device(xp, pdev, lhs->xfctx, &lhs->xds);
 			return;
 		}
 	}
@@ -464,14 +463,14 @@ stream_data_sources(struct lighthouse_system *lhs,
                     struct xrt_prober *xp,
                     struct xrt_tracking_sinks sinks)
 {
-	// Open frame server
+	// Open data source
 	xrt_prober_list_video_devices(xp, on_video_device, lhs);
-	if (lhs->xfs == NULL) {
+	if (lhs->xds == NULL) {
 		LH_WARN("Couldn't find Index camera at all. Is it plugged in?");
 		return false;
 	}
 
-	uint32_t mode = get_selected_mode(lhs->xfs);
+	uint32_t mode = get_selected_mode(lhs->xds);
 
 	// If SLAM is enabled (only on vive driver) we intercept the data sink
 	if (lhs->vive_tstatus.slam_enabled) {
@@ -482,7 +481,7 @@ stream_data_sources(struct lighthouse_system *lhs,
 		vive_source_hook_into_sinks(vive_head->source, &sinks);
 	}
 
-	xrt_result_t xret = xrt_fs_frame_stream_start(lhs->xfs, sinks.cams[0], XRT_FS_CAPTURE_TYPE_TRACKING, mode);
+	xrt_result_t xret = xrt_ds_frame_stream_start(lhs->xds, sinks.cams[0], XRT_DS_CAPTURE_TYPE_TRACKING, mode);
 	if (xret != XRT_SUCCESS) {
 		LH_ERROR("Unable to start data streaming, got %d", xret);
 		return false;

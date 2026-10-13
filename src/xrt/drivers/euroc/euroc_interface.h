@@ -9,7 +9,9 @@
 
 #pragma once
 
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
+
+#include "util/u_logging.h"
 
 #include "tracking/t_tracking.h"
 #include "tracking/t_constellation.h"
@@ -121,14 +123,14 @@ euroc_player_fill_default_config_for(struct euroc_player_config *config, const c
  *
  * @ingroup drv_euroc
  */
-struct xrt_fs *
+struct xrt_ds *
 euroc_player_create(struct xrt_frame_context *xfctx, const char *path, struct euroc_player_config *config);
 
 /*!
  * Gets the dataset info for a EuRoC player.
  */
 void
-euroc_player_get_dataset_info(struct xrt_fs *xfs, const struct euroc_player_dataset_info **out_dataset_info);
+euroc_player_get_dataset_info(struct xrt_ds *xfs, const struct euroc_player_dataset_info **out_dataset_info);
 
 /*!
  * Create a auto prober for the fake euroc device.

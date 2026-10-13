@@ -40,8 +40,8 @@ rift_sensor_context_get_sensors(struct rift_sensor_context *context,
                                 struct rift_sensor ***out_sensors,
                                 uint32_t *out_count);
 
-struct xrt_fs *
-rift_sensor_get_frame_server(struct rift_sensor *sensor);
+struct xrt_ds *
+rift_sensor_get_data_source(struct rift_sensor *sensor);
 
 enum rift_variant
 rift_sensor_get_variant(struct rift_sensor *sensor);

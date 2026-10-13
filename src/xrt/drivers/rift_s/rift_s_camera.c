@@ -25,7 +25,7 @@
 
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_frame.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 
 #include "util/u_autoexpgain.h"
 #include "util/u_debug.h"
@@ -72,7 +72,7 @@ struct rift_s_camera_finder
 {
 	const char *hmd_serial_no;
 
-	struct xrt_fs *xfs;
+	struct xrt_ds *xds;
 	struct xrt_frame_context *xfctx;
 };
 
@@ -114,8 +114,9 @@ on_video_device(struct xrt_prober *xp,
 	struct rift_s_camera_finder *finder = (struct rift_s_camera_finder *)ptr;
 
 	/* Already found a device? */
-	if (finder->xfs != NULL)
+	if (finder->xds != NULL) {
 		return;
+	}
 
 	if (product == NULL || manufacturer == NULL || serial == NULL) {
 		return;
@@ -126,7 +127,7 @@ on_video_device(struct xrt_prober *xp,
 	if ((strcmp(product, "Rift S Sensor") == 0) && (strcmp(manufacturer, "Oculus VR") == 0)) {
 		// && (strcmp(serial, finder->hmd_serial_no) == 0)) {
 		// Serial no seems to be all zeros right now, so ignore it
-		xrt_prober_open_video_device(xp, pdev, finder->xfctx, &finder->xfs);
+		xrt_prober_open_video_device(xp, pdev, finder->xfctx, &finder->xds);
 		return;
 	}
 }
@@ -140,14 +141,14 @@ rift_s_camera_create(struct xrt_prober *xp,
                      struct rift_s_camera_calibration_block *camera_calibration)
 {
 	xrt_result_t xret;
-	struct xrt_fs_mode *modes = NULL;
+	struct xrt_ds_frame_mode *modes = NULL;
 	struct rift_s_camera_finder finder = {
 	    0,
 	};
 
 	DRV_TRACE_MARKER();
 
-	/* Set up the finder with the HMD serial number and frame server context we want */
+	/* Set up the finder with the HMD serial number and frame context we want */
 	finder.xfctx = xfctx;
 	finder.hmd_serial_no = hmd_serial_no;
 
@@ -161,7 +162,7 @@ rift_s_camera_create(struct xrt_prober *xp,
 		}
 
 		xrt_prober_list_video_devices(xp, on_video_device, &finder);
-		if (finder.xfs != NULL) {
+		if (finder.xds != NULL) {
 			break;
 		}
 
@@ -169,7 +170,7 @@ rift_s_camera_create(struct xrt_prober *xp,
 		os_nanosleep((uint64_t)U_TIME_1S_IN_NS);
 	} while (retry_count-- > 0);
 
-	if (finder.xfs == NULL) {
+	if (finder.xds == NULL) {
 		RIFT_S_ERROR("Didn't find Rift S camera device");
 		return NULL;
 	}
@@ -211,9 +212,9 @@ rift_s_camera_create(struct xrt_prober *xp,
 	struct xrt_frame_sink *tmp = &cam->in_sink;
 
 	uint32_t mode_count;
-	xret = xrt_fs_enumerate_frame_modes(finder.xfs, &modes, &mode_count);
+	xret = xrt_ds_enumerate_frame_modes(finder.xds, &modes, &mode_count);
 	if (xret != XRT_SUCCESS) {
-		RIFT_S_ERROR("Failed to enumerate frameserver modes.");
+		RIFT_S_ERROR("Failed to enumerate data source modes.");
 		goto cleanup;
 	}
 
@@ -258,10 +259,10 @@ rift_s_camera_create(struct xrt_prober *xp,
 	u_var_add_sink_debug(cam, &cam->debug_sinks[1], "Controller Streams");
 
 	/* Finally, start the video feed */
-	xret = xrt_fs_frame_stream_start(finder.xfs, tmp, XRT_FS_CAPTURE_TYPE_TRACKING, selected_mode);
+	xret = xrt_ds_frame_stream_start(finder.xds, tmp, XRT_DS_CAPTURE_TYPE_TRACKING, selected_mode);
 	if (xret != XRT_SUCCESS) {
 		//! @todo Should we try to switch to an explicit 3dof mode?
-		RIFT_S_ERROR("Failed to start frameserver stream.");
+		RIFT_S_ERROR("Failed to start data source stream.");
 		goto cleanup;
 	}
 

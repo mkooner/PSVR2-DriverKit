@@ -26,7 +26,7 @@ extern "C" {
 
 struct xrt_device;
 struct xrt_prober;
-struct xrt_fs;
+struct xrt_ds;
 struct xrt_frame_sink;
 struct xrt_frame_context;
 struct xrt_settings_tracking;
@@ -269,7 +269,7 @@ void
 gui_scene_remote(struct gui_program *p, const char *address);
 
 /*!
- * Given the frameserver runs the calibration code on it.
+ * Given the passed data source, runs the calibration code on it.
  * Claims ownership of @p s.
  *
  * @public @memberof gui_program
@@ -277,7 +277,7 @@ gui_scene_remote(struct gui_program *p, const char *address);
 void
 gui_scene_calibrate(struct gui_program *p,
                     struct xrt_frame_context *xfctx,
-                    struct xrt_fs *xfs,
+                    struct xrt_ds *xds,
                     struct xrt_settings_tracking *s);
 
 /*!

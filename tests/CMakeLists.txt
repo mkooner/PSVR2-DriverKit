@@ -8,7 +8,7 @@ set(tests
     tests_deque
     tests_generic_callbacks
     tests_glue_device
-    tests_glue_frameserver
+    tests_glue_data_source
     tests_glue_traits
     tests_history_buf
     tests_id_ringbuffer
@@ -72,7 +72,7 @@ endforeach()
 
 target_link_libraries(tests_cxx_wrappers PRIVATE xrt-interfaces)
 target_link_libraries(tests_glue_device PRIVATE xrt-interfaces aux_glue)
-target_link_libraries(tests_glue_frameserver PRIVATE xrt-interfaces aux_glue)
+target_link_libraries(tests_glue_data_source PRIVATE xrt-interfaces aux_glue)
 target_link_libraries(tests_glue_traits PRIVATE xrt-interfaces aux_glue)
 target_link_libraries(tests_history_buf PRIVATE aux_math)
 target_link_libraries(tests_lowpass_float PRIVATE aux_math)

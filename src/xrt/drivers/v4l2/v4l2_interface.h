@@ -10,17 +10,17 @@
 
 #pragma once
 
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /*!
- * @defgroup drv_v4l2 V4L2 frameserver driver
+ * @defgroup drv_v4l2 V4L2 data source driver
  * @ingroup drv
  *
- * @brief Frameserver using the Video 4 Linux 2 framework.
+ * @brief DataSource using the Video 4 Linux 2 framework.
  */
 
 
@@ -28,11 +28,11 @@ extern "C" {
  * Descriptor of a v4l2 source.
  *
  * @ingroup drv_v4l2
- * @extends xrt_fs_mode
+ * @extends xrt_ds_frame_mode
  */
 struct v4l2_source_descriptor
 {
-	struct xrt_fs_mode base;
+	struct xrt_ds_frame_mode base;
 
 	char format_name[32];
 
@@ -61,12 +61,12 @@ struct v4l2_source_descriptor
 
 
 /*!
- * Create a v4l2 frameserver
+ * Create a v4l2 data source
  *
  * @ingroup drv_v4l2
  */
-struct xrt_fs *
-v4l2_fs_create(struct xrt_frame_context *xfctx,
+struct xrt_ds *
+v4l2_ds_create(struct xrt_frame_context *xfctx,
                const char *path,
                const char *product,
                const char *manufacturer,

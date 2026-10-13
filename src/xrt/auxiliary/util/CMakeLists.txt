@@ -31,6 +31,10 @@ add_library(
 	u_builder_search.h
 	u_cobs.c
 	u_cobs.h
+	u_data_source.c
+	u_data_source.h
+	u_data_source_ni.c
+	u_data_source_ni.h
 	u_debug.c
 	u_debug.h
 	u_deque.cpp
@@ -54,10 +58,6 @@ add_library(
 	u_format.h
 	u_frame.c
 	u_frame.h
-	u_frameserver.c
-	u_frameserver.h
-	u_frameserver_ni.c
-	u_frameserver_ni.h
 	u_future.h
 	u_future.cpp
 	u_generic_callbacks.hpp

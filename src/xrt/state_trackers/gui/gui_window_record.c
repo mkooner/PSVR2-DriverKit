@@ -9,6 +9,10 @@
 
 #include "xrt/xrt_config_have.h"
 #include "xrt/xrt_config_drivers.h"
+#include "xrt/xrt_frame.h"
+#include "xrt/xrt_prober.h"
+#include "xrt/xrt_tracking.h"
+#include "xrt/xrt_data_source.h"
 
 #include "os/os_threading.h"
 
@@ -21,11 +25,6 @@
 #include "util/u_json.h"
 #include "util/u_frame.h"
 #include "util/u_format.h"
-
-#include "xrt/xrt_frame.h"
-#include "xrt/xrt_prober.h"
-#include "xrt/xrt_tracking.h"
-#include "xrt/xrt_frameserver.h"
 
 #include "gui_window_record.h"
 

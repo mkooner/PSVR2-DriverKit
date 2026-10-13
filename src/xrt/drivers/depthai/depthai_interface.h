@@ -10,7 +10,7 @@
 
 #pragma once
 
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_prober.h"
 
@@ -45,46 +45,46 @@ depthai_3dof_device_found(struct xrt_prober *xp,
                           struct xrt_device **out_xdev);
 
 /*!
- * @defgroup drv_depthai DepthAI frameserver driver
+ * @defgroup drv_depthai DepthAI data source driver
  * @ingroup drv
  *
- * @brief Frameserver for the DepthAI camera module.
+ * @brief DataSource for the DepthAI camera module.
  */
 
 /*!
- * Create a DepthAI frameserver using a single RGB camera.
+ * Create a DepthAI data source using a single RGB camera.
  *
  * @ingroup drv_depthai
  */
-struct xrt_fs *
-depthai_fs_monocular_rgb(struct xrt_frame_context *xfctx);
+struct xrt_ds *
+depthai_ds_monocular_rgb(struct xrt_frame_context *xfctx);
 
 /*!
- * Create a DepthAI frameserver using two gray cameras.
+ * Create a DepthAI data source using two gray cameras.
  * Either OAK-D or OAK-D Lite. Custom FFC setups may or may not work.
  *
  * @ingroup drv_depthai
  */
-struct xrt_fs *
-depthai_fs_slam(struct xrt_frame_context *xfctx, struct depthai_slam_startup_settings *settings);
+struct xrt_ds *
+depthai_ds_slam(struct xrt_frame_context *xfctx, struct depthai_slam_startup_settings *settings);
 
 #ifdef DEPTHAI_HAS_MULTICAM_SUPPORT
 /*!
- * Create a DepthAI frameserver using two rgb cameras.
+ * Create a DepthAI data source using two rgb cameras.
  *
  * @ingroup drv_depthai
  */
-struct xrt_fs *
-depthai_fs_stereo_rgb(struct xrt_frame_context *xfctx);
+struct xrt_ds *
+depthai_ds_stereo_rgb(struct xrt_frame_context *xfctx);
 #endif
 
 /*!
- * Get the stereo calibration from a depthAI frameserver.
+ * Get the stereo calibration from a depthAI data source.
  *
  * @ingroup drv_depthai
  */
 bool
-depthai_fs_get_stereo_calibration(struct xrt_fs *xfs, struct t_stereo_camera_calibration **c_ptr);
+depthai_ds_get_stereo_calibration(struct xrt_ds *xds, struct t_stereo_camera_calibration **c_ptr);
 
 
 #ifdef __cplusplus

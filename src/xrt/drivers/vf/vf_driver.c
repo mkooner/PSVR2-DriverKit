@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  Video file frameserver implementation
+ * @brief  Video file data source implementation
  * @author Christoph Haag <christoph.haag@collabora.com>
  * @author Pete Black <pblack@collabora.com>
  * @author Jakob Bornecrantz <jakob@collabora.com>
@@ -20,7 +20,7 @@
 #include "util/u_debug.h"
 #include "util/u_logging.h"
 #include "util/u_trace_marker.h"
-#include "util/u_frameserver.h"
+#include "util/u_data_source.h"
 
 #include <stdio.h>
 #include <assert.h>
@@ -52,14 +52,14 @@
 DEBUG_GET_ONCE_LOG_OPTION(vf_log, "VF_LOG", U_LOGGING_WARN)
 
 /*!
- * A frame server operating on a video file.
+ * A data source operating on a video file.
  *
  * @implements xrt_frame_node
- * @implements xrt_fs
+ * @implements xrt_ds
  */
-struct vf_fs
+struct vf_ds
 {
-	struct xrt_fs base;
+	struct xrt_ds base;
 
 	struct os_thread_helper play_thread;
 
@@ -80,12 +80,12 @@ struct vf_fs
 		bool timeperframe;
 	} has;
 
-	enum xrt_fs_capture_type capture_type;
+	enum xrt_ds_capture_type capture_type;
 	struct xrt_frame_sink *sink;
 
 	uint32_t selected;
 
-	struct xrt_fs_capture_parameters capture_params;
+	struct xrt_ds_frame_capture_parameters capture_params;
 
 	bool is_configured;
 	bool is_running;
@@ -116,10 +116,10 @@ struct vf_frame
 /*!
  * Cast to derived type.
  */
-static inline struct vf_fs *
-vf_fs(struct xrt_fs *xfs)
+static inline struct vf_ds *
+vf_ds(struct xrt_ds *xds)
 {
-	return (struct vf_fs *)xfs;
+	return (struct vf_ds *)xds;
 }
 
 /*!
@@ -164,7 +164,7 @@ vf_frame_destroy(struct xrt_frame *xf)
 
 
 static void
-vf_fs_frame(struct vf_fs *vid, GstSample *sample)
+vf_ds_frame(struct vf_ds *vid, GstSample *sample)
 {
 	SINK_TRACE_MARKER();
 
@@ -224,7 +224,7 @@ vf_fs_frame(struct vf_fs *vid, GstSample *sample)
 }
 
 static GstFlowReturn
-on_new_sample_from_sink(GstElement *elt, struct vf_fs *vid)
+on_new_sample_from_sink(GstElement *elt, struct vf_ds *vid)
 {
 	SINK_TRACE_MARKER();
 	GstSample *sample;
@@ -250,7 +250,7 @@ on_new_sample_from_sink(GstElement *elt, struct vf_fs *vid)
 	}
 
 	// Takes ownership of the sample.
-	vf_fs_frame(vid, sample);
+	vf_ds_frame(vid, sample);
 
 	// Done with sample now.
 	gst_sample_unref(sample);
@@ -272,7 +272,7 @@ print_gst_error(GstMessage *message)
 }
 
 static gboolean
-on_source_message(GstBus *bus, GstMessage *message, struct vf_fs *vid)
+on_source_message(GstBus *bus, GstMessage *message, struct vf_ds *vid)
 {
 	/* nil */
 	switch (GST_MESSAGE_TYPE(message)) {
@@ -291,11 +291,11 @@ on_source_message(GstBus *bus, GstMessage *message, struct vf_fs *vid)
 }
 
 static void *
-vf_fs_mainloop(void *ptr)
+vf_ds_mainloop(void *ptr)
 {
 	SINK_TRACE_MARKER();
 
-	struct vf_fs *vid = (struct vf_fs *)ptr;
+	struct vf_ds *vid = (struct vf_ds *)ptr;
 
 	VF_DEBUG(vid, "Let's run!");
 	g_main_loop_run(vid->loop);
@@ -314,16 +314,16 @@ vf_fs_mainloop(void *ptr)
 
 /*
  *
- * Frame server methods.
+ * Data source methods.
  *
  */
 
 static xrt_result_t
-vf_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+vf_ds_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **out_modes, uint32_t *out_count)
 {
-	struct vf_fs *vid = vf_fs(xfs);
+	struct vf_ds *vid = vf_ds(xds);
 
-	struct xrt_fs_mode *modes = U_TYPED_ARRAY_CALLOC(struct xrt_fs_mode, 1);
+	struct xrt_ds_frame_mode *modes = U_TYPED_ARRAY_CALLOC(struct xrt_ds_frame_mode, 1);
 	if (modes == NULL) {
 		return XRT_ERROR_ALLOCATION;
 	}
@@ -340,20 +340,20 @@ vf_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, 
 }
 
 static xrt_result_t
-vf_fs_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *cp)
+vf_ds_configure_capture(struct xrt_ds *xds, struct xrt_ds_frame_capture_parameters *cp)
 {
-	// struct vf_fs *vid = vf_fs(xfs);
+	// struct vf_ds *vid = vf_ds(xds);
 	//! @todo
 	return XRT_SUCCESS;
 }
 
 static xrt_result_t
-vf_fs_frame_stream_start(struct xrt_fs *xfs,
+vf_ds_frame_stream_start(struct xrt_ds *xds,
                          struct xrt_frame_sink *xs,
-                         enum xrt_fs_capture_type capture_type,
+                         enum xrt_ds_capture_type capture_type,
                          uint32_t frame_mode_index)
 {
-	struct vf_fs *vid = vf_fs(xfs);
+	struct vf_ds *vid = vf_ds(xds);
 
 	vid->sink = xs;
 	vid->is_running = true;
@@ -369,9 +369,9 @@ vf_fs_frame_stream_start(struct xrt_fs *xfs,
 }
 
 static xrt_result_t
-vf_fs_stream_stop(struct xrt_fs *xfs)
+vf_ds_stream_stop(struct xrt_ds *xds)
 {
-	struct vf_fs *vid = vf_fs(xfs);
+	struct vf_ds *vid = vf_ds(xds);
 
 	if (!vid->is_running) {
 		return XRT_SUCCESS;
@@ -384,9 +384,9 @@ vf_fs_stream_stop(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-vf_fs_is_running(struct xrt_fs *xfs, bool *out_is_running)
+vf_ds_is_running(struct xrt_ds *xds, bool *out_is_running)
 {
-	struct vf_fs *vid = vf_fs(xfs);
+	struct vf_ds *vid = vf_ds(xds);
 
 	GstState current = GST_STATE_NULL;
 	GstState pending;
@@ -398,7 +398,7 @@ vf_fs_is_running(struct xrt_fs *xfs, bool *out_is_running)
 }
 
 static void
-vf_fs_destroy(struct vf_fs *vid)
+vf_ds_destroy(struct vf_ds *vid)
 {
 	g_main_loop_quit(vid->loop);
 
@@ -416,17 +416,17 @@ vf_fs_destroy(struct vf_fs *vid)
  */
 
 static void
-vf_fs_node_break_apart(struct xrt_frame_node *node)
+vf_ds_node_break_apart(struct xrt_frame_node *node)
 {
-	struct vf_fs *vid = container_of(node, struct vf_fs, node);
-	vf_fs_stream_stop(&vid->base);
+	struct vf_ds *vid = container_of(node, struct vf_ds, node);
+	vf_ds_stream_stop(&vid->base);
 }
 
 static void
-vf_fs_node_destroy(struct xrt_frame_node *node)
+vf_ds_node_destroy(struct xrt_frame_node *node)
 {
-	struct vf_fs *vid = container_of(node, struct vf_fs, node);
-	vf_fs_destroy(vid);
+	struct vf_ds *vid = container_of(node, struct vf_ds, node);
+	vf_ds_destroy(vid);
 }
 
 
@@ -436,13 +436,13 @@ vf_fs_node_destroy(struct xrt_frame_node *node)
  *
  */
 
-static struct xrt_fs *
+static struct xrt_ds *
 alloc_and_init_common(struct xrt_frame_context *xfctx,      //
                       enum xrt_format format,               //
                       enum xrt_stereo_format stereo_format, //
                       gchar *pipeline_string)               //
 {
-	struct vf_fs *vid = U_TYPED_CALLOC(struct vf_fs);
+	struct vf_ds *vid = U_TYPED_CALLOC(struct vf_ds);
 	vid->got_sample = false;
 	vid->format = format;
 	vid->stereo_format = stereo_format;
@@ -478,7 +478,7 @@ alloc_and_init_common(struct xrt_frame_context *xfctx,      //
 	gst_bus_add_watch(bus, (GstBusFunc)on_source_message, vid);
 	gst_object_unref(bus);
 
-	ret = os_thread_helper_start(&vid->play_thread, vf_fs_mainloop, vid);
+	ret = os_thread_helper_start(&vid->play_thread, vf_ds_mainloop, vid);
 	if (ret != 0) {
 		VF_ERROR(vid, "Failed to start thread '%i'", ret);
 		g_main_loop_unref(vid->loop);
@@ -495,14 +495,14 @@ alloc_and_init_common(struct xrt_frame_context *xfctx,      //
 	VF_DEBUG(vid, "Got first sample");
 	gst_element_set_state(vid->source, GST_STATE_PAUSED);
 
-	u_frameserver_populate_function_pointers(&vid->base);
-	vid->base.enumerate_frame_modes = vf_fs_enumerate_frame_modes;
-	vid->base.configure_capture = vf_fs_configure_capture;
-	vid->base.frame_stream_start = vf_fs_frame_stream_start;
-	vid->base.stream_stop = vf_fs_stream_stop;
-	vid->base.is_running = vf_fs_is_running;
-	vid->node.break_apart = vf_fs_node_break_apart;
-	vid->node.destroy = vf_fs_node_destroy;
+	u_data_source_populate_function_pointers(&vid->base);
+	vid->base.enumerate_frame_modes = vf_ds_enumerate_frame_modes;
+	vid->base.configure_capture = vf_ds_configure_capture;
+	vid->base.frame_stream_start = vf_ds_frame_stream_start;
+	vid->base.stream_stop = vf_ds_stream_stop;
+	vid->base.is_running = vf_ds_is_running;
+	vid->node.break_apart = vf_ds_node_break_apart;
+	vid->node.destroy = vf_ds_node_destroy;
 	vid->log_level = debug_get_log_option_vf_log();
 
 	// It's now safe to add it to the context.
@@ -510,7 +510,7 @@ alloc_and_init_common(struct xrt_frame_context *xfctx,      //
 
 	// Start the variable tracking after we know what device we have.
 	// clang-format off
-	u_var_add_root(vid, "Video File Frameserver", true);
+	u_var_add_root(vid, "Video File Data Source", true);
 	u_var_add_ro_text(vid, vid->base.name, "Card");
 	u_var_add_log_level(vid, &vid->log_level, "Log Level");
 	// clang-format on
@@ -518,8 +518,8 @@ alloc_and_init_common(struct xrt_frame_context *xfctx,      //
 	return &(vid->base);
 }
 
-struct xrt_fs *
-vf_fs_videotestsource(struct xrt_frame_context *xfctx, uint32_t width, uint32_t height)
+struct xrt_ds *
+vf_ds_videotestsource(struct xrt_frame_context *xfctx, uint32_t width, uint32_t height)
 {
 	gst_init(0, NULL);
 
@@ -538,8 +538,8 @@ vf_fs_videotestsource(struct xrt_frame_context *xfctx, uint32_t width, uint32_t 
 	return alloc_and_init_common(xfctx, format, stereo_format, pipeline_string);
 }
 
-struct xrt_fs *
-vf_fs_open_file(struct xrt_frame_context *xfctx, const char *path)
+struct xrt_ds *
+vf_ds_open_file(struct xrt_frame_context *xfctx, const char *path)
 {
 	if (path == NULL) {
 		U_LOG_E("No path given");

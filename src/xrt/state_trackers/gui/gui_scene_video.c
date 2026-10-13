@@ -9,7 +9,7 @@
 
 #include "xrt/xrt_prober.h"
 #include "xrt/xrt_settings.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_config_drivers.h"
 #include "xrt/xrt_config_os.h"
 
@@ -34,11 +34,11 @@ struct video_select
 	struct gui_scene base;
 
 	struct xrt_frame_context *xfctx;
-	struct xrt_fs *xfs;
+	struct xrt_ds *xds;
 
 	struct xrt_settings_tracking *settings;
 
-	struct xrt_fs_mode *modes;
+	struct xrt_ds_frame_mode *modes;
 	uint32_t num_modes;
 };
 
@@ -57,15 +57,15 @@ create_depthai_monocular(struct video_select *vs)
 {
 	vs->xfctx = U_TYPED_CALLOC(struct xrt_frame_context);
 
-	vs->xfs = depthai_fs_monocular_rgb(vs->xfctx);
-	if (vs->xfs == NULL) {
+	vs->xds = depthai_ds_monocular_rgb(vs->xfctx);
+	if (vs->xds == NULL) {
 		U_LOG_E("Failed to open DepthAI camera!");
 		free(vs->xfctx);
 		vs->xfctx = NULL;
 		return;
 	}
 
-	xrt_fs_enumerate_frame_modes(vs->xfs, &vs->modes, &vs->num_modes);
+	xrt_ds_enumerate_frame_modes(vs->xds, &vs->modes, &vs->num_modes);
 }
 
 static void
@@ -81,8 +81,8 @@ create_depthai_stereo(struct video_select *vs)
 	settings.want_imu = false;
 
 
-	vs->xfs = depthai_fs_slam(vs->xfctx, &settings);
-	if (vs->xfs == NULL) {
+	vs->xds = depthai_ds_slam(vs->xfctx, &settings);
+	if (vs->xds == NULL) {
 		U_LOG_E("Failed to open DepthAI camera!");
 		free(vs->xfctx);
 		vs->xfctx = NULL;
@@ -91,7 +91,7 @@ create_depthai_stereo(struct video_select *vs)
 	vs->settings->camera_type = XRT_SETTINGS_CAMERA_TYPE_SLAM;
 
 
-	xrt_fs_enumerate_frame_modes(vs->xfs, &vs->modes, &vs->num_modes);
+	xrt_ds_enumerate_frame_modes(vs->xds, &vs->modes, &vs->num_modes);
 }
 #endif /* XRT_BUILD_DRIVER_DEPTHAI */
 
@@ -121,8 +121,8 @@ on_video_device(struct xrt_prober *xp,
 
 	vs->xfctx = U_TYPED_CALLOC(struct xrt_frame_context);
 
-	xrt_prober_open_video_device(xp, pdev, vs->xfctx, &vs->xfs);
-	if (vs->xfs == NULL) {
+	xrt_prober_open_video_device(xp, pdev, vs->xfctx, &vs->xds);
+	if (vs->xds == NULL) {
 		U_LOG_E("Failed to open camera!");
 #if defined(XRT_OS_LINUX) && !defined(XRT_HAVE_V4L2)
 		U_LOG_E("Monado was built with the v4l driver disabled. Most video devices require this driver!");
@@ -132,11 +132,11 @@ on_video_device(struct xrt_prober *xp,
 		return;
 	}
 
-	xrt_fs_enumerate_frame_modes(vs->xfs, &vs->modes, &vs->num_modes);
+	xrt_ds_enumerate_frame_modes(vs->xds, &vs->modes, &vs->num_modes);
 }
 
 static bool
-render_mode(struct xrt_fs_mode *mode)
+render_mode(struct xrt_ds_frame_mode *mode)
 {
 	char tmp[512];
 
@@ -149,12 +149,12 @@ void
 mode_selected_so_continue(struct gui_scene *scene, struct gui_program *p)
 {
 	struct video_select *vs = (struct video_select *)scene;
-	gui_scene_calibrate(p, vs->xfctx, vs->xfs, vs->settings);
+	gui_scene_calibrate(p, vs->xfctx, vs->xds, vs->settings);
 
 	// We should not clean these up, zero them out.
 	vs->settings = NULL;
 	vs->xfctx = NULL;
-	vs->xfs = NULL;
+	vs->xds = NULL;
 
 	// Schedule us to be deleted when it's safe.
 	gui_scene_delete_me(p, scene);
@@ -168,7 +168,7 @@ scene_render(struct gui_scene *scene, struct gui_program *p)
 	igBegin("Select video device/mode", NULL, 0);
 
 	// If we have not found any modes keep showing the devices.
-	if (vs->xfs == NULL) {
+	if (vs->xds == NULL) {
 		xrt_prober_list_video_devices(p->xp, on_video_device, vs);
 
 #ifdef XRT_BUILD_DRIVER_DEPTHAI
@@ -182,7 +182,7 @@ scene_render(struct gui_scene *scene, struct gui_program *p)
 #endif
 	} else if (vs->num_modes == 0) {
 		// No modes on it :(
-		igText("No modes found on '%s'!", vs->xfs->name);
+		igText("No modes found on '%s'!", vs->xds->name);
 	}
 
 	// We have selected a stream device and it has only one mode - user doesn't need to care what that is; proceed

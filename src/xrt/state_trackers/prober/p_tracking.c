@@ -8,7 +8,7 @@
  */
 
 #include "xrt/xrt_frame.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_tracking.h"
 
 #include "xrt/xrt_config_have.h"
@@ -92,8 +92,8 @@ struct p_factory
 	struct xrt_tracked_slam *xts;
 #endif
 
-	// Frameserver.
-	struct xrt_fs *xfs;
+	// Data source.
+	struct xrt_ds *xds;
 };
 
 
@@ -121,7 +121,7 @@ on_video_device(struct xrt_prober *xp,
 {
 	struct p_factory *fact = (struct p_factory *)ptr;
 
-	if (fact->xfs != NULL || product == NULL) {
+	if (fact->xds != NULL || product == NULL) {
 		return;
 	}
 
@@ -129,14 +129,14 @@ on_video_device(struct xrt_prober *xp,
 		return;
 	}
 
-	xrt_prober_open_video_device(&fact->p->base, pdev, &fact->xfctx, &fact->xfs);
+	xrt_prober_open_video_device(&fact->p->base, pdev, &fact->xfctx, &fact->xds);
 }
 
 static void
-p_factory_ensure_frameserver(struct p_factory *fact)
+p_factory_ensure_data_source(struct p_factory *fact)
 {
 	// Already created.
-	if (fact->xfs != NULL) {
+	if (fact->xds != NULL) {
 		return;
 	}
 
@@ -157,7 +157,7 @@ p_factory_ensure_frameserver(struct p_factory *fact)
 
 	xrt_prober_list_video_devices(&fact->p->base, on_video_device, fact);
 
-	if (fact->xfs == NULL) {
+	if (fact->xds == NULL) {
 		return;
 	}
 
@@ -229,35 +229,35 @@ p_factory_ensure_frameserver(struct p_factory *fact)
 	u_sink_quirk_create(&fact->xfctx, xsink, &qp, &xsink);
 
 	// Start the stream now.
-	xrt_fs_frame_stream_start(fact->xfs, xsink, XRT_FS_CAPTURE_TYPE_TRACKING, fact->settings.camera_mode);
+	xrt_ds_frame_stream_start(fact->xds, xsink, XRT_DS_CAPTURE_TYPE_TRACKING, fact->settings.camera_mode);
 }
 #endif
 
-//! @todo Similar to p_factory_ensure_frameserver but for SLAM sources.
+//! @todo Similar to p_factory_ensure_data_source but for SLAM sources.
 //! Therefore we can only have one SLAM tracker at a time, with exactly one SLAM
 //! tracked device. It would be good to solve these artificial restrictions.
 XRT_MAYBE_UNUSED static bool
-p_factory_ensure_slam_frameserver(struct p_factory *fact)
+p_factory_ensure_slam_data_source(struct p_factory *fact)
 {
 	//! @todo The check for (XRT_FEATURE_SLAM && XRT_BUILD_DRIVER_* &&
 	//! debug_flag_is_correct) is getting duplicated in: p_open_video_device,
-	//! p_list_video_devices, and p_factory_ensure_slam_frameserver (here) with
+	//! p_list_video_devices, and p_factory_ensure_slam_data_source (here) with
 	//! small differences. Incorrectly modifying one will mess the others.
 
-	// Factory frameserver is already in use
-	if (fact->xfs != NULL) {
+	// Factory data source is already in use
+	if (fact->xds != NULL) {
 		return false;
 	}
 
-	// SLAM tracker with EuRoC frameserver
+	// SLAM tracker with EuRoC data source
 
 #ifdef XRT_BUILD_DRIVER_EUROC
 	if (debug_get_option_euroc_path() != NULL) {
 		struct xrt_tracking_sinks empty_sinks = {0};
 		struct xrt_tracking_sinks *sinks = &empty_sinks;
 
-		xrt_prober_open_video_device(&fact->p->base, NULL, &fact->xfctx, &fact->xfs);
-		assert(fact->xfs->source_id == 0xECD0FEED && "xfs is not Euroc, unsynced open_video_device?");
+		xrt_prober_open_video_device(&fact->p->base, NULL, &fact->xfctx, &fact->xds);
+		assert(fact->xds->source_id == 0xECD0FEED && "xds is not Euroc, unsynced open_video_device?");
 
 		struct euroc_player_config ep_config;
 		euroc_player_fill_default_config_for(&ep_config, debug_get_option_euroc_path());
@@ -275,21 +275,21 @@ p_factory_ensure_slam_frameserver(struct p_factory *fact)
 		U_LOG_W("SLAM tracking support is disabled, the Euroc driver will not be tracked");
 #endif
 
-		xrt_fs_tracking_streams_start(fact->xfs, sinks);
+		xrt_ds_tracking_streams_start(fact->xds, sinks);
 
 		return true;
 	}
 #endif
 
-	// SLAM tracker with RealSense frameserver
+	// SLAM tracker with RealSense data source
 
 #ifdef XRT_BUILD_DRIVER_REALSENSE
 	if (debug_get_num_option_rs_source_index() != -1) {
 		struct xrt_tracking_sinks empty_sinks = {0};
 		struct xrt_tracking_sinks *sinks = &empty_sinks;
 
-		xrt_prober_open_video_device(&fact->p->base, NULL, &fact->xfctx, &fact->xfs);
-		assert(fact->xfs->source_id == 0x2EA15E115E && "xfs is not RealSense, unsynced open_video_device?");
+		xrt_prober_open_video_device(&fact->p->base, NULL, &fact->xfctx, &fact->xds);
+		assert(fact->xds->source_id == 0x2EA15E115E && "xds is not RealSense, unsynced open_video_device?");
 
 #ifdef XRT_FEATURE_SLAM
 		int ret = t_slam_create(&fact->xfctx, NULL, &fact->xts, &sinks);
@@ -300,7 +300,7 @@ p_factory_ensure_slam_frameserver(struct p_factory *fact)
 		U_LOG_W("SLAM tracking support is disabled, the RealSense driver will not be tracked by host SLAM");
 #endif
 
-		xrt_fs_tracking_streams_start(fact->xfs, sinks);
+		xrt_ds_tracking_streams_start(fact->xds, sinks);
 
 		return true;
 	}
@@ -327,7 +327,7 @@ p_factory_create_tracked_psmv(struct xrt_tracking_factory *xfact, struct xrt_tra
 
 	struct xrt_tracked_psmv *xtmv = NULL;
 
-	p_factory_ensure_frameserver(fact);
+	p_factory_ensure_data_source(fact);
 
 	if (fact->num_xtmv < ARRAY_SIZE(fact->xtmv)) {
 		xtmv = fact->xtmv[fact->num_xtmv];
@@ -356,7 +356,7 @@ p_factory_create_tracked_psvr(struct xrt_tracking_factory *xfact, struct xrt_tra
 
 	struct xrt_tracked_psvr *xtvr = NULL;
 
-	p_factory_ensure_frameserver(fact);
+	p_factory_ensure_data_source(fact);
 
 	if (!fact->started_xtvr) {
 		xtvr = fact->xtvr;
@@ -384,7 +384,7 @@ p_factory_create_tracked_slam(struct xrt_tracking_factory *xfact, struct xrt_tra
 
 	struct xrt_tracked_slam *xts = NULL;
 
-	p_factory_ensure_slam_frameserver(fact);
+	p_factory_ensure_slam_data_source(fact);
 
 	if (!fact->started_xts) {
 		xts = fact->xts;
@@ -450,7 +450,7 @@ p_tracking_teardown(struct prober *p)
 	u_var_remove_root(fact);
 
 	// Drop any references to objects in the node graph.
-	fact->xfs = NULL;
+	fact->xds = NULL;
 #ifdef XRT_HAVE_OPENCV
 	fact->xtmv[0] = NULL;
 	fact->xtmv[1] = NULL;

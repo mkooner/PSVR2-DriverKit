@@ -10,7 +10,7 @@
 #pragma once
 
 #include "wmr_config.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_prober.h"
 #include "xrt/xrt_tracking.h"
 
@@ -18,7 +18,7 @@
  * WMR video/IMU data sources
  *
  * The objective of this class is to aggregate all the data sources (frames, IMU,
- * etc.) of a WMR device into a single @ref xrt_fs.
+ * etc.) of a WMR device into a single @ref xrt_ds.
  *
  * @addtogroup drv_wmr
  * @{
@@ -29,15 +29,15 @@
 extern "C" {
 #endif
 
-//! Create and return the data source as a @ref xrt_fs ready for data streaming.
-struct xrt_fs *
+//! Create and return the data source as a @ref xrt_ds ready for data streaming.
+struct xrt_ds *
 wmr_source_create(struct xrt_frame_context *xfctx, struct xrt_prober_device *dev_holo, struct wmr_hmd_config cfg);
 
 //! @todo Should this method receive raw or calibrated samples? Currently
 //! receiving raw because Basalt can calibrate them, but other systems can't.
 void
 wmr_source_push_imu_packet(
-    struct xrt_fs *xfs, uint32_t imu_id, timepoint_ns t, struct xrt_vec3 accel, struct xrt_vec3 gyro);
+    struct xrt_ds *xds, uint32_t imu_id, timepoint_ns t, struct xrt_vec3 accel, struct xrt_vec3 gyro);
 
 /*!
  * @}

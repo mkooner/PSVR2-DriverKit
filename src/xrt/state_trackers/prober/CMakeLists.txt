@@ -53,7 +53,7 @@ if(XRT_HAVE_HIDAPI
 endif()
 
 if(XRT_HAVE_V4L2)
-	# Uses v4l2_fs_create
+	# Uses v4l2_ds_create
 	target_link_libraries(st_prober PRIVATE drv_v4l2)
 endif()
 

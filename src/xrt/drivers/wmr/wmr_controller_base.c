@@ -38,6 +38,7 @@
 #include <assert.h>
 #include <errno.h>
 
+
 #define WMR_TRACE(wcb, ...) U_LOG_XDEV_IFL_T(&wcb->base, wcb->log_level, __VA_ARGS__)
 #define WMR_TRACE_HEX(wcb, ...) U_LOG_XDEV_IFL_T_HEX(&wcb->base, wcb->log_level, __VA_ARGS__)
 #define WMR_DEBUG(wcb, ...) U_LOG_XDEV_IFL_D(&wcb->base, wcb->log_level, __VA_ARGS__)
@@ -554,7 +555,7 @@ wmr_controller_base_init(struct wmr_controller_base *wcb,
                          enum xrt_device_type controller_type,
                          enum u_logging_level log_level,
                          u_device_destroy_function_t destroy_fn,
-                         struct xrt_fs *src)
+                         struct xrt_ds *src)
 {
 	DRV_TRACE_MARKER();
 

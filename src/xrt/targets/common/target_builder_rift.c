@@ -11,7 +11,7 @@
 #include "xrt/xrt_config_build.h"
 #include "xrt/xrt_config_drivers.h"
 #include "xrt/xrt_prober.h"
-#include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_data_source.h"
 #include "xrt/xrt_system.h"
 
 #include "tracking/t_constellation.h"
@@ -590,12 +590,12 @@ rift_open_system_impl(struct xrt_builder *xb,
 				continue;
 			}
 
-			struct xrt_fs *fs = rift_sensor_get_frame_server(sensor);
+			struct xrt_ds *ds = rift_sensor_get_data_source(sensor);
 
-			xret = xrt_fs_frame_stream_start(fs, frame_sink, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
+			xret = xrt_ds_frame_stream_start(ds, frame_sink, XRT_DS_CAPTURE_TYPE_TRACKING, 0);
 			if (xret != XRT_SUCCESS) {
-				RIFT_WARN(rb, "Failed to start Rift sensor frame server stream for sensor %u, got %d",
-				          i, xret);
+				RIFT_WARN(rb, "Failed to start Rift sensor data source stream for sensor %u, got %d", i,
+				          xret);
 				continue;
 			}
 

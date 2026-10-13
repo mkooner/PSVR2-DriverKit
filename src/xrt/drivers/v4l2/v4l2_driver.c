@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  V4L2 frameserver implementation
+ * @brief  V4L2 data source implementation
  * @author Pete Black <pblack@collabora.com>
  * @author Jakob Bornecrantz <jakob@collabora.com>
  * @ingroup drv_v4l2
@@ -17,7 +17,7 @@
 #include "util/u_format.h"
 #include "util/u_logging.h"
 #include "util/u_trace_marker.h"
-#include "util/u_frameserver.h"
+#include "util/u_data_source.h"
 
 #include "v4l2_interface.h"
 #include "v4l2_driver.h"
@@ -72,10 +72,10 @@ DEBUG_GET_ONCE_NUM_OPTION(v4l2_exposure_absolute, "V4L2_EXPOSURE_ABSOLUTE", 10)
  * Streaming thread entrypoint
  */
 static void *
-v4l2_fs_mainloop(void *ptr);
+v4l2_ds_mainloop(void *ptr);
 
 static void
-dump_controls(struct v4l2_fs *vid);
+dump_controls(struct v4l2_ds *vid);
 
 static void
 dump_contron_name(uint32_t id);
@@ -101,7 +101,7 @@ static void
 v4l2_free_frame(struct xrt_frame *xf)
 {
 	struct v4l2_frame *vf = (struct v4l2_frame *)xf;
-	struct v4l2_fs *vid = (struct v4l2_fs *)xf->owner;
+	struct v4l2_ds *vid = (struct v4l2_ds *)xf->owner;
 
 	vid->used_frames--;
 
@@ -116,7 +116,7 @@ v4l2_free_frame(struct xrt_frame *xf)
 }
 
 XRT_MAYBE_UNUSED static int
-v4l2_control_get(struct v4l2_fs *vid, uint32_t id, int *out_value)
+v4l2_control_get(struct v4l2_ds *vid, uint32_t id, int *out_value)
 {
 	struct v4l2_control control = {0};
 	int ret;
@@ -132,7 +132,7 @@ v4l2_control_get(struct v4l2_fs *vid, uint32_t id, int *out_value)
 }
 
 static int
-v4l2_control_set(struct v4l2_fs *vid, uint32_t id, int value)
+v4l2_control_set(struct v4l2_ds *vid, uint32_t id, int value)
 {
 	struct v4l2_control control = {0};
 	int ret;
@@ -148,7 +148,7 @@ v4l2_control_set(struct v4l2_fs *vid, uint32_t id, int value)
 }
 
 static void
-v4l2_add_control_state(struct v4l2_fs *vid, int control, struct v4l2_state_want want[2], int force, const char *name)
+v4l2_add_control_state(struct v4l2_ds *vid, int control, struct v4l2_state_want want[2], int force, const char *name)
 {
 	struct v4l2_control_state *state = &vid->states[vid->num_states++];
 
@@ -160,7 +160,7 @@ v4l2_add_control_state(struct v4l2_fs *vid, int control, struct v4l2_state_want 
 }
 
 static int
-v4l2_query_cap_and_validate(struct v4l2_fs *vid)
+v4l2_query_cap_and_validate(struct v4l2_ds *vid)
 {
 	int ret;
 
@@ -270,7 +270,7 @@ v4l2_query_cap_and_validate(struct v4l2_fs *vid)
 }
 
 static int
-v4l2_try_userptr(struct v4l2_fs *vid, struct v4l2_requestbuffers *v_bufrequest)
+v4l2_try_userptr(struct v4l2_ds *vid, struct v4l2_requestbuffers *v_bufrequest)
 {
 	v_bufrequest->memory = V4L2_MEMORY_USERPTR;
 	if (ioctl(vid->fd, VIDIOC_REQBUFS, v_bufrequest) == 0) {
@@ -283,7 +283,7 @@ v4l2_try_userptr(struct v4l2_fs *vid, struct v4l2_requestbuffers *v_bufrequest)
 }
 
 static int
-v4l2_try_mmap(struct v4l2_fs *vid, struct v4l2_requestbuffers *v_bufrequest)
+v4l2_try_mmap(struct v4l2_ds *vid, struct v4l2_requestbuffers *v_bufrequest)
 {
 	v_bufrequest->memory = V4L2_MEMORY_MMAP;
 	if (ioctl(vid->fd, VIDIOC_REQBUFS, v_bufrequest) == 0) {
@@ -296,7 +296,7 @@ v4l2_try_mmap(struct v4l2_fs *vid, struct v4l2_requestbuffers *v_bufrequest)
 }
 
 static int
-v4l2_setup_mmap_buffer(struct v4l2_fs *vid, struct v4l2_frame *vf, struct v4l2_buffer *v_buf)
+v4l2_setup_mmap_buffer(struct v4l2_ds *vid, struct v4l2_frame *vf, struct v4l2_buffer *v_buf)
 {
 	void *ptr = mmap(0, v_buf->length, PROT_READ, MAP_SHARED, vid->fd, v_buf->m.offset);
 	if (ptr == MAP_FAILED) {
@@ -310,7 +310,7 @@ v4l2_setup_mmap_buffer(struct v4l2_fs *vid, struct v4l2_frame *vf, struct v4l2_b
 }
 
 static int
-v4l2_setup_userptr_buffer(struct v4l2_fs *vid, struct v4l2_frame *vf, struct v4l2_buffer *v_buf)
+v4l2_setup_userptr_buffer(struct v4l2_ds *vid, struct v4l2_frame *vf, struct v4l2_buffer *v_buf)
 {
 	// align this to a memory page, v4l2 likes it that way
 	long sz = sysconf(_SC_PAGESIZE);
@@ -336,7 +336,7 @@ v4l2_setup_userptr_buffer(struct v4l2_fs *vid, struct v4l2_frame *vf, struct v4l
  */
 
 static struct v4l2_source_descriptor *
-v4l2_add_descriptor(struct v4l2_fs *vid)
+v4l2_add_descriptor(struct v4l2_ds *vid)
 {
 	uint32_t index = vid->num_descriptors++;
 	U_ARRAY_REALLOC_OR_FREE(vid->descriptors, struct v4l2_source_descriptor, vid->num_descriptors);
@@ -348,7 +348,7 @@ v4l2_add_descriptor(struct v4l2_fs *vid)
 }
 
 static void
-v4l2_list_modes_interval(struct v4l2_fs *vid,
+v4l2_list_modes_interval(struct v4l2_ds *vid,
                          const struct v4l2_fmtdesc *fmt,
                          const struct v4l2_frmsizeenum *size,
                          const struct v4l2_frmivalenum *interval)
@@ -365,7 +365,7 @@ v4l2_list_modes_interval(struct v4l2_fs *vid,
 }
 
 static void
-v4l2_list_modes_size(struct v4l2_fs *vid, const struct v4l2_fmtdesc *fmt, const struct v4l2_frmsizeenum *size)
+v4l2_list_modes_size(struct v4l2_ds *vid, const struct v4l2_fmtdesc *fmt, const struct v4l2_frmsizeenum *size)
 {
 	if (size->type != V4L2_FRMSIZE_TYPE_DISCRETE) {
 		V4L2_DEBUG(vid, "warning: Skipping non discrete frame size.");
@@ -421,7 +421,7 @@ v4l2_list_modes_size(struct v4l2_fs *vid, const struct v4l2_fmtdesc *fmt, const 
 }
 
 static void
-v4l2_list_modes_fmt(struct v4l2_fs *vid, const struct v4l2_fmtdesc *fmt)
+v4l2_list_modes_fmt(struct v4l2_ds *vid, const struct v4l2_fmtdesc *fmt)
 {
 	V4L2_DEBUG(vid, "format: %s %08x %d", fmt->description, fmt->pixelformat, fmt->type);
 
@@ -443,7 +443,7 @@ v4l2_list_modes_fmt(struct v4l2_fs *vid, const struct v4l2_fmtdesc *fmt)
 }
 
 static void
-v4l2_list_modes(struct v4l2_fs *vid)
+v4l2_list_modes(struct v4l2_ds *vid)
 {
 	struct v4l2_fmtdesc desc;
 	U_ZERO(&desc);
@@ -456,7 +456,7 @@ v4l2_list_modes(struct v4l2_fs *vid)
 }
 
 static void
-v4l2_set_control_if_diff(struct v4l2_fs *vid, struct v4l2_control_state *state)
+v4l2_set_control_if_diff(struct v4l2_ds *vid, struct v4l2_control_state *state)
 {
 	int value = 0;
 	int ret = 0;
@@ -496,7 +496,7 @@ v4l2_set_control_if_diff(struct v4l2_fs *vid, struct v4l2_control_state *state)
 }
 
 static void
-v4l2_update_controls(struct v4l2_fs *vid)
+v4l2_update_controls(struct v4l2_ds *vid)
 {
 	for (size_t i = 0; i < vid->num_states; i++) {
 		v4l2_set_control_if_diff(vid, &vid->states[i]);
@@ -505,7 +505,7 @@ v4l2_update_controls(struct v4l2_fs *vid)
 
 
 bool
-v4l2_fs_setup_format(struct v4l2_fs *vid)
+v4l2_ds_setup_format(struct v4l2_ds *vid)
 {
 	if (vid->fd == -1) {
 		V4L2_ERROR(vid, "error: Device not opened!");
@@ -541,16 +541,16 @@ v4l2_fs_setup_format(struct v4l2_fs *vid)
  */
 
 static xrt_result_t
-v4l2_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+v4l2_ds_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **out_modes, uint32_t *out_count)
 {
-	struct v4l2_fs *vid = v4l2_fs(xfs);
+	struct v4l2_ds *vid = v4l2_ds(xds);
 	if (vid->num_descriptors == 0) {
 		(*out_count) = 0;
 		(*out_modes) = NULL;
 		return XRT_SUCCESS;
 	}
 
-	struct xrt_fs_mode *modes = U_TYPED_ARRAY_CALLOC(struct xrt_fs_mode, vid->num_descriptors);
+	struct xrt_ds_frame_mode *modes = U_TYPED_ARRAY_CALLOC(struct xrt_ds_frame_mode, vid->num_descriptors);
 	if (modes == NULL) {
 		return XRT_ERROR_ALLOCATION;
 	}
@@ -566,20 +566,20 @@ v4l2_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes
 }
 
 static xrt_result_t
-v4l2_fs_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *cp)
+v4l2_ds_configure_capture(struct xrt_ds *xds, struct xrt_ds_frame_capture_parameters *cp)
 {
-	// struct v4l2_fs *vid = v4l2_fs(xfs);
+	// struct v4l2_ds *vid = v4l2_ds(xds);
 	//! @todo
 	return XRT_SUCCESS;
 }
 
 static xrt_result_t
-v4l2_fs_frame_stream_start(struct xrt_fs *xfs,
+v4l2_ds_frame_stream_start(struct xrt_ds *xds,
                            struct xrt_frame_sink *xs,
-                           enum xrt_fs_capture_type capture_type,
+                           enum xrt_ds_capture_type capture_type,
                            uint32_t frame_mode_index)
 {
-	struct v4l2_fs *vid = v4l2_fs(xfs);
+	struct v4l2_ds *vid = v4l2_ds(xds);
 
 	if (frame_mode_index >= vid->num_descriptors) {
 		V4L2_ERROR(vid, "error Invalid frame_mode_index (%i >= %i)", frame_mode_index, vid->num_descriptors);
@@ -591,12 +591,12 @@ v4l2_fs_frame_stream_start(struct xrt_fs *xfs,
 	vid->is_running = true;
 	vid->capture_type = capture_type;
 
-	if (!v4l2_fs_setup_format(vid)) {
+	if (!v4l2_ds_setup_format(vid)) {
 		vid->is_running = false;
 		return XRT_ERROR_STREAMING_START_FAILED;
 	}
 
-	if (pthread_create(&vid->stream_thread, NULL, v4l2_fs_mainloop, xfs)) {
+	if (pthread_create(&vid->stream_thread, NULL, v4l2_ds_mainloop, xds)) {
 		vid->is_running = false;
 		V4L2_ERROR(vid, "error: Could not create thread");
 		return XRT_ERROR_THREADING_INIT_FAILURE;
@@ -609,9 +609,9 @@ v4l2_fs_frame_stream_start(struct xrt_fs *xfs,
 }
 
 static xrt_result_t
-v4l2_fs_stream_stop(struct xrt_fs *xfs)
+v4l2_ds_stream_stop(struct xrt_ds *xds)
 {
-	struct v4l2_fs *vid = v4l2_fs(xfs);
+	struct v4l2_ds *vid = v4l2_ds(xds);
 
 	if (!vid->is_running) {
 		return XRT_SUCCESS;
@@ -624,9 +624,9 @@ v4l2_fs_stream_stop(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-v4l2_fs_is_running(struct xrt_fs *xfs, bool *out_is_running)
+v4l2_ds_is_running(struct xrt_ds *xds, bool *out_is_running)
 {
-	struct v4l2_fs *vid = v4l2_fs(xfs);
+	struct v4l2_ds *vid = v4l2_ds(xds);
 
 	(*out_is_running) = vid->is_running;
 
@@ -634,10 +634,10 @@ v4l2_fs_is_running(struct xrt_fs *xfs, bool *out_is_running)
 }
 
 static void
-v4l2_fs_destroy(struct v4l2_fs *vid)
+v4l2_ds_destroy(struct v4l2_ds *vid)
 {
 	// Make sure that the stream is stopped.
-	v4l2_fs_stream_stop(&vid->base);
+	v4l2_ds_stream_stop(&vid->base);
 
 	// Stop the variable tracking.
 	u_var_remove_root(vid);
@@ -667,35 +667,35 @@ v4l2_fs_destroy(struct v4l2_fs *vid)
 }
 
 static void
-v4l2_fs_node_break_apart(struct xrt_frame_node *node)
+v4l2_ds_node_break_apart(struct xrt_frame_node *node)
 {
-	struct v4l2_fs *vid = container_of(node, struct v4l2_fs, node);
-	v4l2_fs_stream_stop(&vid->base);
+	struct v4l2_ds *vid = container_of(node, struct v4l2_ds, node);
+	v4l2_ds_stream_stop(&vid->base);
 }
 
 static void
-v4l2_fs_node_destroy(struct xrt_frame_node *node)
+v4l2_ds_node_destroy(struct xrt_frame_node *node)
 {
-	struct v4l2_fs *vid = container_of(node, struct v4l2_fs, node);
-	v4l2_fs_destroy(vid);
+	struct v4l2_ds *vid = container_of(node, struct v4l2_ds, node);
+	v4l2_ds_destroy(vid);
 }
 
-struct xrt_fs *
-v4l2_fs_create(struct xrt_frame_context *xfctx,
+struct xrt_ds *
+v4l2_ds_create(struct xrt_frame_context *xfctx,
                const char *path,
                const char *product,
                const char *manufacturer,
                const char *serial)
 {
-	struct v4l2_fs *vid = U_TYPED_CALLOC(struct v4l2_fs);
-	u_frameserver_populate_function_pointers(&vid->base);
-	vid->base.enumerate_frame_modes = v4l2_fs_enumerate_frame_modes;
-	vid->base.configure_capture = v4l2_fs_configure_capture;
-	vid->base.frame_stream_start = v4l2_fs_frame_stream_start;
-	vid->base.stream_stop = v4l2_fs_stream_stop;
-	vid->base.is_running = v4l2_fs_is_running;
-	vid->node.break_apart = v4l2_fs_node_break_apart;
-	vid->node.destroy = v4l2_fs_node_destroy;
+	struct v4l2_ds *vid = U_TYPED_CALLOC(struct v4l2_ds);
+	u_data_source_populate_function_pointers(&vid->base);
+	vid->base.enumerate_frame_modes = v4l2_ds_enumerate_frame_modes;
+	vid->base.configure_capture = v4l2_ds_configure_capture;
+	vid->base.frame_stream_start = v4l2_ds_frame_stream_start;
+	vid->base.stream_stop = v4l2_ds_stream_stop;
+	vid->base.is_running = v4l2_ds_is_running;
+	vid->node.break_apart = v4l2_ds_node_break_apart;
+	vid->node.destroy = v4l2_ds_node_destroy;
 	vid->log_level = debug_get_log_option_v4l2_log();
 	vid->fd = -1;
 
@@ -714,7 +714,7 @@ v4l2_fs_create(struct xrt_frame_context *xfctx,
 
 	int ret = v4l2_query_cap_and_validate(vid);
 	if (ret != 0) {
-		v4l2_fs_destroy(vid);
+		v4l2_ds_destroy(vid);
 		vid = NULL;
 		return NULL;
 	}
@@ -724,7 +724,7 @@ v4l2_fs_create(struct xrt_frame_context *xfctx,
 
 	// Start the variable tracking after we know what device we have.
 	u_sink_debug_init(&vid->usd);
-	u_var_add_root(vid, "V4L2 Frameserver", true);
+	u_var_add_root(vid, "V4L2 Data Source", true);
 	u_var_add_ro_text(vid, vid->base.name, "Card");
 	u_var_add_log_level(vid, &vid->log_level, "Log Level");
 	for (size_t i = 0; i < vid->num_states; i++) {
@@ -738,12 +738,12 @@ v4l2_fs_create(struct xrt_frame_context *xfctx,
 }
 
 void *
-v4l2_fs_mainloop(void *ptr)
+v4l2_ds_mainloop(void *ptr)
 {
 	U_TRACE_SET_THREAD_NAME("V4L2");
 
-	struct xrt_fs *xfs = (struct xrt_fs *)ptr;
-	struct v4l2_fs *vid = v4l2_fs(xfs);
+	struct xrt_ds *xds = (struct xrt_ds *)ptr;
+	struct v4l2_ds *vid = v4l2_ds(xds);
 
 	V4L2_DEBUG(vid, "info: Thread enter!");
 
@@ -829,7 +829,7 @@ v4l2_fs_mainloop(void *ptr)
 
 		v4l2_update_controls(vid);
 
-		SINK_TRACE_IDENT(v4l2_fs_frame);
+		SINK_TRACE_IDENT(v4l2_ds_frame);
 
 		V4L2_TRACE(vid, "Got frame #%u, index %i. Used frames are %i", v_buf.sequence, v_buf.index,
 		           vid->used_frames);
@@ -882,14 +882,14 @@ v4l2_fs_mainloop(void *ptr)
  */
 
 static void
-dump_integer(struct v4l2_fs *vid, struct v4l2_queryctrl *queryctrl)
+dump_integer(struct v4l2_ds *vid, struct v4l2_queryctrl *queryctrl)
 {
 	U_LOG_D("  Type: Integer");
 	U_LOG_D("    min: %i, max: %i, step: %i.", queryctrl->minimum, queryctrl->maximum, queryctrl->step);
 }
 
 static void
-dump_menu(struct v4l2_fs *vid, uint32_t id, uint32_t min, uint32_t max)
+dump_menu(struct v4l2_ds *vid, uint32_t id, uint32_t min, uint32_t max)
 {
 	U_LOG_D("  Menu items:");
 
@@ -986,7 +986,7 @@ dump_contron_name(uint32_t id)
 }
 
 static void
-dump_controls(struct v4l2_fs *vid)
+dump_controls(struct v4l2_ds *vid)
 {
 	struct v4l2_queryctrl queryctrl = {0};
 

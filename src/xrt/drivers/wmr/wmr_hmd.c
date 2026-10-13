@@ -1993,7 +1993,7 @@ wmr_hmd_create(enum wmr_headset_type hmd_type,
 	}
 
 	// Stream data source into sinks (if populated)
-	xrt_result_t xret = xrt_fs_tracking_streams_start(wh->tracking.source, &sinks);
+	xrt_result_t xret = xrt_ds_tracking_streams_start(wh->tracking.source, &sinks);
 	if (xret != XRT_SUCCESS) {
 		//! @todo Could reach this due to !XRT_HAVE_LIBUSB but the HMD should keep working
 		WMR_WARN(wh, "Failed to start WMR source, got %s", u_str_xrt_result(xret));

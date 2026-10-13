@@ -34,8 +34,8 @@ struct u_tracked_imu_3dof
 
 /*!
  * @see xrt_frame_context
- * Creates a wrapper for m_imu_3dof that can be placed inside (and freed along with!) an `xrt_imu_sink` pipeline.
- * Useful when your frameserver is significantly separated from your xrt_device
+ * Creates a wrapper for m_imu_3dof that can be placed inside (and freed along with!) an @ref xrt_imu_sink pipeline.
+ * Useful when your @ref xrt_ds is significantly separated from your @ref xrt_device
  */
 void
 u_tracked_imu_3dof_create(struct xrt_frame_context *xfctx, struct u_tracked_imu_3dof **out_3dof, void *debug_var_root);
