@@ -17,5 +17,5 @@
 xrt_result_t
 twrap_slam_create_device(struct xrt_frame_context *xfctx,
                          enum xrt_device_name name,
-                         struct xrt_slam_sinks **out_sinks,
+                         struct xrt_tracking_sinks **out_sinks,
                          struct xrt_device **out_device);

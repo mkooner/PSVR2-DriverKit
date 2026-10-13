@@ -273,7 +273,7 @@ struct TrackerSlam
 	struct vit_tracker_extension_set exts; //!< VIT tracker supported extensions
 	struct vit_tracker *tracker;           //!< Pointer to the tracker created by the loaded VIT system;
 
-	struct xrt_slam_sinks sinks = {};                       //!< Pointers to the sinks below
+	struct xrt_tracking_sinks sinks = {};                   //!< Pointers to the sinks below
 	struct xrt_frame_sink cam_sinks[XRT_TRACKING_MAX_CAMS]; //!< Sends camera frames to the SLAM system
 	struct xrt_imu_sink imu_sink = {};                      //!< Sends imu samples to the SLAM system
 	struct xrt_pose_sink gt_sink = {};                      //!< Register groundtruth trajectory for stats
@@ -288,8 +288,8 @@ struct TrackerSlam
 
 	enum u_logging_level log_level; //!< Logging level for the SLAM tracker, set by SLAM_LOG var
 
-	struct xrt_slam_sinks *euroc_recorder; //!< EuRoC dataset recording sinks
-	struct openvr_tracker *ovr_tracker;    //!< OpenVR lighthouse tracker
+	struct xrt_tracking_sinks *euroc_recorder; //!< EuRoC dataset recording sinks
+	struct openvr_tracker *ovr_tracker;        //!< OpenVR lighthouse tracker
 
 	// Used mainly for checking that the timestamps come in order
 	timepoint_ns last_imu_ts;         //!< Last received IMU sample timestamp
@@ -1459,7 +1459,7 @@ extern "C" int
 t_slam_create(struct xrt_frame_context *xfctx,
               struct t_slam_tracker_config *config,
               struct xrt_tracked_slam **out_xts,
-              struct xrt_slam_sinks **out_sink)
+              struct xrt_tracking_sinks **out_sink)
 {
 	struct t_slam_tracker_config default_config = {};
 	if (config == nullptr) {

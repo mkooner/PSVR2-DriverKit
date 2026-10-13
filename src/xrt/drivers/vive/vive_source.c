@@ -33,10 +33,10 @@ struct vive_source
 	enum u_logging_level log_level;
 
 	// Sinks
-	struct xrt_frame_sink sbs_sink;  //!< Intermediate sink for SBS frames
-	struct xrt_imu_sink imu_sink;    //!< Intermediate sink for IMU samples
-	struct xrt_slam_sinks in_sinks;  //!< Pointers to intermediate sinks
-	struct xrt_slam_sinks out_sinks; //!< Pointers to downstream sinks
+	struct xrt_frame_sink sbs_sink;      //!< Intermediate sink for SBS frames
+	struct xrt_imu_sink imu_sink;        //!< Intermediate sink for IMU samples
+	struct xrt_tracking_sinks in_sinks;  //!< Pointers to intermediate sinks
+	struct xrt_tracking_sinks out_sinks; //!< Pointers to downstream sinks
 
 	// V4L2 frame streaming state
 	bool timestamps_have_been_zero_until_now; //!< First v4l2 frames are zeroed
@@ -282,7 +282,7 @@ vive_source_push_frame_ticks(struct vive_source *vs, timepoint_ns ticks)
 }
 
 void
-vive_source_hook_into_sinks(struct vive_source *vs, struct xrt_slam_sinks *sinks)
+vive_source_hook_into_sinks(struct vive_source *vs, struct xrt_tracking_sinks *sinks)
 {
 	vs->out_sinks = *sinks;
 	sinks->cam_count = 1;

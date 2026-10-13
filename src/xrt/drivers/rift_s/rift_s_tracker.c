@@ -197,12 +197,12 @@ rift_s_fill_slam_calibration(struct rift_s_tracker *t, struct rift_s_hmd_config 
 	rift_s_fill_slam_cameras_calibration(t, hmd_config);
 }
 
-static struct xrt_slam_sinks *
+static struct xrt_tracking_sinks *
 rift_s_create_slam_tracker(struct rift_s_tracker *t, struct xrt_frame_context *xfctx)
 {
 	DRV_TRACE_MARKER();
 
-	struct xrt_slam_sinks *sinks = NULL;
+	struct xrt_tracking_sinks *sinks = NULL;
 
 #ifdef XRT_FEATURE_SLAM
 	struct t_slam_tracker_config config = {0};
@@ -232,12 +232,12 @@ static int
 rift_s_create_hand_tracker(struct rift_s_tracker *t,
                            struct xrt_frame_context *xfctx,
                            struct xrt_device_masks_sink *masks_sink,
-                           struct xrt_slam_sinks **out_sinks,
+                           struct xrt_tracking_sinks **out_sinks,
                            struct xrt_device **out_device)
 {
 	DRV_TRACE_MARKER();
 
-	struct xrt_slam_sinks *sinks = NULL;
+	struct xrt_tracking_sinks *sinks = NULL;
 	struct xrt_device *device = NULL;
 
 #ifdef XRT_BUILD_DRIVER_HANDTRACKING
@@ -390,7 +390,7 @@ rift_s_tracker_create(struct xrt_tracking_origin *origin,
 	// Initialize the input sinks for the camera to send to
 
 	// Initialize SLAM tracker
-	struct xrt_slam_sinks *slam_sinks = NULL;
+	struct xrt_tracking_sinks *slam_sinks = NULL;
 	if (t->tracking.slam_enabled) {
 		slam_sinks = rift_s_create_slam_tracker(t, xfctx);
 		if (slam_sinks == NULL) {
@@ -401,7 +401,7 @@ rift_s_tracker_create(struct xrt_tracking_origin *origin,
 	}
 
 	// Initialize hand tracker
-	struct xrt_slam_sinks *hand_sinks = NULL;
+	struct xrt_tracking_sinks *hand_sinks = NULL;
 	struct xrt_device *hand_device = NULL;
 	struct xrt_device_masks_sink *masks_sink = slam_sinks ? slam_sinks->masks[0] : NULL;
 	if (t->tracking.hand_enabled) {
@@ -415,7 +415,7 @@ rift_s_tracker_create(struct xrt_tracking_origin *origin,
 	}
 
 	// Setup sinks depending on tracking configuration
-	struct xrt_slam_sinks entry_sinks = {0};
+	struct xrt_tracking_sinks entry_sinks = {0};
 	if (slam_sinks && hand_sinks) {
 		struct xrt_frame_sink *entry_cam0_sink = NULL;
 		struct xrt_frame_sink *entry_cam1_sink = NULL;
@@ -431,7 +431,7 @@ rift_s_tracker_create(struct xrt_tracking_origin *origin,
 	} else if (hand_sinks) {
 		entry_sinks = *hand_sinks;
 	} else {
-		entry_sinks = (struct xrt_slam_sinks){0};
+		entry_sinks = (struct xrt_tracking_sinks){0};
 	}
 
 	t->slam_sinks = entry_sinks;
@@ -449,7 +449,7 @@ rift_s_tracker_destroy(struct rift_s_tracker *t)
 	os_mutex_destroy(&t->mutex);
 }
 
-struct xrt_slam_sinks *
+struct xrt_tracking_sinks *
 rift_s_tracker_get_slam_sinks(struct rift_s_tracker *t)
 {
 	return &t->in_slam_sinks;

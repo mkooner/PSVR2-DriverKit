@@ -23,12 +23,12 @@ extern "C" {
  */
 
 /*!
- * Not implemented function for @ref xrt_fs::enumerate_modes.
+ * Not implemented function for @ref xrt_fs::enumerate_frame_modes.
  *
  * @ingroup aux_util
  */
 xrt_result_t
-u_frameserver_ni_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count);
+u_frameserver_ni_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count);
 
 /*!
  * Not implemented function for @ref xrt_fs::configure_capture.
@@ -39,23 +39,23 @@ xrt_result_t
 u_frameserver_ni_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *cp);
 
 /*!
- * Not implemented function for @ref xrt_fs::stream_start.
+ * Not implemented function for @ref xrt_fs::frame_stream_start.
  *
  * @ingroup aux_util
  */
 xrt_result_t
-u_frameserver_ni_stream_start(struct xrt_fs *xfs,
-                              struct xrt_frame_sink *xs,
-                              enum xrt_fs_capture_type capture_type,
-                              uint32_t descriptor_index);
+u_frameserver_ni_frame_stream_start(struct xrt_fs *xfs,
+                                    struct xrt_frame_sink *xs,
+                                    enum xrt_fs_capture_type capture_type,
+                                    uint32_t frame_mode_index);
 
 /*!
- * Not implemented function for @ref xrt_fs::slam_stream_start.
+ * Not implemented function for @ref xrt_fs::tracking_streams_start.
  *
  * @ingroup aux_util
  */
 xrt_result_t
-u_frameserver_ni_slam_stream_start(struct xrt_fs *xfs, struct xrt_slam_sinks *sinks);
+u_frameserver_ni_tracking_streams_start(struct xrt_fs *xfs, struct xrt_tracking_sinks *sinks);
 
 /*!
  * Not implemented function for @ref xrt_fs::stream_stop.

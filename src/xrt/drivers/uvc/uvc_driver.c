@@ -370,7 +370,7 @@ iso_transfer_cb(struct libusb_transfer *transfer)
 }
 
 static xrt_result_t
-uvc_fs_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+uvc_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
 {
 	struct uvc_fs *fs = uvc_fs(xfs);
 
@@ -451,10 +451,10 @@ uvc_fs_stream_stop(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-uvc_fs_stream_start(struct xrt_fs *xfs,
-                    struct xrt_frame_sink *xs,
-                    enum xrt_fs_capture_type capture_type,
-                    uint32_t descriptor_index)
+uvc_fs_frame_stream_start(struct xrt_fs *xfs,
+                          struct xrt_frame_sink *xs,
+                          enum xrt_fs_capture_type capture_type,
+                          uint32_t frame_mode_index)
 {
 	int ret;
 	struct uvc_fs *stream = uvc_fs(xfs);
@@ -464,7 +464,7 @@ uvc_fs_stream_start(struct xrt_fs *xfs,
 	stream->sink = xs;
 
 	// @todo
-	(void)descriptor_index;
+	(void)frame_mode_index;
 	(void)capture_type;
 
 	// @todo some random number that is probably high enough, figure out some actual minimum
@@ -561,9 +561,9 @@ uvc_fs_create(libusb_context *usb_ctx,
 	struct uvc_fs *stream = U_TYPED_CALLOC(struct uvc_fs);
 	stream->log_level = debug_get_log_option_uvc_log();
 	u_frameserver_populate_function_pointers(&stream->base);
-	stream->base.enumerate_modes = uvc_fs_enumerate_modes;
+	stream->base.enumerate_frame_modes = uvc_fs_enumerate_frame_modes;
 	stream->base.configure_capture = uvc_fs_configure_capture;
-	stream->base.stream_start = uvc_fs_stream_start;
+	stream->base.frame_stream_start = uvc_fs_frame_stream_start;
 	stream->base.stream_stop = uvc_fs_stream_stop;
 	stream->base.is_running = uvc_fs_is_running;
 	stream->node.break_apart = uvc_fs_node_break_apart;

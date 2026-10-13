@@ -229,7 +229,7 @@ p_factory_ensure_frameserver(struct p_factory *fact)
 	u_sink_quirk_create(&fact->xfctx, xsink, &qp, &xsink);
 
 	// Start the stream now.
-	xrt_fs_stream_start(fact->xfs, xsink, XRT_FS_CAPTURE_TYPE_TRACKING, fact->settings.camera_mode);
+	xrt_fs_frame_stream_start(fact->xfs, xsink, XRT_FS_CAPTURE_TYPE_TRACKING, fact->settings.camera_mode);
 }
 #endif
 
@@ -253,8 +253,8 @@ p_factory_ensure_slam_frameserver(struct p_factory *fact)
 
 #ifdef XRT_BUILD_DRIVER_EUROC
 	if (debug_get_option_euroc_path() != NULL) {
-		struct xrt_slam_sinks empty_sinks = {0};
-		struct xrt_slam_sinks *sinks = &empty_sinks;
+		struct xrt_tracking_sinks empty_sinks = {0};
+		struct xrt_tracking_sinks *sinks = &empty_sinks;
 
 		xrt_prober_open_video_device(&fact->p->base, NULL, &fact->xfctx, &fact->xfs);
 		assert(fact->xfs->source_id == 0xECD0FEED && "xfs is not Euroc, unsynced open_video_device?");
@@ -275,7 +275,7 @@ p_factory_ensure_slam_frameserver(struct p_factory *fact)
 		U_LOG_W("SLAM tracking support is disabled, the Euroc driver will not be tracked");
 #endif
 
-		xrt_fs_slam_stream_start(fact->xfs, sinks);
+		xrt_fs_tracking_streams_start(fact->xfs, sinks);
 
 		return true;
 	}
@@ -285,8 +285,8 @@ p_factory_ensure_slam_frameserver(struct p_factory *fact)
 
 #ifdef XRT_BUILD_DRIVER_REALSENSE
 	if (debug_get_num_option_rs_source_index() != -1) {
-		struct xrt_slam_sinks empty_sinks = {0};
-		struct xrt_slam_sinks *sinks = &empty_sinks;
+		struct xrt_tracking_sinks empty_sinks = {0};
+		struct xrt_tracking_sinks *sinks = &empty_sinks;
 
 		xrt_prober_open_video_device(&fact->p->base, NULL, &fact->xfctx, &fact->xfs);
 		assert(fact->xfs->source_id == 0x2EA15E115E && "xfs is not RealSense, unsynced open_video_device?");
@@ -300,7 +300,7 @@ p_factory_ensure_slam_frameserver(struct p_factory *fact)
 		U_LOG_W("SLAM tracking support is disabled, the RealSense driver will not be tracked by host SLAM");
 #endif
 
-		xrt_fs_slam_stream_start(fact->xfs, sinks);
+		xrt_fs_tracking_streams_start(fact->xfs, sinks);
 
 		return true;
 	}

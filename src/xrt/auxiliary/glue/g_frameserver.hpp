@@ -27,8 +27,8 @@ namespace xrt::util {
  */
 struct FrameServerFunctions
 {
-	//! @ref xrt_fs::slam_stream_start
-	bool slam{false};
+	//! @ref xrt_fs::tracking_streams_start
+	bool tracking_streams{false};
 };
 
 /*!
@@ -58,14 +58,14 @@ public: // Methods
 
 		u_frameserver_populate_function_pointers(&xfs);
 
-		xfs.enumerate_modes = enumerateModesWrap;
+		xfs.enumerate_frame_modes = enumerateFrameModesWrap;
 		xfs.configure_capture = configureCaptureWrap;
-		xfs.stream_start = streamStartWrap;
+		xfs.frame_stream_start = frameStreamStartWrap;
 		xfs.stream_stop = streamStopWrap;
 		xfs.is_running = isRunningWrap;
 
-		if constexpr (functions.slam) {
-			xfs.slam_stream_start = slamStreamStartWrap;
+		if constexpr (functions.tracking_streams) {
+			xfs.tracking_streams_start = trackingStreamsStartWrap;
 		}
 	}
 
@@ -123,9 +123,9 @@ private: // Functions
 #define GET(xfs) (*fromXFS(xfs))
 
 	static xrt_result_t
-	enumerateModesWrap(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count) noexcept
+	enumerateFrameModesWrap(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count) noexcept
 	try {
-		return GET(xfs).enumerateModes(out_modes, out_count);
+		return GET(xfs).enumerateFrameModes(out_modes, out_count);
 	}
 	G_CATCH_GUARDS_WITH_RETURN(XRT_ERROR_UNCAUGHT_EXCEPTION)
 
@@ -137,19 +137,19 @@ private: // Functions
 	G_CATCH_GUARDS_WITH_RETURN(XRT_ERROR_UNCAUGHT_EXCEPTION)
 
 	static xrt_result_t
-	streamStartWrap(struct xrt_fs *xfs,
-	                struct xrt_frame_sink *xs,
-	                enum xrt_fs_capture_type capture_type,
-	                uint32_t descriptor_index) noexcept
+	frameStreamStartWrap(struct xrt_fs *xfs,
+	                     struct xrt_frame_sink *xs,
+	                     enum xrt_fs_capture_type capture_type,
+	                     uint32_t frame_mode_index) noexcept
 	try {
-		return GET(xfs).streamStart(xs, capture_type, descriptor_index);
+		return GET(xfs).frameStreamStart(xs, capture_type, frame_mode_index);
 	}
 	G_CATCH_GUARDS_WITH_RETURN(XRT_ERROR_UNCAUGHT_EXCEPTION)
 
 	static xrt_result_t
-	slamStreamStartWrap(struct xrt_fs *xfs, struct xrt_slam_sinks *sinks) noexcept
+	trackingStreamsStartWrap(struct xrt_fs *xfs, struct xrt_tracking_sinks *sinks) noexcept
 	try {
-		return GET(xfs).slamStreamStart(sinks);
+		return GET(xfs).trackingStreamsStart(sinks);
 	}
 	G_CATCH_GUARDS_WITH_RETURN(XRT_ERROR_UNCAUGHT_EXCEPTION)
 

@@ -87,11 +87,11 @@ t_euroc_model_to_distortion_model(const char *model);
  *
  * @param xfctx Frame context for the sinks.
  * @param settings The settings for this EuRoC recorder.
- * @return struct xrt_slam_sinks* Sinks to push samples to for recording.
+ * @return struct xrt_tracking_sinks* Sinks to push samples to for recording.
  *
  * @ingroup aux_tracking
  */
-struct xrt_slam_sinks *
+struct xrt_tracking_sinks *
 euroc_recorder_create(struct xrt_frame_context *xfctx, const struct euroc_recorder_settings *settings);
 
 /*!
@@ -100,7 +100,7 @@ euroc_recorder_create(struct xrt_frame_context *xfctx, const struct euroc_record
  * @param er_sinks The recorder sinks returned by @ref euroc_recorder_create
  */
 void
-euroc_recorder_start(struct xrt_slam_sinks *er_sinks);
+euroc_recorder_start(struct xrt_tracking_sinks *er_sinks);
 
 /*!
  * Stop recording samples sent to the recorder sinks. You can start and
@@ -109,7 +109,7 @@ euroc_recorder_start(struct xrt_slam_sinks *er_sinks);
  * @param er_sinks The recorder sinks returned by @ref euroc_recorder_create
  */
 void
-euroc_recorder_stop(struct xrt_slam_sinks *er_sinks);
+euroc_recorder_stop(struct xrt_tracking_sinks *er_sinks);
 
 /*!
  * Add EuRoC recorder UI button to start recording after creation.
@@ -119,7 +119,7 @@ euroc_recorder_stop(struct xrt_slam_sinks *er_sinks);
  * @param prefix Prefix in case you have multiple recorders, otherwise pass an empty string
  */
 void
-euroc_recorder_add_ui(struct xrt_slam_sinks *er_sinks, void *root, const char *prefix);
+euroc_recorder_add_ui(struct xrt_tracking_sinks *er_sinks, void *root, const char *prefix);
 
 #ifdef __cplusplus
 }

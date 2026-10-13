@@ -489,7 +489,7 @@ rift_sensor_create(struct rift_sensor_context *context,
 
 	struct xrt_fs_mode *supported_modes;
 	uint32_t mode_count = 0;
-	xrt_result_t xret = xrt_fs_enumerate_modes(sensor->frame_server, &supported_modes, &mode_count);
+	xrt_result_t xret = xrt_fs_enumerate_frame_modes(sensor->frame_server, &supported_modes, &mode_count);
 	if (xret != XRT_SUCCESS || mode_count == 0) {
 		libusb_close(device_handle);
 		SENSOR_ERROR(context,

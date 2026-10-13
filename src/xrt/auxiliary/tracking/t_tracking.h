@@ -38,7 +38,7 @@ extern "C" {
  */
 
 typedef struct cJSON cJSON;
-struct xrt_slam_sinks;
+struct xrt_tracking_sinks;
 struct xrt_tracked_psmv;
 struct xrt_tracked_psvr;
 struct xrt_tracked_slam;
@@ -745,7 +745,7 @@ int
 t_slam_create(struct xrt_frame_context *xfctx,
               struct t_slam_tracker_config *config,
               struct xrt_tracked_slam **out_xts,
-              struct xrt_slam_sinks **out_sink);
+              struct xrt_tracking_sinks **out_sink);
 
 /*!
  * @public @memberof xrt_tracked_slam

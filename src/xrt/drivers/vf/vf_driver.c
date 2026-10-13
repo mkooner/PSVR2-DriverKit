@@ -319,7 +319,7 @@ vf_fs_mainloop(void *ptr)
  */
 
 static xrt_result_t
-vf_fs_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+vf_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
 {
 	struct vf_fs *vid = vf_fs(xfs);
 
@@ -348,17 +348,17 @@ vf_fs_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *cp
 }
 
 static xrt_result_t
-vf_fs_stream_start(struct xrt_fs *xfs,
-                   struct xrt_frame_sink *xs,
-                   enum xrt_fs_capture_type capture_type,
-                   uint32_t descriptor_index)
+vf_fs_frame_stream_start(struct xrt_fs *xfs,
+                         struct xrt_frame_sink *xs,
+                         enum xrt_fs_capture_type capture_type,
+                         uint32_t frame_mode_index)
 {
 	struct vf_fs *vid = vf_fs(xfs);
 
 	vid->sink = xs;
 	vid->is_running = true;
 	vid->capture_type = capture_type;
-	vid->selected = descriptor_index;
+	vid->selected = frame_mode_index;
 
 	gst_element_set_state(vid->source, GST_STATE_PLAYING);
 
@@ -496,9 +496,9 @@ alloc_and_init_common(struct xrt_frame_context *xfctx,      //
 	gst_element_set_state(vid->source, GST_STATE_PAUSED);
 
 	u_frameserver_populate_function_pointers(&vid->base);
-	vid->base.enumerate_modes = vf_fs_enumerate_modes;
+	vid->base.enumerate_frame_modes = vf_fs_enumerate_frame_modes;
 	vid->base.configure_capture = vf_fs_configure_capture;
-	vid->base.stream_start = vf_fs_stream_start;
+	vid->base.frame_stream_start = vf_fs_frame_stream_start;
 	vid->base.stream_stop = vf_fs_stream_stop;
 	vid->base.is_running = vf_fs_is_running;
 	vid->node.break_apart = vf_fs_node_break_apart;

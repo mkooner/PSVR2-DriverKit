@@ -195,7 +195,7 @@ create_depthai_monocular(struct camera_window *cw)
 	uint32_t mode_index = 0;
 
 	// Now that we have setup a node graph, start it.
-	xrt_fs_stream_start(cw->camera.xfs, tmp, XRT_FS_CAPTURE_TYPE_CALIBRATION, mode_index);
+	xrt_fs_frame_stream_start(cw->camera.xfs, tmp, XRT_FS_CAPTURE_TYPE_CALIBRATION, mode_index);
 }
 
 static void
@@ -222,11 +222,11 @@ create_depthai_stereo(struct camera_window *cw)
 	// First grab the window sink.
 	struct xrt_frame_sink *tmp = &cw->base.sink;
 
-	struct xrt_slam_sinks sinks;
+	struct xrt_tracking_sinks sinks;
 	u_sink_combiner_create(&cw->camera.xfctx, tmp, &sinks.cams[0], &sinks.cams[1]);
 
 	// Now that we have setup a node graph, start it.
-	xrt_fs_slam_stream_start(cw->camera.xfs, &sinks);
+	xrt_fs_tracking_streams_start(cw->camera.xfs, &sinks);
 }
 #endif /* XRT_BUILD_DRIVER_DEPTHAI */
 
@@ -262,7 +262,7 @@ create_videotestsrc(struct camera_window *cw)
 	    XRT_FORMAT_R8G8B8);   //
 
 	// Now that we have setup a node graph, start it (mode index is hardcoded to 0).
-	xrt_fs_stream_start(cw->camera.xfs, tmp, XRT_FS_CAPTURE_TYPE_CALIBRATION, 0);
+	xrt_fs_frame_stream_start(cw->camera.xfs, tmp, XRT_FS_CAPTURE_TYPE_CALIBRATION, 0);
 }
 #endif /* XRT_BUILD_DRIVER_VF */
 
@@ -353,7 +353,7 @@ on_video_device(struct xrt_prober *xp,
 
 	struct xrt_fs_mode *modes = NULL;
 	uint32_t mode_count = 0;
-	xrt_fs_enumerate_modes(rw->camera.xfs, &modes, &mode_count);
+	xrt_fs_enumerate_frame_modes(rw->camera.xfs, &modes, &mode_count);
 	assert(mode_count > 0);
 
 	window_set_camera_source(      //
@@ -366,7 +366,7 @@ on_video_device(struct xrt_prober *xp,
 	modes = NULL;
 
 	// Now that we have setup a node graph, start it.
-	xrt_fs_stream_start(rw->camera.xfs, tmp, XRT_FS_CAPTURE_TYPE_CALIBRATION, mode_index);
+	xrt_fs_frame_stream_start(rw->camera.xfs, tmp, XRT_FS_CAPTURE_TYPE_CALIBRATION, mode_index);
 }
 
 

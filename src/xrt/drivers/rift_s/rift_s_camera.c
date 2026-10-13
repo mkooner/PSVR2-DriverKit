@@ -211,7 +211,7 @@ rift_s_camera_create(struct xrt_prober *xp,
 	struct xrt_frame_sink *tmp = &cam->in_sink;
 
 	uint32_t mode_count;
-	xret = xrt_fs_enumerate_modes(finder.xfs, &modes, &mode_count);
+	xret = xrt_fs_enumerate_frame_modes(finder.xfs, &modes, &mode_count);
 	if (xret != XRT_SUCCESS) {
 		RIFT_S_ERROR("Failed to enumerate frameserver modes.");
 		goto cleanup;
@@ -258,7 +258,7 @@ rift_s_camera_create(struct xrt_prober *xp,
 	u_var_add_sink_debug(cam, &cam->debug_sinks[1], "Controller Streams");
 
 	/* Finally, start the video feed */
-	xret = xrt_fs_stream_start(finder.xfs, tmp, XRT_FS_CAPTURE_TYPE_TRACKING, selected_mode);
+	xret = xrt_fs_frame_stream_start(finder.xfs, tmp, XRT_FS_CAPTURE_TYPE_TRACKING, selected_mode);
 	if (xret != XRT_SUCCESS) {
 		//! @todo Should we try to switch to an explicit 3dof mode?
 		RIFT_S_ERROR("Failed to start frameserver stream.");

@@ -297,7 +297,7 @@ ns_setup_depthai_device(struct ns_builder *nsb,
 	depthai_fs_get_stereo_calibration(the_fs, &calib);
 
 
-	struct xrt_slam_sinks *slam_sinks = NULL;
+	struct xrt_tracking_sinks *slam_sinks = NULL;
 	xret = twrap_slam_create_device(xfctx, XRT_DEVICE_DEPTHAI, &slam_sinks, out_head_device);
 	if (xret != XRT_SUCCESS) {
 		U_LOG_E("twrap_slam_create_device: %u", xret);
@@ -309,7 +309,7 @@ ns_setup_depthai_device(struct ns_builder *nsb,
 	}
 
 #ifdef XRT_BUILD_DRIVER_HANDTRACKING
-	struct xrt_slam_sinks *hand_sinks = NULL;
+	struct xrt_tracking_sinks *hand_sinks = NULL;
 	struct xrt_device_masks_sink *masks_sink = slam_sinks ? slam_sinks->masks[0] : NULL;
 
 	struct t_camera_extra_info extra_camera_info = {0};
@@ -339,7 +339,7 @@ ns_setup_depthai_device(struct ns_builder *nsb,
 	}
 #endif
 
-	struct xrt_slam_sinks entry_sinks = {0};
+	struct xrt_tracking_sinks entry_sinks = {0};
 	struct xrt_frame_sink *entry_left_sink = NULL;
 	struct xrt_frame_sink *entry_right_sink = NULL;
 
@@ -351,14 +351,14 @@ ns_setup_depthai_device(struct ns_builder *nsb,
 	entry_right_sink = slam_sinks->cams[1];
 #endif
 
-	entry_sinks = (struct xrt_slam_sinks){
+	entry_sinks = (struct xrt_tracking_sinks){
 	    .cams[0] = entry_left_sink,
 	    .cams[1] = entry_right_sink,
 	    .imu = slam_sinks->imu,
 	    .gt = slam_sinks->gt,
 	};
 
-	struct xrt_slam_sinks unused_slam_sinks = {0};
+	struct xrt_tracking_sinks unused_slam_sinks = {0};
 	unused_slam_sinks.imu = entry_sinks.imu;
 
 	u_sink_force_genlock_create(     //
@@ -368,7 +368,7 @@ ns_setup_depthai_device(struct ns_builder *nsb,
 	    &unused_slam_sinks.cams[0],  //
 	    &unused_slam_sinks.cams[1]); //
 
-	xrt_fs_slam_stream_start(the_fs, &unused_slam_sinks);
+	xrt_fs_tracking_streams_start(the_fs, &unused_slam_sinks);
 
 	return XRT_SUCCESS;
 }

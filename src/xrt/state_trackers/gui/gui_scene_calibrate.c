@@ -366,13 +366,13 @@ scene_render_select(struct gui_scene *scene, struct gui_program *p)
 
 	if (cs->settings->camera_type == XRT_SETTINGS_CAMERA_TYPE_SLAM) {
 		struct xrt_frame_sink *tmp = cali;
-		struct xrt_slam_sinks sinks = {0};
+		struct xrt_tracking_sinks sinks = {0};
 		sinks.cam_count = 2;
 		u_sink_combiner_create(cs->xfctx, tmp, &sinks.cams[0], &sinks.cams[1]);
 
-		xrt_fs_slam_stream_start(cs->xfs, &sinks);
+		xrt_fs_tracking_streams_start(cs->xfs, &sinks);
 	} else {
-		xrt_fs_stream_start(cs->xfs, cali, XRT_FS_CAPTURE_TYPE_CALIBRATION, cs->settings->camera_mode);
+		xrt_fs_frame_stream_start(cs->xfs, cali, XRT_FS_CAPTURE_TYPE_CALIBRATION, cs->settings->camera_mode);
 	}
 
 #else

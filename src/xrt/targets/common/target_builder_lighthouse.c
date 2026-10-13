@@ -132,7 +132,7 @@ get_selected_mode(struct xrt_fs *xfs)
 {
 	struct xrt_fs_mode *modes = NULL;
 	uint32_t count = 0;
-	xrt_fs_enumerate_modes(xfs, &modes, &count);
+	xrt_fs_enumerate_frame_modes(xfs, &modes, &count);
 
 	LH_ASSERT(count != 0, "No stream modes found in Index camera");
 
@@ -167,12 +167,12 @@ on_video_device(struct xrt_prober *xp,
 	}
 }
 
-static struct xrt_slam_sinks *
+static struct xrt_tracking_sinks *
 valve_index_slam_track(struct vive_device *vive_head,
                        struct xrt_frame_context *xfctx,
                        struct t_slam_calibration *slam_calib)
 {
-	struct xrt_slam_sinks *sinks = NULL;
+	struct xrt_tracking_sinks *sinks = NULL;
 
 #ifdef XRT_FEATURE_SLAM
 	struct t_slam_tracker_config config = {0};
@@ -203,12 +203,12 @@ valve_index_hand_track(struct lighthouse_system *lhs,
                        struct xrt_pose head_in_left_cam,
                        struct t_stereo_camera_calibration *stereo_calib,
                        struct xrt_device_masks_sink *masks_sink,
-                       struct xrt_slam_sinks **out_sinks,
+                       struct xrt_tracking_sinks **out_sinks,
                        struct xrt_device **out_devices)
 {
 #ifdef XRT_BUILD_DRIVER_HANDTRACKING
 	struct xrt_device *two_hands[2] = {NULL};
-	struct xrt_slam_sinks *sinks = NULL;
+	struct xrt_tracking_sinks *sinks = NULL;
 
 	LH_ASSERT_(stereo_calib != NULL);
 
@@ -353,7 +353,7 @@ valve_index_setup_visual_trackers(struct lighthouse_system *lhs,
                                   struct vive_device *vive_head,
                                   struct xrt_frame_context *xfctx,
                                   struct xrt_prober *xp,
-                                  struct xrt_slam_sinks *out_sinks,
+                                  struct xrt_tracking_sinks *out_sinks,
                                   struct xrt_device **out_devices)
 {
 	bool slam_enabled = lhs->vive_tstatus.slam_enabled;
@@ -370,7 +370,7 @@ valve_index_setup_visual_trackers(struct lighthouse_system *lhs,
 	vive_get_slam_imu_calibration(lhs->hmd_config, &lhs->slam_calib.imu);
 
 	// Initialize SLAM tracker
-	struct xrt_slam_sinks *slam_sinks = NULL;
+	struct xrt_tracking_sinks *slam_sinks = NULL;
 	if (slam_enabled) {
 		LH_ASSERT_(lhs->driver == DRIVER_VIVE);
 		LH_ASSERT_(vive_head != NULL);
@@ -384,7 +384,7 @@ valve_index_setup_visual_trackers(struct lighthouse_system *lhs,
 	}
 
 	// Initialize hand tracker
-	struct xrt_slam_sinks *hand_sinks = NULL;
+	struct xrt_tracking_sinks *hand_sinks = NULL;
 	struct xrt_device *hand_devices[2] = {NULL};
 	struct xrt_device_masks_sink *masks_sink = slam_sinks ? slam_sinks->masks[0] : NULL;
 	if (hand_enabled) {
@@ -439,7 +439,7 @@ valve_index_setup_visual_trackers(struct lighthouse_system *lhs,
 	//! @todo Using a single slot queue is wrong for SLAM
 	u_sink_simple_queue_create(xfctx, entry_sbs_sink, &entry_sbs_sink);
 
-	struct xrt_slam_sinks entry_sinks = {
+	struct xrt_tracking_sinks entry_sinks = {
 	    .cam_count = 1,
 	    .imu_count = 1,
 	    .cams = {entry_sbs_sink},
@@ -462,7 +462,7 @@ static bool
 stream_data_sources(struct lighthouse_system *lhs,
                     struct vive_device *vive_head,
                     struct xrt_prober *xp,
-                    struct xrt_slam_sinks sinks)
+                    struct xrt_tracking_sinks sinks)
 {
 	// Open frame server
 	xrt_prober_list_video_devices(xp, on_video_device, lhs);
@@ -482,7 +482,7 @@ stream_data_sources(struct lighthouse_system *lhs,
 		vive_source_hook_into_sinks(vive_head->source, &sinks);
 	}
 
-	xrt_result_t xret = xrt_fs_stream_start(lhs->xfs, sinks.cams[0], XRT_FS_CAPTURE_TYPE_TRACKING, mode);
+	xrt_result_t xret = xrt_fs_frame_stream_start(lhs->xfs, sinks.cams[0], XRT_FS_CAPTURE_TYPE_TRACKING, mode);
 	if (xret != XRT_SUCCESS) {
 		LH_ERROR("Unable to start data streaming, got %d", xret);
 		return false;
@@ -693,7 +693,7 @@ lighthouse_open_system_impl(struct xrt_builder *xb,
 			goto end_valve_index;
 		}
 
-		struct xrt_slam_sinks sinks = {0};
+		struct xrt_tracking_sinks sinks = {0};
 		struct xrt_device *hand_devices[2] = {NULL};
 		struct vive_device *vive_head = NULL;
 

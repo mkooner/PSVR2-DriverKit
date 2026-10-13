@@ -65,13 +65,13 @@ struct wmr_source
 
 	struct wmr_hmd_config config;
 	struct wmr_camera *camera;
-	struct xrt_slam_sinks *euroc_recorder; //!< EuRoC dataset recorder
+	struct xrt_tracking_sinks *euroc_recorder; //!< EuRoC dataset recorder
 
 	// Sinks (head tracking)
 	struct xrt_frame_sink cam_sinks[XRT_TRACKING_MAX_CAMS]; //!< Intermediate sinks for camera frames
 	struct xrt_imu_sink imu_sinks[XRT_TRACKING_MAX_IMUS];   //!< Intermediate sink for IMU samples
-	struct xrt_slam_sinks in_sinks;  //!< Pointers to intermediate sinks (SLAM and controller)
-	struct xrt_slam_sinks out_sinks; //!< Pointers to downstream sinks (only SLAM)
+	struct xrt_tracking_sinks in_sinks;  //!< Pointers to intermediate sinks (SLAM and controller)
+	struct xrt_tracking_sinks out_sinks; //!< Pointers to downstream sinks (only SLAM)
 
 	// UI Sinks (head tracking)
 	struct u_sink_debug ui_cam_sinks[XRT_TRACKING_MAX_CAMS]; //!< Sink to display camera frames in UI
@@ -183,7 +183,7 @@ wmr_source_from_xfs(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-wmr_source_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+wmr_source_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
 {
 	//! @todo We should probably implement this with just the base mode.
 	struct wmr_source *ws = wmr_source_from_xfs(xfs);
@@ -226,10 +226,10 @@ wmr_source_is_running(struct xrt_fs *xfs, bool *out_is_running)
 }
 
 static xrt_result_t
-wmr_source_stream_start(struct xrt_fs *xfs,
-                        struct xrt_frame_sink *xs,
-                        enum xrt_fs_capture_type capture_type,
-                        uint32_t descriptor_index)
+wmr_source_frame_stream_start(struct xrt_fs *xfs,
+                              struct xrt_frame_sink *xs,
+                              enum xrt_fs_capture_type capture_type,
+                              uint32_t frame_mode_index)
 {
 	DRV_TRACE_MARKER();
 
@@ -256,7 +256,7 @@ wmr_source_stream_start(struct xrt_fs *xfs,
 }
 
 static xrt_result_t
-wmr_source_slam_stream_start(struct xrt_fs *xfs, struct xrt_slam_sinks *sinks)
+wmr_source_tracking_streams_start(struct xrt_fs *xfs, struct xrt_tracking_sinks *sinks)
 {
 	DRV_TRACE_MARKER();
 
@@ -264,7 +264,7 @@ wmr_source_slam_stream_start(struct xrt_fs *xfs, struct xrt_slam_sinks *sinks)
 	if (sinks != NULL) {
 		ws->out_sinks = *sinks;
 	}
-	return wmr_source_stream_start(xfs, NULL, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
+	return wmr_source_frame_stream_start(xfs, NULL, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
 }
 
 
@@ -323,10 +323,10 @@ wmr_source_create(struct xrt_frame_context *xfctx, struct xrt_prober_device *dev
 	// Setup xrt_fs
 	struct xrt_fs *xfs = &ws->xfs;
 	u_frameserver_populate_function_pointers(xfs);
-	xfs->enumerate_modes = wmr_source_enumerate_modes;
+	xfs->enumerate_frame_modes = wmr_source_enumerate_frame_modes;
 	xfs->configure_capture = wmr_source_configure_capture;
-	xfs->stream_start = wmr_source_stream_start;
-	xfs->slam_stream_start = wmr_source_slam_stream_start;
+	xfs->frame_stream_start = wmr_source_frame_stream_start;
+	xfs->tracking_streams_start = wmr_source_tracking_streams_start;
 	xfs->stream_stop = wmr_source_stream_stop;
 	xfs->is_running = wmr_source_is_running;
 	(void)snprintf(xfs->name, sizeof(xfs->name), WMR_SOURCE_STR);

@@ -102,14 +102,14 @@ euroc_run_dataset(const char *euroc_path,
 
 	// Start SLAM tracker
 	struct xrt_tracked_slam *xts = NULL;
-	struct xrt_slam_sinks *sinks = NULL;
+	struct xrt_tracking_sinks *sinks = NULL;
 	int ret = t_slam_create(&xfctx, st_config, &xts, &sinks);
 	EUROC_ASSERT(ret == 0, "Failed to create slam tracker");
 	t_slam_start(xts);
 
 	// Stream euroc player into the tracker
 	struct xrt_fs *xfs = euroc_player_create(&xfctx, euroc_path, ep_config);
-	xrt_fs_slam_stream_start(xfs, sinks);
+	xrt_fs_tracking_streams_start(xfs, sinks);
 
 	// Let's loop until both the player and the tracker finish
 

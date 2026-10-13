@@ -1233,7 +1233,7 @@ Device::pushImuSample(xrt_imu_sample &sample)
 	this->sensor_fusion->pushImuSample(sample);
 
 	// The recorder's IMU sink for this device, if a recorder exists.
-	xrt_slam_sinks *euroc_sinks = this->tracker->euroc_sinks.load();
+	xrt_tracking_sinks *euroc_sinks = this->tracker->euroc_sinks.load();
 	int32_t euroc_idx = this->euroc_imu_index.load();
 	xrt_imu_sink *euroc_imu_sink =
 	    (euroc_sinks != nullptr && euroc_idx >= 0) ? euroc_sinks->imus[euroc_idx] : nullptr;
@@ -1766,7 +1766,7 @@ constellation_tracker_camera_push_blobs(t_blob_sink *tbs, t_blob_observation *tb
 #endif
 
 	// The recorder's camera sink for this camera, if a recorder exists.
-	xrt_slam_sinks *euroc_sinks = tracker->euroc_sinks.load();
+	xrt_tracking_sinks *euroc_sinks = tracker->euroc_sinks.load();
 	int32_t euroc_idx = camera->euroc_cam_index.load();
 	xrt_frame_sink *euroc_cam_sink =
 	    (euroc_sinks != nullptr && euroc_idx >= 0) ? euroc_sinks->cams[euroc_idx] : nullptr;

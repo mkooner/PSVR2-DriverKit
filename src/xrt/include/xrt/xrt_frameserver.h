@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-struct xrt_slam_sinks;
+struct xrt_tracking_sinks;
 
 /*!
  * Controlling the camera capture parameters
@@ -90,7 +90,7 @@ struct xrt_fs
 	 * This *may* return no modes, which should be checked by the caller.
 	 * In this case, the frameserver does not support streaming frames.
 	 */
-	xrt_result_t (*enumerate_modes)(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count);
+	xrt_result_t (*enumerate_frame_modes)(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count);
 
 	/*!
 	 * Set the capture parameters, not all types of parameters may be supported on some capture devices.
@@ -100,29 +100,32 @@ struct xrt_fs
 	xrt_result_t (*configure_capture)(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *cp);
 
 	/*!
-	 * Start the capture stream.
+	 * Start a single frame capture stream.
+	 *
+	 * If you only need single frames (or direct stereo frames!),
+	 * this is the easiest way to get that data out.
 	 *
 	 * @param xfs              The frameserver
 	 * @param xs               The sink for this frameserver to push frames into
 	 * @param capture_type     The type of capture this is
-	 * @param descriptor_index The mode the stream should start with.
+	 * @param frame_mode_index The mode the frame stream should start with.
 	 */
-	xrt_result_t (*stream_start)(struct xrt_fs *xfs,
-	                             struct xrt_frame_sink *xs,
-	                             enum xrt_fs_capture_type capture_type,
-	                             uint32_t descriptor_index);
+	xrt_result_t (*frame_stream_start)(struct xrt_fs *xfs,
+	                                   struct xrt_frame_sink *xs,
+	                                   enum xrt_fs_capture_type capture_type,
+	                                   uint32_t frame_mode_index);
 
 	/*!
-	 * Setup SLAM sinks for all the sensors a SLAM implementation may supports and
-	 * start the frame server stream. Use @ref xrt_fs::stream_start instead if
-	 * you only need the image stream.
+	 * Sets up a multitude of tracking-related streams that this device may support.
+	 * If this method is used instead of @ref frame_stream_start, stereo frames will instead be split and sent to
+	 * individual sinks, instead of possibly being sent as stereo frames to the single sink.
 	 *
 	 * @note Having this method extends the scope of the frameserver to something
 	 * more akin to a generic data source instead of just serving frames.
 	 *
 	 * @todo Fix this incongruence. Maybe rename the interface to xrt_data_source.
 	 */
-	xrt_result_t (*slam_stream_start)(struct xrt_fs *xfs, struct xrt_slam_sinks *sinks);
+	xrt_result_t (*tracking_streams_start)(struct xrt_fs *xfs, struct xrt_tracking_sinks *sinks);
 
 	/*!
 	 * Stop the capture stream.
@@ -143,16 +146,16 @@ struct xrt_fs
  */
 
 /*!
- * @copydoc xrt_fs::enumerate_modes
+ * @copydoc xrt_fs::enumerate_frame_modes
  *
  * Helper for calling through the function pointer.
  *
  * @public @memberof xrt_fs
  */
 static inline xrt_result_t
-xrt_fs_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+xrt_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
 {
-	return xfs->enumerate_modes(xfs, out_modes, out_count);
+	return xfs->enumerate_frame_modes(xfs, out_modes, out_count);
 }
 
 /*!
@@ -169,32 +172,32 @@ xrt_fs_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *c
 }
 
 /*!
- * @copydoc xrt_fs::stream_start
+ * @copydoc xrt_fs::frame_stream_start
  *
  * Helper for calling through the function pointer.
  *
  * @public @memberof xrt_fs
  */
 static inline xrt_result_t
-xrt_fs_stream_start(struct xrt_fs *xfs,
-                    struct xrt_frame_sink *xs,
-                    enum xrt_fs_capture_type capture_type,
-                    uint32_t descriptor_index)
+xrt_fs_frame_stream_start(struct xrt_fs *xfs,
+                          struct xrt_frame_sink *xs,
+                          enum xrt_fs_capture_type capture_type,
+                          uint32_t frame_mode_index)
 {
-	return xfs->stream_start(xfs, xs, capture_type, descriptor_index);
+	return xfs->frame_stream_start(xfs, xs, capture_type, frame_mode_index);
 }
 
 /*!
- * @copydoc xrt_fs::slam_stream_start
+ * @copydoc xrt_fs::tracking_streams_start
  *
  * Helper for calling through the function pointer.
  *
  * @public @memberof xrt_fs
  */
 static inline xrt_result_t
-xrt_fs_slam_stream_start(struct xrt_fs *xfs, struct xrt_slam_sinks *sinks)
+xrt_fs_tracking_streams_start(struct xrt_fs *xfs, struct xrt_tracking_sinks *sinks)
 {
-	return xfs->slam_stream_start(xfs, sinks);
+	return xfs->tracking_streams_start(xfs, sinks);
 }
 
 /*!

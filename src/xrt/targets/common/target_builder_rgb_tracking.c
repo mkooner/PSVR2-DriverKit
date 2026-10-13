@@ -194,7 +194,7 @@ setup_pipeline(struct xrt_prober *xp, struct build_state *build)
 	u_sink_quirk_create(build->xfctx, xsink, &qp, &xsink);
 
 	// Start the stream now.
-	xrt_fs_stream_start(build->xfs, xsink, XRT_FS_CAPTURE_TYPE_TRACKING, build->settings.camera_mode);
+	xrt_fs_frame_stream_start(build->xfs, xsink, XRT_FS_CAPTURE_TYPE_TRACKING, build->settings.camera_mode);
 }
 #endif
 

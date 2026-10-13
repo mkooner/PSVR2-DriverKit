@@ -464,7 +464,7 @@ struct EurocRecorderSession
 {
 	// having one here looks icky but it prevents leaks cus we create&destroy
 	xrt_frame_context xfctx{};
-	xrt_slam_sinks *sinks{nullptr};
+	xrt_tracking_sinks *sinks{nullptr};
 
 	char camera_info[64]{};
 	char device_info[64]{};
@@ -504,7 +504,7 @@ public: // Fields
 	std::unique_ptr<EurocRecorderSession> euroc_session{};
 	//! The sinks of @ref euroc_session, published only while it is fully set up. Read by the push paths, a debug
 	//! aid so there's no protection against it being destroyed mid-push.
-	std::atomic<xrt_slam_sinks *> euroc_sinks{nullptr};
+	std::atomic<xrt_tracking_sinks *> euroc_sinks{nullptr};
 	u_var_button euroc_toggle_btn{};
 	//! The label state the button is showing, only touched from the GUI thread.
 	bool euroc_session_wanted{false};

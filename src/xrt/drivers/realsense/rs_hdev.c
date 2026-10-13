@@ -143,11 +143,11 @@ struct rs_source
 	enum u_logging_level log_level; //!< Log level
 
 	// Sinks
-	struct xrt_frame_sink left_sink;  //!< Intermediate sink for left camera frames
-	struct xrt_frame_sink right_sink; //!< Intermediate sink for right camera frames
-	struct xrt_imu_sink imu_sink;     //!< Intermediate sink for IMU samples
-	struct xrt_slam_sinks in_sinks;   //!< Pointers to intermediate sinks
-	struct xrt_slam_sinks out_sinks;  //!< Pointers to downstream sinks
+	struct xrt_frame_sink left_sink;     //!< Intermediate sink for left camera frames
+	struct xrt_frame_sink right_sink;    //!< Intermediate sink for right camera frames
+	struct xrt_imu_sink imu_sink;        //!< Intermediate sink for IMU samples
+	struct xrt_tracking_sinks in_sinks;  //!< Pointers to intermediate sinks
+	struct xrt_tracking_sinks out_sinks; //!< Pointers to downstream sinks
 
 	// UI Sinks
 	struct u_sink_debug ui_left_sink;  //!< Sink to display left frames in UI
@@ -815,7 +815,7 @@ rs_source_from_xfs(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-rs_source_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+rs_source_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
 {
 	struct rs_source *rs = container_of(xfs, struct rs_source, xfs);
 	struct xrt_fs_mode *modes = U_TYPED_ARRAY_CALLOC(struct xrt_fs_mode, 1);
@@ -870,10 +870,10 @@ rs_source_is_running(struct xrt_fs *xfs, bool *out_is_running)
 }
 
 static xrt_result_t
-rs_source_stream_start(struct xrt_fs *xfs,
-                       struct xrt_frame_sink *xs,
-                       enum xrt_fs_capture_type capture_type,
-                       uint32_t descriptor_index)
+rs_source_frame_stream_start(struct xrt_fs *xfs,
+                             struct xrt_frame_sink *xs,
+                             enum xrt_fs_capture_type capture_type,
+                             uint32_t frame_mode_index)
 {
 	struct rs_source *rs = rs_source_from_xfs(xfs);
 	if (xs == NULL && capture_type == XRT_FS_CAPTURE_TYPE_TRACKING) {
@@ -901,11 +901,11 @@ rs_source_stream_start(struct xrt_fs *xfs,
 }
 
 static xrt_result_t
-rs_source_slam_stream_start(struct xrt_fs *xfs, struct xrt_slam_sinks *sinks)
+rs_source_tracking_streams_start(struct xrt_fs *xfs, struct xrt_tracking_sinks *sinks)
 {
 	struct rs_source *rs = rs_source_from_xfs(xfs);
 	rs->out_sinks = *sinks;
-	return rs_source_stream_start(xfs, NULL, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
+	return rs_source_frame_stream_start(xfs, NULL, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
 }
 
 
@@ -1051,10 +1051,10 @@ rs_source_create(struct xrt_frame_context *xfctx, int device_idx)
 	// Setup xrt_fs
 	struct xrt_fs *xfs = &rs->xfs;
 	u_frameserver_populate_function_pointers(xfs);
-	xfs->enumerate_modes = rs_source_enumerate_modes;
+	xfs->enumerate_frame_modes = rs_source_enumerate_frame_modes;
 	xfs->configure_capture = rs_source_configure_capture;
-	xfs->stream_start = rs_source_stream_start;
-	xfs->slam_stream_start = rs_source_slam_stream_start;
+	xfs->frame_stream_start = rs_source_frame_stream_start;
+	xfs->tracking_streams_start = rs_source_tracking_streams_start;
 	xfs->stream_stop = rs_source_stream_stop;
 	xfs->is_running = rs_source_is_running;
 	snprintf(xfs->name, sizeof(xfs->name), RS_SOURCE_STR);

@@ -65,7 +65,7 @@ create_depthai_monocular(struct video_select *vs)
 		return;
 	}
 
-	xrt_fs_enumerate_modes(vs->xfs, &vs->modes, &vs->num_modes);
+	xrt_fs_enumerate_frame_modes(vs->xfs, &vs->modes, &vs->num_modes);
 }
 
 static void
@@ -91,7 +91,7 @@ create_depthai_stereo(struct video_select *vs)
 	vs->settings->camera_type = XRT_SETTINGS_CAMERA_TYPE_SLAM;
 
 
-	xrt_fs_enumerate_modes(vs->xfs, &vs->modes, &vs->num_modes);
+	xrt_fs_enumerate_frame_modes(vs->xfs, &vs->modes, &vs->num_modes);
 }
 #endif /* XRT_BUILD_DRIVER_DEPTHAI */
 
@@ -132,7 +132,7 @@ on_video_device(struct xrt_prober *xp,
 		return;
 	}
 
-	xrt_fs_enumerate_modes(vs->xfs, &vs->modes, &vs->num_modes);
+	xrt_fs_enumerate_frame_modes(vs->xfs, &vs->modes, &vs->num_modes);
 }
 
 static bool

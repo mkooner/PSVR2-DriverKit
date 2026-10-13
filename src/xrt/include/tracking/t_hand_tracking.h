@@ -175,7 +175,7 @@ struct t_hand_tracking_async
 	struct xrt_frame_node node;
 	struct xrt_frame_sink left;
 	struct xrt_frame_sink right;
-	struct xrt_slam_sinks sinks; //!< Pointers to `left` and `right` sinks
+	struct xrt_tracking_sinks sinks; //!< Pointers to `left` and `right` sinks
 
 	void (*get_hand)(struct t_hand_tracking_async *ht_async,
 	                 enum xrt_input_name name,

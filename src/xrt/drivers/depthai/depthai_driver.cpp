@@ -983,7 +983,7 @@ depthai_fs(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-depthai_fs_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+depthai_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
 {
 	struct depthai_fs *depthai = depthai_fs(xfs);
 	DEPTHAI_DEBUG(depthai, "DepthAI: Enumerate modes called");
@@ -1015,16 +1015,16 @@ depthai_fs_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameter
 }
 
 static xrt_result_t
-depthai_fs_stream_start(struct xrt_fs *xfs,
-                        struct xrt_frame_sink *xs,
-                        enum xrt_fs_capture_type capture_type,
-                        uint32_t descriptor_index)
+depthai_fs_frame_stream_start(struct xrt_fs *xfs,
+                              struct xrt_frame_sink *xs,
+                              enum xrt_fs_capture_type capture_type,
+                              uint32_t frame_mode_index)
 {
 	struct depthai_fs *depthai = depthai_fs(xfs);
 	DEPTHAI_DEBUG(depthai, "DepthAI: Stream start called");
 
-	if (descriptor_index != 0) {
-		DEPTHAI_ERROR(depthai, "Tried to start stream with invalid descriptor index %d", descriptor_index);
+	if (frame_mode_index != 0) {
+		DEPTHAI_ERROR(depthai, "Tried to start stream with invalid descriptor index %d", frame_mode_index);
 		return XRT_ERROR_INVALID_ARGUMENT;
 	}
 
@@ -1041,7 +1041,7 @@ depthai_fs_stream_start(struct xrt_fs *xfs,
 }
 
 static xrt_result_t
-depthai_fs_slam_stream_start(struct xrt_fs *xfs, struct xrt_slam_sinks *sinks)
+depthai_fs_tracking_streams_start(struct xrt_fs *xfs, struct xrt_tracking_sinks *sinks)
 {
 	struct depthai_fs *depthai = depthai_fs(xfs);
 	DEPTHAI_DEBUG(depthai, "DepthAI: SLAM stream start called");
@@ -1135,10 +1135,10 @@ depthai_create_and_do_minimal_setup(void)
 
 	struct depthai_fs *depthai = U_TYPED_CALLOC(struct depthai_fs);
 	u_frameserver_populate_function_pointers(&depthai->base);
-	depthai->base.enumerate_modes = depthai_fs_enumerate_modes;
+	depthai->base.enumerate_frame_modes = depthai_fs_enumerate_frame_modes;
 	depthai->base.configure_capture = depthai_fs_configure_capture;
-	depthai->base.stream_start = depthai_fs_stream_start;
-	depthai->base.slam_stream_start = depthai_fs_slam_stream_start;
+	depthai->base.frame_stream_start = depthai_fs_frame_stream_start;
+	depthai->base.tracking_streams_start = depthai_fs_tracking_streams_start;
 	depthai->base.stream_stop = depthai_fs_stream_stop;
 	depthai->base.is_running = depthai_fs_is_running;
 	depthai->node.break_apart = depthai_fs_node_break_apart;

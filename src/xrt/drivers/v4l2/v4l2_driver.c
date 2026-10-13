@@ -541,7 +541,7 @@ v4l2_fs_setup_format(struct v4l2_fs *vid)
  */
 
 static xrt_result_t
-v4l2_fs_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+v4l2_fs_enumerate_frame_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
 {
 	struct v4l2_fs *vid = v4l2_fs(xfs);
 	if (vid->num_descriptors == 0) {
@@ -574,18 +574,18 @@ v4l2_fs_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *
 }
 
 static xrt_result_t
-v4l2_fs_stream_start(struct xrt_fs *xfs,
-                     struct xrt_frame_sink *xs,
-                     enum xrt_fs_capture_type capture_type,
-                     uint32_t descriptor_index)
+v4l2_fs_frame_stream_start(struct xrt_fs *xfs,
+                           struct xrt_frame_sink *xs,
+                           enum xrt_fs_capture_type capture_type,
+                           uint32_t frame_mode_index)
 {
 	struct v4l2_fs *vid = v4l2_fs(xfs);
 
-	if (descriptor_index >= vid->num_descriptors) {
-		V4L2_ERROR(vid, "error Invalid descriptor_index (%i >= %i)", descriptor_index, vid->num_descriptors);
+	if (frame_mode_index >= vid->num_descriptors) {
+		V4L2_ERROR(vid, "error Invalid frame_mode_index (%i >= %i)", frame_mode_index, vid->num_descriptors);
 		return XRT_ERROR_INVALID_ARGUMENT;
 	}
-	vid->selected = descriptor_index;
+	vid->selected = frame_mode_index;
 
 	vid->sink = xs;
 	vid->is_running = true;
@@ -689,9 +689,9 @@ v4l2_fs_create(struct xrt_frame_context *xfctx,
 {
 	struct v4l2_fs *vid = U_TYPED_CALLOC(struct v4l2_fs);
 	u_frameserver_populate_function_pointers(&vid->base);
-	vid->base.enumerate_modes = v4l2_fs_enumerate_modes;
+	vid->base.enumerate_frame_modes = v4l2_fs_enumerate_frame_modes;
 	vid->base.configure_capture = v4l2_fs_configure_capture;
-	vid->base.stream_start = v4l2_fs_stream_start;
+	vid->base.frame_stream_start = v4l2_fs_frame_stream_start;
 	vid->base.stream_stop = v4l2_fs_stream_stop;
 	vid->base.is_running = v4l2_fs_is_running;
 	vid->node.break_apart = v4l2_fs_node_break_apart;

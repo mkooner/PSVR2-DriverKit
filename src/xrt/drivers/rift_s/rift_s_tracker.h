@@ -104,10 +104,10 @@ struct rift_s_tracker
 	struct t_slam_calibration slam_calib;
 
 	/* Input sinks that the camera delivers SLAM frames to */
-	struct xrt_slam_sinks in_slam_sinks;
+	struct xrt_tracking_sinks in_slam_sinks;
 
 	/* SLAM/HT sinks we deliver imu and frame data to */
-	struct xrt_slam_sinks slam_sinks;
+	struct xrt_tracking_sinks slam_sinks;
 
 	struct xrt_device *handtracker;
 
@@ -131,7 +131,7 @@ rift_s_tracker_destroy(struct rift_s_tracker *t);
 void
 rift_s_tracker_add_debug_ui(struct rift_s_tracker *t, void *root);
 
-struct xrt_slam_sinks *
+struct xrt_tracking_sinks *
 rift_s_tracker_get_slam_sinks(struct rift_s_tracker *t);
 struct xrt_device *
 rift_s_tracker_get_hand_tracking_device(struct rift_s_tracker *t);

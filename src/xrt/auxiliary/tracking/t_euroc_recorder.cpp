@@ -174,13 +174,13 @@ struct euroc_recorder
 	bool use_jpg; //! Whether or not we should save images as .jpg files
 
 	// Cloner sinks: copy frame to heap for quick release of the original
-	xrt_slam_sinks cloner_queues; //!< Queue sinks that write into cloner sinks
+	xrt_tracking_sinks cloner_queues; //!< Queue sinks that write into cloner sinks
 	xrt_imu_sink cloner_imu_sinks[XRT_TRACKING_MAX_IMUS];
 	xrt_pose_sink cloner_gt_sink;
 	xrt_frame_sink cloner_sinks[XRT_TRACKING_MAX_CAMS];
 
 	// Writer sinks: write copied frame to disk
-	xrt_slam_sinks writer_queues; //!< Queue sinks that write into writer sinks
+	xrt_tracking_sinks writer_queues; //!< Queue sinks that write into writer sinks
 	xrt_imu_sink writer_imu_sinks[XRT_TRACKING_MAX_IMUS];
 	xrt_pose_sink writer_gt_sink;
 	xrt_frame_sink writer_sinks[XRT_TRACKING_MAX_CAMS];
@@ -580,7 +580,7 @@ t_euroc_model_to_distortion_model(const char *model_cstr)
 	return T_DISTORTION_PINHOLE;
 }
 
-extern "C" xrt_slam_sinks *
+extern "C" xrt_tracking_sinks *
 euroc_recorder_create(xrt_frame_context *xfctx, const euroc_recorder_settings *settings)
 {
 	euroc_recorder *er = new euroc_recorder{};
@@ -640,7 +640,7 @@ euroc_recorder_create(xrt_frame_context *xfctx, const euroc_recorder_settings *s
 	er->writer_queues.gt = nullptr; // We use a std::queue instead
 	er->writer_gt_sink.push_pose = euroc_recorder_save_gt;
 
-	xrt_slam_sinks *public_sinks = &er->cloner_queues;
+	xrt_tracking_sinks *public_sinks = &er->cloner_queues;
 
 	if (settings->record_from_start) {
 		euroc_recorder_start(public_sinks);
@@ -650,7 +650,7 @@ euroc_recorder_create(xrt_frame_context *xfctx, const euroc_recorder_settings *s
 }
 
 extern "C" void
-euroc_recorder_start(xrt_slam_sinks *er_sinks)
+euroc_recorder_start(xrt_tracking_sinks *er_sinks)
 {
 	euroc_recorder *er = container_of(er_sinks, euroc_recorder, cloner_queues);
 
@@ -672,7 +672,7 @@ euroc_recorder_start(xrt_slam_sinks *er_sinks)
 }
 
 extern "C" void
-euroc_recorder_stop(xrt_slam_sinks *er_sinks)
+euroc_recorder_stop(xrt_tracking_sinks *er_sinks)
 {
 	euroc_recorder *er = container_of(er_sinks, euroc_recorder, cloner_queues);
 
@@ -701,7 +701,7 @@ euroc_recorder_btn_cb(void *ptr)
 }
 
 extern "C" void
-euroc_recorder_add_ui(xrt_slam_sinks *er_sinks, void *root, const char *prefix)
+euroc_recorder_add_ui(xrt_tracking_sinks *er_sinks, void *root, const char *prefix)
 {
 	euroc_recorder *er = container_of(er_sinks, euroc_recorder, cloner_queues);
 	er->recording_btn.cb = euroc_recorder_btn_cb;

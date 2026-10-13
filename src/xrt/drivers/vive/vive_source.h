@@ -34,7 +34,7 @@ void
 vive_source_push_frame_ticks(struct vive_source *vs, timepoint_ns ticks);
 
 void
-vive_source_hook_into_sinks(struct vive_source *vs, struct xrt_slam_sinks *sinks);
+vive_source_hook_into_sinks(struct vive_source *vs, struct xrt_tracking_sinks *sinks);
 
 /*!
  * @}

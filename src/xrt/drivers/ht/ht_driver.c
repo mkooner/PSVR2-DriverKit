@@ -230,7 +230,7 @@ int
 ht_device_create(struct xrt_frame_context *xfctx,
                  struct t_stereo_camera_calibration *calib,
                  struct t_hand_tracking_create_info create_info,
-                 struct xrt_slam_sinks **out_sinks,
+                 struct xrt_tracking_sinks **out_sinks,
                  struct xrt_device **out_device)
 {
 

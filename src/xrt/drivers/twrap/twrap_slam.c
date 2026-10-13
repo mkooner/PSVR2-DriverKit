@@ -149,7 +149,7 @@ twrap_slam_destroy(struct xrt_device *xdev)
 xrt_result_t
 twrap_slam_create_device(struct xrt_frame_context *xfctx,
                          enum xrt_device_name name,
-                         struct xrt_slam_sinks **out_sinks,
+                         struct xrt_tracking_sinks **out_sinks,
                          struct xrt_device **out_device)
 {
 	struct slam_device *dx = U_DEVICE_ALLOCATE(struct slam_device, U_DEVICE_ALLOC_TRACKING_NONE, 1, 0);
