@@ -192,6 +192,19 @@ wmr_source_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **
 }
 
 static xrt_result_t
+wmr_source_get_tracking_capabilities(struct xrt_ds *xds, struct xrt_ds_tracking_capabilities *out_capabilities)
+{
+	struct wmr_source *ws = wmr_source_from_xds(xds);
+
+	(*out_capabilities) = (struct xrt_ds_tracking_capabilities){
+	    .cam_count = ws->in_sinks.cam_count,
+	    .imu_count = ws->in_sinks.imu_count,
+	};
+
+	return XRT_SUCCESS;
+}
+
+static xrt_result_t
 wmr_source_configure_capture(struct xrt_ds *xds, struct xrt_ds_frame_capture_parameters *cp)
 {
 	struct wmr_source *ws = wmr_source_from_xds(xds);
@@ -324,6 +337,7 @@ wmr_source_create(struct xrt_frame_context *xfctx, struct xrt_prober_device *dev
 	struct xrt_ds *xds = &ws->xds;
 	u_data_source_populate_function_pointers(xds);
 	xds->enumerate_frame_modes = wmr_source_enumerate_frame_modes;
+	xds->get_tracking_capabilities = wmr_source_get_tracking_capabilities;
 	xds->configure_capture = wmr_source_configure_capture;
 	xds->frame_stream_start = wmr_source_frame_stream_start;
 	xds->tracking_streams_start = wmr_source_tracking_streams_start;

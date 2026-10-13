@@ -842,6 +842,19 @@ rs_source_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **o
 }
 
 static xrt_result_t
+rs_source_get_tracking_capabilities(struct xrt_ds *xds, struct xrt_ds_tracking_capabilities *out_capabilities)
+{
+	struct rs_source *rs = container_of(xds, struct rs_source, xds);
+
+	(*out_capabilities) = (struct xrt_ds_tracking_capabilities){
+	    .cam_count = rs->in_sinks.cam_count,
+	    .imu_count = rs->in_sinks.imu_count,
+	};
+
+	return XRT_SUCCESS;
+}
+
+static xrt_result_t
 rs_source_configure_capture(struct xrt_ds *xds, struct xrt_ds_frame_capture_parameters *cp)
 {
 	//! @todo implement
@@ -1052,6 +1065,7 @@ rs_source_create(struct xrt_frame_context *xfctx, int device_idx)
 	struct xrt_ds *xds = &rs->xds;
 	u_data_source_populate_function_pointers(xds);
 	xds->enumerate_frame_modes = rs_source_enumerate_frame_modes;
+	xds->get_tracking_capabilities = rs_source_get_tracking_capabilities;
 	xds->configure_capture = rs_source_configure_capture;
 	xds->frame_stream_start = rs_source_frame_stream_start;
 	xds->tracking_streams_start = rs_source_tracking_streams_start;

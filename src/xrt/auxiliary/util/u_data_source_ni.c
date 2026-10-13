@@ -27,6 +27,13 @@ u_data_source_ni_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_m
 }
 
 xrt_result_t
+u_data_source_ni_get_tracking_capabilities(struct xrt_ds *xds, struct xrt_ds_tracking_capabilities *out_capabilities)
+{
+	E(get_tracking_capabilities);
+	return XRT_ERROR_NOT_IMPLEMENTED;
+}
+
+xrt_result_t
 u_data_source_ni_configure_capture(struct xrt_ds *xds, struct xrt_ds_frame_capture_parameters *cp)
 {
 	E(configure_capture);

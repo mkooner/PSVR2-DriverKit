@@ -15,6 +15,7 @@
 
 #include "xrt/xrt_frame.h"
 #include "xrt/xrt_results.h"
+#include "xrt/xrt_tracking.h"
 
 
 #ifdef __cplusplus
@@ -64,6 +65,19 @@ enum xrt_ds_capture_type
 };
 
 /*!
+ * Structure describing a data source's tracking streaming capabilities.
+ * @see xrt_ds
+ * @ingroup xrt_iface
+ */
+struct xrt_ds_tracking_capabilities
+{
+	//! The number of cameras that are capable of streaming. See @ref XRT_TRACKING_MAX_CAMS
+	uint32_t cam_count;
+	//! The number of IMUs that are capable of streaming. See @ref XRT_TRACKING_MAX_IMUS.
+	uint32_t imu_count;
+};
+
+/*!
  * @interface xrt_ds
  * Generic data source intended for tracking purposes, currently primarily produces video frames.
  *
@@ -96,6 +110,17 @@ struct xrt_ds
 	xrt_result_t (*enumerate_frame_modes)(struct xrt_ds *xds,
 	                                      struct xrt_ds_frame_mode **out_modes,
 	                                      uint32_t *out_count);
+
+	/*!
+	 * Gets the capabilities of this data source, matching with the amount of sinks it's able to push to in
+	 * frame_stream_start. This allows an optical tracker to build itself around a data source before starting a
+	 * stream with all possible data (or with whatever subset it may need).
+	 *
+	 * @param      xds              The data source.
+	 * @param[out] out_capabilities A pointer to write the capabilities into.
+	 */
+	xrt_result_t (*get_tracking_capabilities)(struct xrt_ds *xds,
+	                                          struct xrt_ds_tracking_capabilities *out_capabilities);
 
 	/*!
 	 * Set the capture parameters, not all types of parameters may be supported on some capture devices.
@@ -156,6 +181,19 @@ static inline xrt_result_t
 xrt_ds_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **out_modes, uint32_t *out_count)
 {
 	return xds->enumerate_frame_modes(xds, out_modes, out_count);
+}
+
+/*!
+ * @copydoc xrt_ds::get_tracking_capabilities
+ *
+ * Helper for calling through the function pointer.
+ *
+ * @public @memberof xrt_ds
+ */
+static inline xrt_result_t
+xrt_ds_get_tracking_capabilities(struct xrt_ds *xds, struct xrt_ds_tracking_capabilities *out_capabilities)
+{
+	return xds->get_tracking_capabilities(xds, out_capabilities);
 }
 
 /*!

@@ -27,7 +27,10 @@ namespace xrt::util {
  */
 struct DataSourceFunctions
 {
-	//! @ref xrt_ds::tracking_streams_start
+	/*!
+	 * Sets both @ref xrt_ds::tracking_streams_start and @ref xrt_ds::get_tracking_capabilities, the derived class
+	 * must then implement both `trackingStreamsStart` and `getTrackingCapabilities`.
+	 */
 	bool tracking_streams{false};
 };
 
@@ -65,6 +68,7 @@ public: // Methods
 		xds.is_running = isRunningWrap;
 
 		if constexpr (functions.tracking_streams) {
+			xds.get_tracking_capabilities = getTrackingCapabilitiesWrap;
 			xds.tracking_streams_start = trackingStreamsStartWrap;
 		}
 	}
@@ -126,6 +130,13 @@ private: // Functions
 	enumerateFrameModesWrap(struct xrt_ds *xds, struct xrt_ds_frame_mode **out_modes, uint32_t *out_count) noexcept
 	try {
 		return GET(xds).enumerateFrameModes(out_modes, out_count);
+	}
+	G_CATCH_GUARDS_WITH_RETURN(XRT_ERROR_UNCAUGHT_EXCEPTION)
+
+	static xrt_result_t
+	getTrackingCapabilitiesWrap(struct xrt_ds *xds, struct xrt_ds_tracking_capabilities *out_capabilities) noexcept
+	try {
+		return GET(xds).getTrackingCapabilities(out_capabilities);
 	}
 	G_CATCH_GUARDS_WITH_RETURN(XRT_ERROR_UNCAUGHT_EXCEPTION)
 

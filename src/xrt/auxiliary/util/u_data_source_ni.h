@@ -31,6 +31,14 @@ xrt_result_t
 u_data_source_ni_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **out_modes, uint32_t *out_count);
 
 /*!
+ * Not implemented function for @ref xrt_ds::get_tracking_capabilities.
+ *
+ * @ingroup aux_util
+ */
+xrt_result_t
+u_data_source_ni_get_tracking_capabilities(struct xrt_ds *xds, struct xrt_ds_tracking_capabilities *out_capabilities);
+
+/*!
  * Not implemented function for @ref xrt_ds::configure_capture.
  *
  * @ingroup aux_util

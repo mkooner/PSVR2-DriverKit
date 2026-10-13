@@ -1005,6 +1005,20 @@ depthai_ds_enumerate_frame_modes(struct xrt_ds *xds, struct xrt_ds_frame_mode **
 }
 
 static xrt_result_t
+depthai_ds_get_tracking_capabilities(struct xrt_ds *xds, struct xrt_ds_tracking_capabilities *out_capabilities)
+{
+	struct depthai_ds *depthai = depthai_ds(xds);
+
+	(*out_capabilities) = (struct xrt_ds_tracking_capabilities){
+	    // We only have these things sometimes, they're optionally enabled.
+	    .cam_count = depthai->want_cameras ? 2 : 0,
+	    .imu_count = depthai->want_imu ? 1 : 0,
+	};
+
+	return XRT_SUCCESS;
+}
+
+static xrt_result_t
 depthai_ds_configure_capture(struct xrt_ds *xds, struct xrt_ds_frame_capture_parameters *cp)
 {
 	struct depthai_ds *depthai = depthai_ds(xds);
@@ -1054,9 +1068,9 @@ depthai_ds_tracking_streams_start(struct xrt_ds *xds, struct xrt_tracking_sinks 
 	if (depthai->want_cameras && sinks->cams[0] != NULL && sinks->cams[1] != NULL) {
 		os_thread_helper_start(&depthai->image_thread, depthai_mainloop, depthai);
 	}
-	if (depthai->want_imu && sinks->imu != NULL) {
+	if (depthai->want_imu && sinks->imus[0] != NULL) {
 		os_thread_helper_start(&depthai->imu_thread, depthai_imu_mainloop, depthai);
-		depthai->imu_sink = sinks->imu;
+		depthai->imu_sink = sinks->imus[0];
 	}
 
 	return XRT_SUCCESS;
@@ -1136,6 +1150,7 @@ depthai_create_and_do_minimal_setup(void)
 	struct depthai_ds *depthai = U_TYPED_CALLOC(struct depthai_ds);
 	u_data_source_populate_function_pointers(&depthai->base);
 	depthai->base.enumerate_frame_modes = depthai_ds_enumerate_frame_modes;
+	depthai->base.get_tracking_capabilities = depthai_ds_get_tracking_capabilities;
 	depthai->base.configure_capture = depthai_ds_configure_capture;
 	depthai->base.frame_stream_start = depthai_ds_frame_stream_start;
 	depthai->base.tracking_streams_start = depthai_ds_tracking_streams_start;

@@ -85,7 +85,9 @@ gui_scene_record_euroc(struct gui_program *p)
 	    &gen_lock.cams[0],       //
 	    &gen_lock.cams[1]);      //
 
-	gen_lock.imu = slam_sinks->imu;
+	gen_lock.cam_count = 2;
+	gen_lock.imu_count = 1;
+	gen_lock.imus[0] = slam_sinks->imus[0];
 
 	xrt_ds_tracking_streams_start(the_ds, &gen_lock);
 

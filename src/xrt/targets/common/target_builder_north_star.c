@@ -354,14 +354,18 @@ ns_setup_depthai_device(struct ns_builder *nsb,
 #endif
 
 	entry_sinks = (struct xrt_tracking_sinks){
+	    .cam_count = 2,
+	    .imu_count = 1,
 	    .cams[0] = entry_left_sink,
 	    .cams[1] = entry_right_sink,
-	    .imu = slam_sinks->imu,
+	    .imus[0] = slam_sinks->imus[0],
 	    .gt = slam_sinks->gt,
 	};
 
 	struct xrt_tracking_sinks unused_slam_sinks = {0};
-	unused_slam_sinks.imu = entry_sinks.imu;
+	unused_slam_sinks.cam_count = entry_sinks.cam_count;
+	unused_slam_sinks.imu_count = entry_sinks.imu_count;
+	unused_slam_sinks.imus[0] = entry_sinks.imus[0];
 
 	u_sink_force_genlock_create(     //
 	    xfctx,                       //

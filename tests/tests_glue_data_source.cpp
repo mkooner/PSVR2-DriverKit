@@ -17,8 +17,13 @@
 //! Test data source with minimal functions
 constexpr xrt::util::DataSourceFunctions kMinimalFunctions = {};
 
-//! Test data source with SLAM enabled
-constexpr xrt::util::DataSourceFunctions kSlamFunctions = {
+//! Test data source with everything enabled
+constexpr xrt::util::DataSourceFunctions kFullFunctions = {
+    .tracking_streams = true,
+};
+
+//! Test data source with tracking streams enabled, used to test exception handling
+constexpr xrt::util::DataSourceFunctions kThrowingFunctions = {
     .tracking_streams = true,
 };
 
@@ -96,15 +101,25 @@ public:
 /*!
  * SLAM test data source.
  */
-class SlamTestDataSource : public xrt::util::DataSourceBase<SlamTestDataSource, kSlamFunctions>
+class SlamTestDataSource : public xrt::util::DataSourceBase<SlamTestDataSource, kFullFunctions>
 {
 public:
+	int get_tracking_capabilities_count = 0;
 	int tracking_streams_start_count = 0;
 
 	xrt_result_t
 	enumerateFrameModes(struct xrt_ds_frame_mode **out_modes, uint32_t *out_count)
 	{
 		return XRT_ERROR_NOT_IMPLEMENTED;
+	}
+
+	xrt_result_t
+	getTrackingCapabilities(struct xrt_ds_tracking_capabilities *out_capabilities)
+	{
+		get_tracking_capabilities_count++;
+		out_capabilities->cam_count = 2;
+		out_capabilities->imu_count = 1;
+		return XRT_SUCCESS;
 	}
 
 	xrt_result_t
@@ -142,13 +157,19 @@ public:
 /*!
  * Data source that throws from every callback.
  */
-class ThrowingTestDataSource : public xrt::util::DataSourceBase<ThrowingTestDataSource, kMinimalFunctions>
+class ThrowingTestDataSource : public xrt::util::DataSourceBase<ThrowingTestDataSource, kThrowingFunctions>
 {
 public:
 	xrt_result_t
 	enumerateFrameModes(struct xrt_ds_frame_mode **out_modes, uint32_t *out_count)
 	{
 		throw std::runtime_error("enumerateModes");
+	}
+
+	xrt_result_t
+	getTrackingCapabilities(struct xrt_ds_tracking_capabilities *out_capabilities)
+	{
+		throw std::runtime_error("getTrackingCapabilities");
 	}
 
 	xrt_result_t
@@ -161,6 +182,12 @@ public:
 	frameStreamStart(struct xrt_frame_sink *xs, enum xrt_ds_capture_type type, uint32_t index)
 	{
 		throw std::runtime_error("streamStart");
+	}
+
+	xrt_result_t
+	trackingStreamsStart(struct xrt_tracking_sinks *sinks)
+	{
+		throw std::runtime_error("trackingStreamsStart");
 	}
 
 	xrt_result_t
@@ -194,7 +221,9 @@ TEST_CASE("DataSourceBase_Minimal")
 
 	SECTION("Disabled optional functions fail cleanly")
 	{
+		xrt_ds_tracking_capabilities capabilities = {};
 		REQUIRE(xds->tracking_streams_start(xds, nullptr) == XRT_ERROR_NOT_IMPLEMENTED);
+		REQUIRE(xds->get_tracking_capabilities(xds, &capabilities) == XRT_ERROR_NOT_IMPLEMENTED);
 	}
 
 	SECTION("Identifying fields are zeroed")
@@ -248,6 +277,13 @@ TEST_CASE("DataSourceBase_Slam")
 	REQUIRE(xds->tracking_streams_start != nullptr);
 	REQUIRE(xrt_ds_tracking_streams_start(xds, nullptr) == XRT_SUCCESS);
 	REQUIRE(ds.tracking_streams_start_count == 1);
+
+	REQUIRE(xds->get_tracking_capabilities != nullptr);
+	xrt_ds_tracking_capabilities capabilities = {};
+	REQUIRE(xrt_ds_get_tracking_capabilities(xds, &capabilities) == XRT_SUCCESS);
+	REQUIRE(ds.get_tracking_capabilities_count == 1);
+	REQUIRE(capabilities.cam_count == 2);
+	REQUIRE(capabilities.imu_count == 1);
 }
 
 TEST_CASE("DataSourceBase_Exceptions")
@@ -258,12 +294,15 @@ TEST_CASE("DataSourceBase_Exceptions")
 	xrt_ds_frame_mode *modes = nullptr;
 	uint32_t count = 0;
 	xrt_ds_frame_capture_parameters cp = {};
+	xrt_ds_tracking_capabilities capabilities = {};
 
 	bool running;
 	REQUIRE(xrt_ds_enumerate_frame_modes(xds, &modes, &count) == XRT_ERROR_UNCAUGHT_EXCEPTION);
+	REQUIRE(xrt_ds_get_tracking_capabilities(xds, &capabilities) == XRT_ERROR_UNCAUGHT_EXCEPTION);
 	REQUIRE(xrt_ds_configure_capture(xds, &cp) == XRT_ERROR_UNCAUGHT_EXCEPTION);
 	REQUIRE(xrt_ds_frame_stream_start(xds, nullptr, XRT_DS_CAPTURE_TYPE_TRACKING, 0) ==
 	        XRT_ERROR_UNCAUGHT_EXCEPTION);
+	REQUIRE(xrt_ds_tracking_streams_start(xds, nullptr) == XRT_ERROR_UNCAUGHT_EXCEPTION);
 	REQUIRE(xrt_ds_stream_stop(xds) == XRT_ERROR_UNCAUGHT_EXCEPTION);
 	REQUIRE(xrt_ds_is_running(xds, &running) == XRT_ERROR_UNCAUGHT_EXCEPTION);
 }
