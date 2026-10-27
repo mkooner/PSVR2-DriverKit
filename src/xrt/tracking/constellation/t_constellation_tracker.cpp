@@ -12,6 +12,8 @@
 
 #include "util/u_time.h"
 
+#include "tracking/t_euroc_recorder.h"
+
 #include "math/m_predict.h"
 #include "math/m_vec3.h"
 
@@ -1177,7 +1179,7 @@ Device::Device(ConstellationTracker *tracker,
                t_constellation_tracker_device_params *params,
                t_constellation_tracker_device *device,
                t_constellation_device_id_t id)
-    : params(*params), device(device), id(id), tracker(tracker), data_lock(),
+    : params(*params), original_led_model(params->led_model), device(device), id(id), tracker(tracker), data_lock(),
       locked_data({.last_known_pose = std::nullopt})
 {
 	this->imu_sink = {
@@ -1224,11 +1226,21 @@ Device::~Device()
 }
 
 void
-Device::pushImuSample(const xrt_imu_sample &sample)
+Device::pushImuSample(xrt_imu_sample &sample)
 {
 	this->tracker->rig_calibration->pushImuSample(this->id, sample);
 
 	this->sensor_fusion->pushImuSample(sample);
+
+	// The recorder's IMU sink for this device, if a recorder exists.
+	xrt_slam_sinks *euroc_sinks = this->tracker->euroc_sinks.load();
+	int32_t euroc_idx = this->euroc_imu_index.load();
+	xrt_imu_sink *euroc_imu_sink =
+	    (euroc_sinks != nullptr && euroc_idx >= 0) ? euroc_sinks->imus[euroc_idx] : nullptr;
+
+	if (euroc_imu_sink != nullptr) {
+		xrt_sink_push_imu(euroc_imu_sink, &sample);
+	}
 }
 
 /*
@@ -1422,6 +1434,32 @@ ConstellationTracker::setupVariableTracking()
 	u_var_add_root(this, "Constellation Tracker", true);
 	u_var_add_log_level(this, &this->log_level, "Log Level");
 
+	this->euroc_toggle_btn.cb = [](void *ptr) {
+		auto *self = static_cast<ConstellationTracker *>(ptr);
+
+		// This runs from the GUI with the u_var lock held, so we can't add/remove u_var roots here. Hand the
+		// work to a thread, and drop the click if the previous one hasn't finished.
+		if (self->euroc_toggle_pending.exchange(true)) {
+			return;
+		}
+		if (self->euroc_toggle_thread.joinable()) {
+			self->euroc_toggle_thread.join();
+		}
+
+		self->euroc_session_wanted = !self->euroc_session_wanted;
+		bool wanted = self->euroc_session_wanted;
+		snprintf(self->euroc_toggle_btn.label, sizeof(self->euroc_toggle_btn.label), "%s",
+		         wanted ? "Destroy EuRoC recorder" : "Create EuRoC recorder");
+
+		self->euroc_toggle_thread = std::thread([self, wanted]() {
+			self->setEurocRecorderSession(wanted);
+			self->euroc_toggle_pending = false;
+		});
+	};
+	this->euroc_toggle_btn.ptr = this;
+	snprintf(this->euroc_toggle_btn.label, sizeof(this->euroc_toggle_btn.label), "Create EuRoC recorder");
+	u_var_add_button(this, &this->euroc_toggle_btn, "EuRoC Recorder");
+
 	uint32_t mosaic_idx = 0;
 	for (auto &mosaic : this->mosaics) {
 		uint32_t camera_idx = 0;
@@ -1444,6 +1482,118 @@ ConstellationTracker::setupVariableTracking()
 		}
 		mosaic_idx++;
 	}
+}
+
+EurocRecorderSession::~EurocRecorderSession()
+{
+	// Remove the root first so the GUI can't touch the recorder while its nodes are destroyed.
+	u_var_remove_root(this);
+	xrt_frame_context_destroy_nodes(&this->xfctx);
+}
+
+void
+ConstellationTracker::shutdownEurocRecorderSession()
+{
+	if (this->euroc_toggle_thread.joinable()) {
+		this->euroc_toggle_thread.join();
+	}
+	this->setEurocRecorderSession(false);
+}
+
+void
+ConstellationTracker::setEurocRecorderSession(bool enabled)
+{
+	if (!enabled) {
+		if (!this->euroc_session) {
+			return;
+		}
+
+		this->euroc_sinks.store(nullptr);
+
+		{
+			std::shared_lock lock(this->device_lock);
+			for (auto &device : this->devices) {
+				device->euroc_imu_index = -1;
+			}
+			for (auto &mosaic : this->mosaics) {
+				for (auto &camera : mosaic->cameras) {
+					camera->euroc_cam_index = -1;
+				}
+			}
+		}
+
+		this->euroc_session.reset();
+		return;
+	}
+
+	if (this->euroc_session) {
+		return;
+	}
+
+	auto session = std::make_unique<EurocRecorderSession>();
+
+	euroc_recorder_settings settings;
+	U_ZERO(&settings);
+	settings.record_from_start = false;
+	settings.constellation_recording = true;
+	settings.camera_model_valid = true;
+
+	{
+		std::shared_lock lock(this->device_lock);
+
+		if (this->devices.size() > XRT_TRACKING_MAX_IMUS) {
+			CT_ERROR(this, "Too many devices (%zu) for a EuRoC recorder, max is %d", this->devices.size(),
+			         XRT_TRACKING_MAX_IMUS);
+			return;
+		}
+
+		// Flatten the mosaics into a single list of cameras
+		timepoint_ns now_ns = os_monotonic_get_ns();
+		uint32_t cam_count = 0;
+		for (auto &mosaic : this->mosaics) {
+			for (auto &camera : mosaic->cameras) {
+				if (cam_count >= XRT_TRACKING_MAX_CAMS) {
+					CT_ERROR(this, "Too many cameras for a EuRoC recorder, max is %d",
+					         XRT_TRACKING_MAX_CAMS);
+					return;
+				}
+
+				// Map (mosaic, camera) -> recorder camera index
+				camera->euroc_cam_index = (int32_t)cam_count;
+				settings.camera_model.intrinsics[cam_count] = camera->calibration;
+				settings.camera_model.poses[cam_count] =
+				    camera->getWorldPose(now_ns).value_or(xrt_pose XRT_POSE_IDENTITY);
+				cam_count++;
+			}
+		}
+		settings.cam_count = cam_count;
+
+		// Hand the recorder the original (OpenXR frame) LED models, the tracker's own are in OpenCV space.
+		uint32_t imu_count = 0;
+		for (auto &device : this->devices) {
+			// Map device ID -> recorder IMU index
+			device->euroc_imu_index = (int32_t)imu_count;
+			settings.constellation.led_models[imu_count] = &device->original_led_model;
+			imu_count++;
+		}
+		settings.imu_count = imu_count;
+	}
+
+	session->sinks = euroc_recorder_create(&session->xfctx, &settings);
+
+	snprintf(session->camera_info, sizeof(session->camera_info), "%u", settings.cam_count);
+	snprintf(session->device_info, sizeof(session->device_info), "%u", settings.imu_count);
+
+	EurocRecorderSession *raw = session.get();
+	u_var_add_root(raw, "Constellation EuRoC Recorder", true);
+	u_var_add_ro_text(raw, raw->camera_info, "Cameras");
+	u_var_add_ro_text(raw, raw->device_info, "Devices");
+	euroc_recorder_add_ui(raw->sinks, raw, "");
+
+	this->euroc_session = std::move(session);
+
+	// Everything is set up, let the push paths see the sinks.
+	this->euroc_sinks.store(this->euroc_session->sinks);
 }
 
 t_constellation_device_id_t
@@ -1615,6 +1765,15 @@ constellation_tracker_camera_push_blobs(t_blob_sink *tbs, t_blob_observation *tb
 	}
 #endif
 
+	// The recorder's camera sink for this camera, if a recorder exists.
+	xrt_slam_sinks *euroc_sinks = tracker->euroc_sinks.load();
+	int32_t euroc_idx = camera->euroc_cam_index.load();
+	xrt_frame_sink *euroc_cam_sink =
+	    (euroc_sinks != nullptr && euroc_idx >= 0) ? euroc_sinks->cams[euroc_idx] : nullptr;
+	if (euroc_cam_sink) {
+		xrt_sink_push_frame(euroc_cam_sink, tbo->frame);
+	}
+
 	// We own the frame reference, and don't need it past this point.
 	xrt_frame_reference(&tbo->frame, nullptr);
 
@@ -1685,6 +1844,8 @@ void
 constellation_tracker_node_destroy(xrt_frame_node *node)
 {
 	ConstellationTracker *tracker = ConstellationTracker::Get(node);
+
+	tracker->shutdownEurocRecorderSession();
 
 	u_var_remove_root(tracker);
 

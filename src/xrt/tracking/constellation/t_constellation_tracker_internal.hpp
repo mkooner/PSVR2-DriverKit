@@ -43,6 +43,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 
@@ -260,6 +261,9 @@ public: // Fields
 
 	std::atomic<uint32_t> shallow_searches_failed{0};
 
+	//! This camera's index in the EuRoC recorder session (flattened across mosaics), or -1 if it has none.
+	std::atomic<int32_t> euroc_cam_index{-1};
+
 public: // Methods (t_constellation_tracker.cpp)
 	static Camera *
 	Get(t_blob_sink *tbs)
@@ -365,13 +369,22 @@ struct DeviceBase
 struct Device : public DeviceBase
 {
 public: // Fields
+	//! The device params, with a LED model that has been copied into OpenCV space for tracking.
 	t_constellation_tracker_device_params params;
+	/*!
+	 * The LED model as originally provided by the device, in the OpenXR frame. This is not copied, we assume the
+	 * LEDs it points to outlive the device.
+	 */
+	t_constellation_tracker_led_model original_led_model;
 	t_constellation_tracker_device *device;
 
 	t_constellation_device_id_t id;
 
 	//! Devices are disabled by default, and the constellation tracker must choose to enable them.
 	std::atomic<bool> enabled{false};
+
+	//! This device's IMU index in the EuRoC recorder session, or -1 if it has none.
+	std::atomic<int32_t> euroc_imu_index{-1};
 
 	//! The owner tracker, so we can retrieve it from the IMU sink callback
 	ConstellationTracker *tracker;
@@ -420,7 +433,7 @@ public: // Methods
 	}
 
 	void
-	pushImuSample(const xrt_imu_sample &sample);
+	pushImuSample(xrt_imu_sample &sample);
 };
 
 // Separate base struct with our interface implementations so that `ConstellationTrackerBase` remains a standard layout
@@ -441,6 +454,22 @@ struct ConstellationTrackerBase
 	            .position = {.x = 0, .y = 1.2, .z = 0},
 	        },
 	};
+};
+
+/*!
+ * A EuRoC recorder built from a snapshot of the tracker's devices and cameras, with its own u_var root (keyed by the
+ * address of this struct) and its own frame context so it can be torn down independently of the tracker.
+ */
+struct EurocRecorderSession
+{
+	// having one here looks icky but it prevents leaks cus we create&destroy
+	xrt_frame_context xfctx{};
+	xrt_slam_sinks *sinks{nullptr};
+
+	char camera_info[64]{};
+	char device_info[64]{};
+
+	~EurocRecorderSession();
 };
 
 struct ConstellationTracker : public ConstellationTrackerBase
@@ -470,6 +499,18 @@ public: // Fields
 	os_thread_helper rig_calibration_thread{};
 	bool running_calibration{false};
 	std::unique_ptr<rig_calibration::RigCalibration> rig_calibration{};
+
+	//! The current EuRoC recorder snapshot, if any. Only touched from the toggle thread (and on destroy).
+	std::unique_ptr<EurocRecorderSession> euroc_session{};
+	//! The sinks of @ref euroc_session, published only while it is fully set up. Read by the push paths, a debug
+	//! aid so there's no protection against it being destroyed mid-push.
+	std::atomic<xrt_slam_sinks *> euroc_sinks{nullptr};
+	u_var_button euroc_toggle_btn{};
+	//! The label state the button is showing, only touched from the GUI thread.
+	bool euroc_session_wanted{false};
+	//! Whether a toggle is currently running on @ref euroc_toggle_thread.
+	std::atomic<bool> euroc_toggle_pending{false};
+	std::thread euroc_toggle_thread{};
 
 #ifdef XRT_FEATURE_RERUN
 	std::unique_ptr<struct RerunContext> rerun_stream{};
@@ -508,6 +549,17 @@ public: // Methods
 
 	void
 	setupVariableTracking();
+
+	/*!
+	 * Creates (or destroys, if one exists) the EuRoC recorder snapshot of the current devices and cameras. Must
+	 * not be called with the u_var lock held, since it adds/removes u_var roots.
+	 */
+	void
+	setEurocRecorderSession(bool enabled);
+
+	//! Waits for any in-flight toggle to finish and destroys the EuRoC recorder session.
+	void
+	shutdownEurocRecorderSession();
 
 	t_constellation_device_id_t
 	addDevice(t_constellation_tracker_device_params *params, t_constellation_tracker_device *device);

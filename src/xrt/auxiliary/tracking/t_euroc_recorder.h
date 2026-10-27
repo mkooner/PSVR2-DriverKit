@@ -19,6 +19,18 @@
 #define CSV_EOL "\r\n"
 #define CSV_PRECISION 10
 
+#define EUROC_SENSOR_TYPE_IMU "imu"
+#define EUROC_SENSOR_TYPE_CAMERA "camera"
+#define EUROC_SENSOR_TYPE_LED_MODEL "led_model_mnd"
+
+#define EUROC_DISTORTION_MODEL_RADTAN_4 "radial-tangential"
+#define EUROC_DISTORTION_MODEL_RADTAN_5_MND "radial-tangential-5_mnd"
+#define EUROC_DISTORTION_MODEL_RADTAN_8_MND "radial-tangential-8_mnd"
+#define EUROC_DISTORTION_MODEL_RADTAN_14_MND "radial-tangential-14_mnd"
+#define EUROC_DISTORTION_MODEL_KB4_MND "kannalla-brandt-4_mnd"
+#define EUROC_DISTORTION_MODEL_WMR_MND "wmr_mnd"
+#define EUROC_DISTORTION_MODEL_RIFT_CV1_MND "cv1_mnd"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -57,6 +69,18 @@ struct euroc_recorder_settings
 		struct t_constellation_tracker_led_model *led_models[XRT_TRACKING_MAX_IMUS];
 	} constellation;
 };
+
+/*!
+ * Converts a Monado distortion model to a EuRoC distortion model string.
+ */
+const char *
+t_distortion_model_to_euroc(enum t_camera_distortion_model model);
+
+/*!
+ * Converts a EuRoC distortion model string to a Monado distortion model.
+ */
+enum t_camera_distortion_model
+t_euroc_model_to_distortion_model(const char *model);
 
 /*!
  * Create SLAM sinks to record samples in EuRoC format.

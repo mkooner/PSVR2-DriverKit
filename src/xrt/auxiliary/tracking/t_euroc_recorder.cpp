@@ -53,33 +53,6 @@ using std::vector;
 using std::filesystem::create_directories;
 using xrt::auxiliary::util::json::JSONBuilder;
 
-#define EUROC_SENSOR_TYPE_IMU "imu"
-#define EUROC_SENSOR_TYPE_CAMERA "camera"
-#define EUROC_SENSOR_TYPE_LED_MODEL "led_model_mnd"
-
-#define EUROC_DISTORTION_MODEL_RADTAN_4 "radial-tangential"
-#define EUROC_DISTORTION_MODEL_RADTAN_5_MND "radial-tangential-5_mnd"
-#define EUROC_DISTORTION_MODEL_RADTAN_8_MND "radial-tangential-8_mnd"
-#define EUROC_DISTORTION_MODEL_RADTAN_14_MND "radial-tangential-14_mnd"
-#define EUROC_DISTORTION_MODEL_KB4_MND "kannalla-brandt-4_mnd"
-#define EUROC_DISTORTION_MODEL_WMR_MND "wmr_mnd"
-#define EUROC_DISTORTION_MODEL_RIFT_CV1_MND "cv1_mnd"
-
-static std::string_view
-t_distortion_model_to_euroc(t_camera_distortion_model model)
-{
-	switch (model) {
-	case T_DISTORTION_PINHOLE: return EUROC_DISTORTION_MODEL_RADTAN_4; break;
-	case T_DISTORTION_OPENCV_RADTAN_5: return EUROC_DISTORTION_MODEL_RADTAN_5_MND; break;
-	case T_DISTORTION_OPENCV_RADTAN_8: return EUROC_DISTORTION_MODEL_RADTAN_8_MND; break;
-	case T_DISTORTION_OPENCV_RADTAN_14: return EUROC_DISTORTION_MODEL_RADTAN_14_MND; break;
-	case T_DISTORTION_WMR: return EUROC_DISTORTION_MODEL_WMR_MND; break;
-	case T_DISTORTION_FISHEYE_KB4: return EUROC_DISTORTION_MODEL_KB4_MND; break;
-	case T_DISTORTION_RIFT_CV1: return EUROC_DISTORTION_MODEL_RIFT_CV1_MND; break;
-	default: U_LOG_E("Invalid distortion_model! %d", model); return "INVALID";
-	}
-}
-
 union euroc_sensor_info {
 	struct
 	{
@@ -568,6 +541,44 @@ euroc_recorder_node_destroy(xrt_frame_node *node)
  * Exported functions
  *
  */
+
+const char *
+t_distortion_model_to_euroc(t_camera_distortion_model model)
+{
+	switch (model) {
+	case T_DISTORTION_PINHOLE: return EUROC_DISTORTION_MODEL_RADTAN_4; break;
+	case T_DISTORTION_OPENCV_RADTAN_5: return EUROC_DISTORTION_MODEL_RADTAN_5_MND; break;
+	case T_DISTORTION_OPENCV_RADTAN_8: return EUROC_DISTORTION_MODEL_RADTAN_8_MND; break;
+	case T_DISTORTION_OPENCV_RADTAN_14: return EUROC_DISTORTION_MODEL_RADTAN_14_MND; break;
+	case T_DISTORTION_WMR: return EUROC_DISTORTION_MODEL_WMR_MND; break;
+	case T_DISTORTION_FISHEYE_KB4: return EUROC_DISTORTION_MODEL_KB4_MND; break;
+	case T_DISTORTION_RIFT_CV1: return EUROC_DISTORTION_MODEL_RIFT_CV1_MND; break;
+	default: U_LOG_E("Invalid distortion_model! %d", model); return "INVALID";
+	}
+}
+
+t_camera_distortion_model
+t_euroc_model_to_distortion_model(const char *model_cstr)
+{
+	string model = model_cstr;
+	if (model == EUROC_DISTORTION_MODEL_RADTAN_4)
+		return T_DISTORTION_PINHOLE;
+	if (model == EUROC_DISTORTION_MODEL_RADTAN_5_MND)
+		return T_DISTORTION_OPENCV_RADTAN_5;
+	if (model == EUROC_DISTORTION_MODEL_RADTAN_8_MND)
+		return T_DISTORTION_OPENCV_RADTAN_8;
+	if (model == EUROC_DISTORTION_MODEL_RADTAN_14_MND)
+		return T_DISTORTION_OPENCV_RADTAN_14;
+	if (model == EUROC_DISTORTION_MODEL_WMR_MND)
+		return T_DISTORTION_WMR;
+	if (model == EUROC_DISTORTION_MODEL_KB4_MND)
+		return T_DISTORTION_FISHEYE_KB4;
+	if (model == EUROC_DISTORTION_MODEL_RIFT_CV1_MND)
+		return T_DISTORTION_RIFT_CV1;
+
+	U_LOG_E("Invalid distortion_model! %s", model.c_str());
+	return T_DISTORTION_PINHOLE;
+}
 
 extern "C" xrt_slam_sinks *
 euroc_recorder_create(xrt_frame_context *xfctx, const euroc_recorder_settings *settings)
