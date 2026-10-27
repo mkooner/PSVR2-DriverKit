@@ -363,7 +363,12 @@ wmr_source_create(struct xrt_frame_context *xfctx, struct xrt_prober_device *dev
 
 	ws->camera = wmr_camera_open(&options);
 	ws->config = cfg;
-	ws->euroc_recorder = euroc_recorder_create(xfctx, NULL, cfg.sinks_count, XRT_TRACKING_MAX_IMUS, false);
+
+	struct euroc_recorder_settings euroc_settings = {
+	    .cam_count = (uint32_t)cfg.sinks_count,
+	    .imu_count = XRT_TRACKING_MAX_IMUS,
+	};
+	ws->euroc_recorder = euroc_recorder_create(xfctx, &euroc_settings);
 
 	// Setup UI
 	for (int i = 0; i < cfg.sinks_count; i++) {
