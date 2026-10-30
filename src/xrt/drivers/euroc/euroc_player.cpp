@@ -1,9 +1,11 @@
 // Copyright 2020-2021, Collabora, Ltd.
+// Copyright 2026, Beyley Cardellio
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
  * @brief  EuRoC playback functionality
  * @author Mateo de Mayo <mateo.demayo@collabora.com>
+ * @author Beyley Cardellio <ep1cm1n10n123@gmail.com>
  * @ingroup drv_euroc
  */
 
@@ -36,12 +38,14 @@
 #include <fstream>
 #include <future>
 #include <thread>
+#include <optional>
 
 
 //! @see euroc_player_playback_config
 DEBUG_GET_ONCE_LOG_OPTION(euroc_log, "EUROC_LOG", U_LOGGING_WARN)
 DEBUG_GET_ONCE_OPTION(gt_device_name, "EUROC_GT_DEVICE_NAME", nullptr)
 DEBUG_GET_ONCE_OPTION(cam_count, "EUROC_CAM_COUNT", nullptr)
+DEBUG_GET_ONCE_OPTION(imu_count, "EUROC_IMU_COUNT", nullptr)
 DEBUG_GET_ONCE_OPTION(color, "EUROC_COLOR", nullptr)
 DEBUG_GET_ONCE_OPTION(gt, "EUROC_GT", nullptr)
 DEBUG_GET_ONCE_OPTION(skip_first, "EUROC_SKIP_FIRST", "0%")
@@ -55,29 +59,85 @@ DEBUG_GET_ONCE_BOOL_OPTION(play_from_start, "EUROC_PLAY_FROM_START", false)
 DEBUG_GET_ONCE_BOOL_OPTION(print_progress, "EUROC_PRINT_PROGRESS", false)
 
 #define EUROC_PLAYER_STR "Euroc Player"
-#define IMU_COUNT 1
-#define IMU_SINK_IDX 0
 
-//! Match max cameras to slam sinks max camera count
-#define EUROC_MAX_CAMS XRT_TRACKING_MAX_CAMS
-
-using std::async;
 using std::find_if;
 using std::ifstream;
 using std::is_same_v;
 using std::launch;
 using std::max_element;
+using std::optional;
 using std::pair;
 using std::stof;
 using std::string;
 using std::to_string;
 using std::vector;
 
-using img_sample = pair<timepoint_ns, string>;
+struct img_sample
+{
+	timepoint_ns timestamp_ns;
+	string path;
+};
 
-using imu_samples = vector<xrt_imu_sample>;
-using img_samples = vector<img_sample>;
-using gt_trajectory = vector<xrt_pose_sample>;
+template <typename T> struct stream_state
+{
+	ssize_t latest_sent{-1};
+	vector<T> samples{}; //!< List of all image names to read from the dataset per cameras
+
+	optional<T *>
+	peekNext(timepoint_ns playback_ns)
+	{
+		if (this->samples.size() == 0) {
+			return std::nullopt;
+		}
+
+		if (this->latest_sent == (static_cast<ssize_t>(this->samples.size()) - 1)) {
+			return std::nullopt;
+		}
+
+		auto &next = this->samples[this->latest_sent + 1];
+		if (playback_ns >= next.timestamp_ns) {
+			return &next;
+		}
+		return std::nullopt;
+	}
+
+	optional<T *>
+	getNext(timepoint_ns playback_ns)
+	{
+		auto next = this->peekNext(playback_ns);
+		if (next.has_value()) {
+			this->latest_sent++;
+		}
+		return next;
+	}
+
+	optional<timepoint_ns>
+	nextTimestamp()
+	{
+		if (this->samples.size() == 0) {
+			return std::nullopt;
+		}
+
+		if (this->latest_sent == (static_cast<ssize_t>(this->samples.size()) - 1)) {
+			return std::nullopt;
+		}
+
+		return this->samples[this->latest_sent + 1].timestamp_ns;
+	}
+
+	void
+	skipUntil(timepoint_ns ts)
+	{
+		while (latest_sent + 1 < static_cast<ssize_t>(samples.size()) &&
+		       samples[latest_sent + 1].timestamp_ns < ts) {
+			latest_sent++;
+		}
+	}
+};
+
+using camera_state = stream_state<img_sample>;
+using imu_state = stream_state<xrt_imu_sample>;
+using gt_state = stream_state<xrt_pose_sample>;
 
 enum euroc_player_ui_state : std::uint8_t
 {
@@ -85,7 +145,7 @@ enum euroc_player_ui_state : std::uint8_t
 	NOT_STREAMING,
 	STREAM_PLAYING,
 	STREAM_PAUSED,
-	STREAM_ENDED
+	STREAM_ENDED,
 };
 
 /*!
@@ -96,51 +156,50 @@ enum euroc_player_ui_state : std::uint8_t
  */
 struct euroc_player
 {
-	struct xrt_fs base;
-	struct xrt_frame_node node;
+	xrt_fs base;
+	xrt_frame_node node;
 
 	// Sinks
-	struct xrt_frame_sink cam_sinks[EUROC_MAX_CAMS]; //!< Intermediate sink for each camera frames
-	struct xrt_imu_sink imu_sink;                    //!< Intermediate sink for IMU samples
-	struct xrt_slam_sinks in_sinks;                  //!< Pointers to intermediate sinks
-	struct xrt_slam_sinks out_sinks;                 //!< Pointers to downstream sinks
+	xrt_frame_sink cam_sinks[XRT_TRACKING_MAX_CAMS]; //!< Intermediate sink for each camera frames
+	xrt_imu_sink imu_sinks[XRT_TRACKING_MAX_IMUS];   //!< Intermediate sink for IMU samples
+	xrt_slam_sinks in_sinks;                         //!< Pointers to intermediate sinks
+	xrt_slam_sinks out_sinks;                        //!< Pointers to downstream sinks
 
-	enum u_logging_level log_level;               //!< Log messages with this priority and onwards
-	struct euroc_player_dataset_info dataset;     //!< Contains information about the source dataset
-	struct euroc_player_playback_config playback; //!< Playback information. Prefer to fill it before stream start
-	struct xrt_fs_mode mode;                      //!< The only fs mode the euroc dataset provides
-	bool is_running;                              //!< Set only at start, stop and end of frameserver stream
-	timepoint_ns last_pause_ts;                   //!< Last time the stream was paused
-	struct os_thread_helper play_thread;
+	u_logging_level log_level;             //!< Log messages with this priority and onwards
+	euroc_player_dataset_info dataset;     //!< Contains information about the source dataset
+	euroc_player_playback_config playback; //!< Playback information. Prefer to fill it before stream start
+	xrt_fs_mode mode;                      //!< The only fs mode the euroc dataset provides
+	bool is_running;                       //!< Set only at start, stop and end of frameserver stream
+	os_thread_helper play_thread;
 
-	//! Next frame number to use, index in `imgs[i]`.
-	//! Note that this expects that both cameras provide the same amount of frames.
-	//! Furthermore, it is also expected that their timestamps match.
-	uint64_t img_seq;          //!< Next frame number to use, index in `imgs[i]`
-	uint64_t imu_seq;          //!< Next imu sample number to use, index in `imus`
-	imu_samples *imus;         //!< List of all IMU samples read from the dataset
-	vector<img_samples> *imgs; //!< List of all image names to read from the dataset per camera
-	gt_trajectory *gt;         //!< List of all groundtruth poses read from the dataset
+	timepoint_ns playback_ns;  //!< The playback timestamp of the stream.
+	vector<imu_state> imus;    //!< The list of IMUs in this dataset.
+	vector<camera_state> cams; //!< The list of cameras in this dataset.
+	gt_state gt;               //!< The state of the ground truth player.
 
 	// Timestamp correction fields (can be disabled through `use_source_ts`)
-	timepoint_ns base_ts;   //!< First sample timestamp, stream timestamps are relative to this
-	timepoint_ns start_ts;  //!< When did the dataset started to be played
-	timepoint_ns offset_ts; //!< Amount of ns to offset start_ns (pauses, skips, etc)
+	timepoint_ns base_ns; //!< First sample timestamp, stream timestamps are relative to this
 
 	// UI related fields
-	enum euroc_player_ui_state ui_state;
-	struct u_var_button start_btn;
-	struct u_var_button pause_btn;
+	euroc_player_ui_state ui_state;
+	u_var_button start_btn;
+	u_var_button pause_btn;
 	char progress_text[128];
-	struct u_sink_debug ui_cam_sinks[EUROC_MAX_CAMS]; //!< Sinks to display cam frames in UI
-	struct m_ff_vec3_f32 *gyro_ff;                    //!< Used for displaying IMU data
-	struct m_ff_vec3_f32 *accel_ff;                   //!< Same as `gyro_ff`
+	u_sink_debug ui_cam_sinks[XRT_TRACKING_MAX_CAMS]; //!< Sinks to display cam frames in UI
+	m_ff_vec3_f32 *gyro_ffs[XRT_TRACKING_MAX_IMUS];   //!< Used for displaying IMU data
+	m_ff_vec3_f32 *accel_ffs[XRT_TRACKING_MAX_IMUS];  //!< Same as `gyro_ff`
+
+	static euroc_player *
+	fromXfs(xrt_fs *xfs)
+	{
+		return reinterpret_cast<euroc_player *>(xfs);
+	}
 };
 
 static void
 euroc_player_start_btn_cb(void *ptr);
 static void
-euroc_player_set_ui_state(struct euroc_player *ep, euroc_player_ui_state state);
+euroc_player_set_ui_state(euroc_player *ep, euroc_player_ui_state state);
 
 
 // Euroc functionality
@@ -149,13 +208,16 @@ euroc_player_set_ui_state(struct euroc_player *ep, euroc_player_ui_state state);
 //! If `read_n` > 0, read at most that amount of samples
 //! Returns whether the appropriate data.csv file could be opened
 static bool
-euroc_player_preload_imu_data(const string &dataset_path, imu_samples *samples, int64_t read_n = -1)
+euroc_player_preload_imu_data(const string &dataset_path, imu_state &imu, uint32_t imu_id, int64_t read_n = -1)
 {
-	string csv_filename = dataset_path + "/mav0/imu0/data.csv";
+	string imu_name = "imu" + to_string(imu_id);
+	string csv_filename = dataset_path + "/mav0/" + imu_name + "/data.csv";
 	ifstream fin{csv_filename};
 	if (!fin.is_open()) {
 		return false;
 	}
+
+	auto &samples = imu.samples;
 
 	constexpr int COLUMN_COUNT = 6; // EuRoC imu columns: ts wx wy wz ax ay az
 	string line;
@@ -174,7 +236,7 @@ euroc_player_preload_imu_data(const string &dataset_path, imu_samples *samples, 
 		}
 
 		xrt_imu_sample sample{timestamp, {v[3], v[4], v[5]}, {v[0], v[1], v[2]}};
-		samples->push_back(sample);
+		samples.push_back(sample);
 	}
 	return true;
 }
@@ -191,20 +253,17 @@ euroc_player_preload_imu_data(const string &dataset_path, imu_samples *samples, 
  * 3. mocap0: found in TUM-VI datasets with euroc format
  * 4. state_groundtruth_estimate0: found in euroc as a postprocessed ground truth (we only use first 7 columns)
  * 5. leica0: found in euroc "machine hall" datasets, only positional ground truth
- * @param[out] trajectory The read trajectory
+ * @param[out] gt The read ground truth object
  * @param[in] read_n If > 0, read at most that amount of gt poses
  *
  * @returns Whether the appropriate data.csv file could be opened
  */
 static bool
-euroc_player_preload_gt_data(const string &dataset_path,
-                             const char **gtdev,
-                             gt_trajectory *trajectory,
-                             int64_t read_n = -1)
+euroc_player_preload_gt_data(const string &dataset_path, const char *&gtdev, gt_state &gt, int64_t read_n = -1)
 {
 	vector<const char *> gt_devices = {"vicon0", "mocap0", "state_groundtruth_estimate0", "leica0"};
-	if (*gtdev != nullptr && !string(*gtdev).empty()) {
-		gt_devices.insert(gt_devices.begin(), *gtdev);
+	if (gtdev != nullptr && !string(gtdev).empty()) {
+		gt_devices.insert(gt_devices.begin(), gtdev);
 	}
 
 	ifstream fin;
@@ -212,7 +271,7 @@ euroc_player_preload_gt_data(const string &dataset_path,
 		string csv_filename = dataset_path + "/mav0/" + device + "/data.csv";
 		fin = ifstream{csv_filename};
 		if (fin.is_open()) {
-			*gtdev = device;
+			gtdev = device;
 			break;
 		}
 	}
@@ -224,6 +283,8 @@ euroc_player_preload_gt_data(const string &dataset_path,
 	constexpr int COLUMN_COUNT = 7; // EuRoC groundtruth columns: ts px py pz qw qx qy qz
 	string line;
 	getline(fin, line); // Skip header line
+
+	auto &trajectory = gt.samples;
 
 	while (getline(fin, line) && read_n-- != 0) {
 		timepoint_ns timestamp;
@@ -238,7 +299,7 @@ euroc_player_preload_gt_data(const string &dataset_path,
 		}
 
 		xrt_pose pose = {{v[4], v[5], v[6], v[3]}, {v[0], v[1], v[2]}};
-		trajectory->push_back({timestamp, pose});
+		trajectory.push_back({timestamp, pose});
 	}
 	return true;
 }
@@ -247,7 +308,7 @@ euroc_player_preload_gt_data(const string &dataset_path,
 //! If read_n > 0, read at most that amount of samples
 //! Returns whether the appropriate data.csv file could be opened
 static bool
-euroc_player_preload_img_data(const string &dataset_path, img_samples &samples, size_t cam_id, int64_t read_n = -1)
+euroc_player_preload_img_data(const string &dataset_path, camera_state &cam, uint32_t cam_id, int64_t read_n = -1)
 {
 	// Parse image data, assumes data.csv is well formed
 	string cam_name = "cam" + to_string(cam_id);
@@ -257,6 +318,8 @@ euroc_player_preload_img_data(const string &dataset_path, img_samples &samples, 
 	if (!fin.is_open()) {
 		return false;
 	}
+
+	auto &samples = cam.samples;
 
 	string line;
 	getline(fin, line); // Skip header line
@@ -281,109 +344,134 @@ euroc_player_preload_img_data(const string &dataset_path, img_samples &samples, 
 //! Note that this function does not guarantee that the dataset is free of framedrops
 //! and it assumes it is properly formatted with monotonically increasing timestamps.
 static void
-euroc_player_match_cams_seqs(struct euroc_player *ep)
+euroc_player_match_cams_seqs(euroc_player *ep)
 {
 	// Find newest first timestamp and oldest last timestamp
 	timepoint_ns first_ts = INT64_MIN;
 	timepoint_ns last_ts = INT64_MAX;
-	for (const img_samples &imgs : *ep->imgs) {
+	for (const camera_state &cam : ep->cams) {
+		auto &imgs = cam.samples;
 		EUROC_ASSERT(!imgs.empty(), "Camera with no samples");
 
-		timepoint_ns cam_first_ts = imgs.front().first;
+		timepoint_ns cam_first_ts = imgs.front().timestamp_ns;
 		if (cam_first_ts > first_ts) {
 			first_ts = cam_first_ts;
 		}
 
-		timepoint_ns cam_last_ts = imgs.back().first;
+		timepoint_ns cam_last_ts = imgs.back().timestamp_ns;
 		if (cam_last_ts < last_ts) {
 			last_ts = cam_last_ts;
 		}
 	}
 
-	auto is_first = [first_ts](const img_sample &s) { return s.first == first_ts; };
-	auto is_last = [last_ts](const img_sample &s) { return s.first == last_ts; };
+	auto is_first = [first_ts](const img_sample &s) { return s.timestamp_ns == first_ts; };
+	auto is_last = [last_ts](const img_sample &s) { return s.timestamp_ns == last_ts; };
 
-	for (img_samples &imgs : *ep->imgs) {
-		img_samples::iterator new_first = find_if(imgs.begin(), imgs.end(), is_first);
-		img_samples::iterator new_last = find_if(imgs.begin(), imgs.end(), is_last);
+	for (camera_state &cam : ep->cams) {
+		auto &imgs = cam.samples;
+		auto new_first = find_if(imgs.begin(), imgs.end(), is_first);
+		auto new_last = find_if(imgs.begin(), imgs.end(), is_last);
 		EUROC_ASSERT_(new_first != imgs.end() && new_last != imgs.end());
 		imgs.assign(new_first, new_last + 1);
 	}
 }
 
 static void
-euroc_player_preload(struct euroc_player *ep)
+euroc_player_preload(euroc_player *ep)
 {
-	ep->imus->clear();
-	euroc_player_preload_imu_data(ep->dataset.path, ep->imus);
+	for (uint32_t i = 0; i < ep->imus.size(); i++) {
+		auto &imu = ep->imus[i];
+		imu = imu_state{};
+		euroc_player_preload_imu_data(ep->dataset.path, imu, i);
+	}
 
-	for (size_t i = 0; i < ep->imgs->size(); i++) {
-		ep->imgs->at(i).clear();
-		euroc_player_preload_img_data(ep->dataset.path, ep->imgs->at(i), i);
+	for (size_t i = 0; i < ep->cams.size(); i++) {
+		auto &cam = ep->cams[i];
+		cam = camera_state{};
+		euroc_player_preload_img_data(ep->dataset.path, cam, i);
 	}
 
 	euroc_player_match_cams_seqs(ep);
 
 	if (ep->dataset.has_gt) {
-		ep->gt->clear();
-		euroc_player_preload_gt_data(ep->dataset.path, &ep->dataset.gt_device_name, ep->gt);
+		ep->gt = gt_state{};
+		euroc_player_preload_gt_data(ep->dataset.path, ep->dataset.gt_device_name, ep->gt);
+	}
+
+	ep->base_ns = INT64_MAX;
+	for (auto &cam : ep->cams) {
+		ep->base_ns = MIN(ep->base_ns, cam.samples.front().timestamp_ns);
+	}
+	for (auto &imu : ep->imus) {
+		ep->base_ns = MIN(ep->base_ns, imu.samples.front().timestamp_ns);
 	}
 }
 
 //! Skips the first seconds of the dataset as specified by the user
 static void
-euroc_player_user_skip(struct euroc_player *ep)
+euroc_player_user_skip(euroc_player *ep)
 {
-
 	float skip_first_s = 0;
 	if (ep->playback.skip_perc) {
 		float skip_percentage = ep->playback.skip_first;
-		timepoint_ns last_ts = MAX(ep->imgs->at(0).back().first, ep->imus->back().timestamp_ns);
-		double dataset_length_s = (last_ts - ep->base_ts) / U_TIME_1S_IN_NS;
+		timepoint_ns last_ts =
+		    MAX(ep->cams[0].samples.back().timestamp_ns, ep->imus[0].samples.back().timestamp_ns);
+		double dataset_length_s = (last_ts - ep->base_ns) / U_TIME_1S_IN_NS;
 		skip_first_s = dataset_length_s * skip_percentage / 100.0f;
 	} else {
 		skip_first_s = ep->playback.skip_first;
 	}
 
 	time_duration_ns skip_first_ns = skip_first_s * U_TIME_1S_IN_NS;
-	timepoint_ns skipped_ts = ep->base_ts + skip_first_ns;
+	timepoint_ns skipped_ts = ep->base_ns + skip_first_ns;
+	ep->playback_ns = skipped_ts;
 
-	while (ep->imu_seq < ep->imus->size() && ep->imus->at(ep->imu_seq).timestamp_ns < skipped_ts) {
-		ep->imu_seq++;
+	for (auto &imu : ep->imus) {
+		imu.skipUntil(skipped_ts);
 	}
-
-	while (ep->img_seq < ep->imgs->at(0).size() && ep->imgs->at(0).at(ep->img_seq).first < skipped_ts) {
-		ep->img_seq++;
+	for (auto &cam : ep->cams) {
+		cam.skipUntil(skipped_ts);
 	}
-
-	ep->offset_ts -= skip_first_ns / ep->playback.speed;
+	ep->gt.skipUntil(skipped_ts);
 }
 
-//! Determine and fill attributes of the dataset pointed by `path`
-//! Assertion fails if `path` does not point to an euroc dataset
+/*!
+ * Determine and fill attributes of the dataset pointed by `path`
+ * Assertion fails if `path` does not point to an euroc dataset
+ */
 static void
 euroc_player_fill_dataset_info(const char *path, euroc_player_dataset_info *dataset)
 {
 	(void)snprintf(dataset->path, sizeof(dataset->path), "%s", path);
-	img_samples samples;
-	imu_samples _1;
-	gt_trajectory _2;
+	camera_state cam{};
+	imu_state imu{};
+	gt_state gt{};
 
-	size_t i = 0;
-	bool has_camera = euroc_player_preload_img_data(dataset->path, samples, i, 1);
+	uint32_t i = 0;
+	bool has_camera = euroc_player_preload_img_data(dataset->path, cam, i, 1);
 	while (has_camera) {
-		has_camera = euroc_player_preload_img_data(dataset->path, samples, ++i, 0);
+		has_camera = euroc_player_preload_img_data(dataset->path, cam, ++i, 0);
 	}
-	size_t cam_count = i;
-	EUROC_ASSERT(cam_count <= EUROC_MAX_CAMS, "Increase EUROC_MAX_CAMS (dataset with %zu cams)", cam_count);
+	uint32_t cam_count = i;
+	EUROC_ASSERT(cam_count <= XRT_TRACKING_MAX_CAMS, "Increase XRT_TRACKING_MAX_CAMS (dataset with %u cams)",
+	             cam_count);
 
-	bool has_imu = euroc_player_preload_imu_data(dataset->path, &_1, 0);
-	bool has_gt = euroc_player_preload_gt_data(dataset->path, &dataset->gt_device_name, &_2, 0);
-	bool is_valid_dataset = cam_count > 0 && has_imu;
+	i = 0;
+	bool has_imu = euroc_player_preload_imu_data(dataset->path, imu, i, 0);
+	while (has_imu) {
+		has_imu = euroc_player_preload_imu_data(dataset->path, imu, ++i, 0);
+	}
+	uint32_t imu_count = i;
+	EUROC_ASSERT(imu_count <= XRT_TRACKING_MAX_IMUS, "Increase XRT_TRACKING_MAX_IMUS (dataset with %u imus)",
+	             imu_count);
+
+	bool has_gt = euroc_player_preload_gt_data(dataset->path, dataset->gt_device_name, gt, 0);
+	bool is_valid_dataset = cam_count > 0 && imu_count > 0;
 	EUROC_ASSERT(is_valid_dataset, "Invalid dataset %s", path);
 
-	cv::Mat first_cam0_img = cv::imread(samples[0].second, cv::IMREAD_ANYCOLOR);
-	dataset->cam_count = (int)cam_count;
+	cv::Mat first_cam0_img = cv::imread(cam.samples[0].path, cv::IMREAD_ANYCOLOR);
+	dataset->cam_count = cam_count;
+	dataset->imu_count = imu_count;
 	dataset->is_colored = first_cam0_img.channels() == 3;
 	dataset->has_gt = has_gt;
 	dataset->width = first_cam0_img.cols;
@@ -393,48 +481,24 @@ euroc_player_fill_dataset_info(const char *path, euroc_player_dataset_info *data
 
 // Playback functionality
 
-static struct euroc_player *
-euroc_player(struct xrt_fs *xfs)
-{
-	return (struct euroc_player *)xfs;
-}
-
-//! Wrapper around os_monotonic_get_ns to convert to int64_t and check ranges
 static timepoint_ns
-os_monotonic_get_ts()
-{
-	uint64_t uts = os_monotonic_get_ns();
-	EUROC_ASSERT(uts < INT64_MAX, "Timestamp=%" PRId64 " was greater than INT64_MAX=%ld", uts, INT64_MAX);
-	int64_t its = uts;
-	return its;
-}
-
-//! @returns maps a dataset timestamp to current time
-static timepoint_ns
-euroc_player_mapped_ts(struct euroc_player *ep, timepoint_ns ts)
-{
-	timepoint_ns relative_ts = ts - ep->base_ts; // Relative to imu0 first ts
-	ep->playback.speed = MAX(ep->playback.speed, 1.0 / 256);
-	double speed = ep->playback.speed;
-	timepoint_ns mapped_ts = ep->start_ts + ep->offset_ts + relative_ts / speed;
-	return mapped_ts;
-}
-
-//! Same as @ref euroc_player_mapped_ts but only if playback options allow it.
-static timepoint_ns
-euroc_player_mapped_playback_ts(struct euroc_player *ep, timepoint_ns ts)
+condition_sample_ts(euroc_player *ep, timepoint_ns ns)
 {
 	if (ep->playback.use_source_ts) {
-		return ts;
+		return ns;
 	}
-	return euroc_player_mapped_ts(ep, ts);
+
+	// If we aren't using source timestamps, map them relative to the base timestamp;
+	return ns - ep->base_ns;
 }
 
 static void
-euroc_player_load_next_frame(struct euroc_player *ep, int cam_index, struct xrt_frame *&xf)
+euroc_player_load_next_frame(euroc_player *ep, uint32_t cam_index, xrt_frame *&xf)
 {
+	auto &cam = ep->cams[cam_index];
+
 	using xrt::auxiliary::tracking::FrameMat;
-	img_sample sample = ep->imgs->at(cam_index).at(ep->img_seq);
+	img_sample sample = cam.samples[cam.latest_sent];
 	ep->playback.scale = CLAMP(ep->playback.scale, 1.0 / 16, 4);
 
 	// Load will be influenced by these playback options
@@ -442,8 +506,8 @@ euroc_player_load_next_frame(struct euroc_player *ep, int cam_index, struct xrt_
 	float scale = ep->playback.scale;
 
 	// Load image from disk
-	timepoint_ns timestamp = euroc_player_mapped_playback_ts(ep, sample.first);
-	string img_name = sample.second;
+	timepoint_ns timestamp = condition_sample_ts(ep, sample.timestamp_ns);
+	string img_name = sample.path;
 	EUROC_TRACE(ep, "cam%d img t = %ld filename = %s", cam_index, timestamp, img_name.c_str());
 	cv::ImreadModes read_mode = allow_color ? cv::IMREAD_ANYCOLOR : cv::IMREAD_GRAYSCALE;
 	cv::Mat img = cv::imread(img_name, read_mode); // If colored, reads in BGR order
@@ -455,7 +519,7 @@ euroc_player_load_next_frame(struct euroc_player *ep, int cam_index, struct xrt_
 	}
 
 	// Create xrt_frame, it will be freed by FrameMat destructor
-	EUROC_ASSERT(xf == NULL || xf->reference.count > 0, "Must be given a valid or NULL frame ptr");
+	EUROC_ASSERT(xf == nullptr || xf->reference.count > 0, "Must be given a valid or nullptr frame ptr");
 	EUROC_ASSERT(timestamp >= 0, "Unexpected negative timestamp");
 	//! @todo Not using xrt_stereo_format because we use two sinks. It would
 	//! probably be better to refactor everything to use stereo frames instead.
@@ -465,163 +529,140 @@ euroc_player_load_next_frame(struct euroc_player *ep, int cam_index, struct xrt_
 
 	// Fields that aren't set by FrameMat
 	xf->owner = ep;
-	xf->source_timestamp = sample.first;
-	xf->source_sequence = ep->img_seq;
+	xf->source_timestamp = sample.timestamp_ns;
+	xf->source_sequence = cam.latest_sent;
 	xf->source_id = ep->base.source_id;
 }
 
 static void
-euroc_player_push_next_frame(struct euroc_player *ep)
+euroc_player_push_pending_cams(euroc_player *ep)
 {
-	int cam_count = ep->playback.cam_count;
+	bool more_frames = true;
+	while (more_frames) {
+		more_frames = false;
 
-	vector<xrt_frame *> xfs(cam_count, nullptr);
-	for (int i = 0; i < cam_count; i++) {
-		euroc_player_load_next_frame(ep, i, xfs[i]);
-	}
+		for (uint32_t i = 0; i < ep->cams.size(); i++) {
+			auto &cam = ep->cams[i];
 
-	// TODO: Some SLAM systems expect synced frames, but that's not an
-	// EuRoC requirement. Adapt to work with unsynced datasets too.
-	for (int i = 1; i < cam_count; i++) {
-		EUROC_ASSERT(xfs[i - 1]->timestamp == xfs[i]->timestamp, "Unsynced frames");
-	}
+			while (auto next = cam.getNext(ep->playback_ns)) {
+				xrt_frame *frame;
+				euroc_player_load_next_frame(ep, i, frame);
 
-	ep->img_seq++;
+				// Push the frame
+				xrt_sink_push_frame(ep->in_sinks.cams[i], frame);
 
-	for (int i = 0; i < cam_count; i++) {
-		xrt_sink_push_frame(ep->in_sinks.cams[i], xfs[i]);
-	}
+				// Drop our reference to the frame
+				xrt_frame_reference(&frame, nullptr);
 
-	for (int i = 0; i < cam_count; i++) {
-		xrt_frame_reference(&xfs[i], NULL);
-	}
+				if (i == 0) {
+					size_t fcount = cam.samples.size();
+					size_t img_seq = cam.latest_sent;
+					(void)snprintf(ep->progress_text, sizeof(ep->progress_text),
+					               "Playback %.2f%% - Frame %" PRId64 "/%" PRId64 " - IMU %" PRId64
+					               "/%" PRId64,
+					               float(img_seq) / float(fcount) * 100, img_seq, fcount,
+					               ep->imus[0].latest_sent, ep->imus[0].samples.size());
 
-	size_t fcount = ep->imgs->at(0).size();
-	(void)snprintf(ep->progress_text, sizeof(ep->progress_text),
-	               "Playback %.2f%% - Frame %" PRId64 "/%" PRId64 " - IMU %" PRId64 "/%" PRId64,
-	               float(ep->img_seq) / float(fcount) * 100, ep->img_seq, fcount, ep->imu_seq, ep->imus->size());
+					if (ep->playback.print_progress) {
+						printf("%s\r", ep->progress_text);
+						(void)fflush(stdout);
+					}
+				}
+			}
 
-	if (ep->playback.print_progress) {
-		printf("%s\r", ep->progress_text);
-		(void)fflush(stdout);
+			auto next = cam.peekNext(ep->playback_ns);
+			if (!more_frames && next.has_value()) {
+				more_frames = true;
+			}
+		}
 	}
 }
 
 static void
-euroc_player_push_next_imu(struct euroc_player *ep)
+euroc_player_push_pending_imus(euroc_player *ep)
 {
-	xrt_imu_sample sample = ep->imus->at(ep->imu_seq++);
-	sample.timestamp_ns = euroc_player_mapped_playback_ts(ep, sample.timestamp_ns);
-	xrt_sink_push_imu(ep->in_sinks.imus[IMU_SINK_IDX], &sample);
+	// Iterate all IMU samples
+	for (uint32_t i = 0; i < ep->imus.size(); i++) {
+		auto &imu = ep->imus[i];
+
+		// Send all pending IMU data
+		while (auto next = imu.getNext(ep->playback_ns)) {
+			auto sample = *next.value();
+			sample.timestamp_ns = condition_sample_ts(ep, sample.timestamp_ns);
+			xrt_sink_push_imu(ep->in_sinks.imus[i], &sample);
+		}
+	}
 }
 
 static void
-euroc_player_push_all_gt(struct euroc_player *ep)
+euroc_player_push_all_gt(euroc_player *ep)
 {
 	if (!ep->out_sinks.gt) {
 		return;
 	}
 
-	for (xrt_pose_sample &sample : *ep->gt) {
-		sample.timestamp_ns = euroc_player_mapped_playback_ts(ep, sample.timestamp_ns);
+	for (xrt_pose_sample &sample : ep->gt.samples) {
+		sample.timestamp_ns = condition_sample_ts(ep, sample.timestamp_ns);
 		xrt_sink_push_pose(ep->out_sinks.gt, &sample);
 	}
 }
 
-template <typename SamplesType>
+//! Gets the next sample timestamp, or INT64_MAX if none
 timepoint_ns
-euroc_player_get_next_euroc_ts(struct euroc_player *ep)
+euroc_player_get_next_sample_ts(euroc_player *ep)
 {
-	if constexpr (is_same_v<SamplesType, imu_samples>) {
-		return ep->imus->at(ep->imu_seq).timestamp_ns;
-	} else {
-		return ep->imgs->at(0).at(ep->img_seq).first;
+	timepoint_ns next_sample_euroc_ts = INT64_MAX;
+	for (auto &imu : ep->imus) {
+		auto next = imu.nextTimestamp();
+		if (next.has_value()) {
+			next_sample_euroc_ts = MIN(next_sample_euroc_ts, next.value());
+		}
 	}
+	for (auto &cam : ep->cams) {
+		auto next = cam.nextTimestamp();
+		if (next.has_value()) {
+			next_sample_euroc_ts = MIN(next_sample_euroc_ts, next.value());
+		}
+	}
+	return next_sample_euroc_ts;
 }
 
-template <typename SamplesType>
 void
-euroc_player_sleep_until_next_sample(struct euroc_player *ep)
+euroc_player_sleep_until_next_sample(euroc_player *ep)
 {
 	using std::chrono::nanoseconds;
 	using timepoint_ch = std::chrono::time_point<std::chrono::steady_clock>;
 	using std::this_thread::sleep_until;
 
-	timepoint_ns next_sample_euroc_ts = euroc_player_get_next_euroc_ts<SamplesType>(ep);
-	timepoint_ns next_sample_mono_ts = euroc_player_mapped_ts(ep, next_sample_euroc_ts);
+	timepoint_ns next_sample_euroc_ts = euroc_player_get_next_sample_ts(ep);
+	if (next_sample_euroc_ts == INT64_MAX) {
+		return;
+	}
+
+	timepoint_ns next_sample_mono_ts = (next_sample_euroc_ts - ep->playback_ns) / ep->playback.speed;
 	timepoint_ch next_sample_chrono_tp{nanoseconds{next_sample_mono_ts}};
 	sleep_until(next_sample_chrono_tp);
-
-#ifndef NDEBUG
-	// Complain when we are >1ms late. It can happen due to a busy scheduler.
-	double oversleep_ms = (os_monotonic_get_ts() - next_sample_mono_ts) / (double)U_TIME_1MS_IN_NS;
-	if (abs(oversleep_ms) > 1) {
-		string sample_type_name = "frame";
-		if constexpr (is_same_v<SamplesType, imu_samples>) {
-			sample_type_name = "imu";
-		}
-		EUROC_DEBUG(ep, "(%s) Woke up %.1fms late", sample_type_name.c_str(), oversleep_ms);
-	}
-#endif
-}
-
-//! Based on the SamplesType to stream, return a set of corresponding entities:
-//! the samples vector, sequence number, push and sleep functions.
-template <typename SamplesType>
-auto
-euroc_player_get_stream_set(struct euroc_player *ep)
-{
-	constexpr bool is_imu = is_same_v<SamplesType, imu_samples>;
-	const SamplesType *samples;
-	if constexpr (is_imu) {
-		samples = ep->imus;
-	} else {
-		samples = &ep->imgs->at(0);
-	}
-	uint64_t *sample_seq = is_imu ? &ep->imu_seq : &ep->img_seq;
-	auto push_next_sample = is_imu ? euroc_player_push_next_imu : euroc_player_push_next_frame;
-	auto sleep_until_next_sample = euroc_player_sleep_until_next_sample<SamplesType>;
-	return make_tuple(samples, sample_seq, push_next_sample, sleep_until_next_sample);
-}
-
-template <typename SamplesType>
-static void
-euroc_player_stream_samples(struct euroc_player *ep)
-{
-	// These fields correspond to IMU or frame streams depending on SamplesType
-	const auto [samples, sample_seq, push_next_sample, sleep_until_next_sample] =
-	    euroc_player_get_stream_set<SamplesType>(ep);
-
-	while (*sample_seq < samples->size() && ep->is_running) {
-		while (ep->playback.paused) {
-			constexpr int64_t PAUSE_POLL_INTERVAL_NS = 15L * U_TIME_1MS_IN_NS;
-			os_nanosleep(PAUSE_POLL_INTERVAL_NS);
-		}
-
-		if (!ep->playback.max_speed) {
-			sleep_until_next_sample(ep);
-		}
-
-		push_next_sample(ep);
-	}
 }
 
 static void *
 euroc_player_stream(void *ptr)
 {
-	struct xrt_fs *xfs = (struct xrt_fs *)ptr;
-	struct euroc_player *ep = euroc_player(xfs);
+	xrt_fs *xfs = (xrt_fs *)ptr;
+	euroc_player *ep = euroc_player::fromXfs(xfs);
 	EUROC_INFO(ep, "Starting euroc playback");
 
 	euroc_player_preload(ep);
-	ep->base_ts = MIN(ep->imgs->at(0).at(0).first, ep->imus->at(0).timestamp_ns);
-	ep->start_ts = os_monotonic_get_ts();
 	euroc_player_user_skip(ep);
 
 	// Push all IMU samples now if requested
 	if (ep->playback.send_all_imus_first) {
-		while (ep->imu_seq < ep->imus->size()) {
-			euroc_player_push_next_imu(ep);
+		for (uint32_t i = 0; i < ep->imus.size(); i++) {
+			auto &imu = ep->imus[i];
+			while (auto src_sample = imu.getNext(INT64_MAX)) {
+				xrt_imu_sample sample = *src_sample.value();
+				sample.timestamp_ns = condition_sample_ts(ep, sample.timestamp_ns);
+				xrt_sink_push_imu(ep->in_sinks.imus[i], &sample);
+			}
 		}
 	}
 
@@ -630,34 +671,56 @@ euroc_player_stream(void *ptr)
 		euroc_player_push_all_gt(ep);
 	}
 
-	// Launch image and IMU producers
-	auto serve_imus = async(launch::async, [ep] { euroc_player_stream_samples<imu_samples>(ep); });
-	auto serve_imgs = async(launch::async, [ep] { euroc_player_stream_samples<img_samples>(ep); });
-	// Note that the only fields of `ep` being modified in the threads are: img_seq, imu_seq and
-	// progress_text in single locations, thus no race conditions should occur.
+	timepoint_ns last = os_monotonic_get_ns();
+	while (os_thread_helper_is_running(&ep->play_thread)) {
+		if (euroc_player_get_next_sample_ts(ep) == INT64_MAX) {
+			break;
+		}
 
-	// Wait for the end of both streams
-	serve_imgs.get();
-	serve_imus.get();
+		if (!ep->playback.max_speed) {
+			euroc_player_sleep_until_next_sample(ep);
+		}
+
+		timepoint_ns now = os_monotonic_get_ns();
+		time_duration_ns mono_elapsed = (now - last);
+		time_duration_ns euroc_elapsed = mono_elapsed * ep->playback.speed;
+		last = now;
+
+		if (ep->playback.paused) {
+			constexpr int64_t PAUSE_POLL_INTERVAL_NS = 15L * U_TIME_1MS_IN_NS;
+			os_nanosleep(PAUSE_POLL_INTERVAL_NS);
+			continue;
+		}
+
+
+		if (!ep->playback.max_speed) {
+			ep->playback_ns += euroc_elapsed;
+		} else {
+			ep->playback_ns = euroc_player_get_next_sample_ts(ep);
+		}
+
+		euroc_player_push_pending_imus(ep);
+		euroc_player_push_pending_cams(ep);
+	}
 
 	ep->is_running = false;
 
 	EUROC_INFO(ep, "Euroc dataset playback finished");
 	euroc_player_set_ui_state(ep, STREAM_ENDED);
 
-	return NULL;
+	return nullptr;
 }
 
 
 // Frame server functionality
 
 static xrt_result_t
-euroc_player_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint32_t *out_count)
+euroc_player_enumerate_modes(xrt_fs *xfs, xrt_fs_mode **out_modes, uint32_t *out_count)
 {
-	struct euroc_player *ep = euroc_player(xfs);
+	euroc_player *ep = euroc_player::fromXfs(xfs);
 
 	// Should be freed by caller
-	struct xrt_fs_mode *modes = U_TYPED_ARRAY_CALLOC(struct xrt_fs_mode, 1);
+	xrt_fs_mode *modes = U_TYPED_ARRAY_CALLOC(xrt_fs_mode, 1);
 	if (modes == nullptr) {
 		EUROC_ERROR(ep, "Unable to calloc euroc playback modes");
 		return XRT_ERROR_ALLOCATION;
@@ -678,16 +741,16 @@ euroc_player_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes,
 }
 
 static xrt_result_t
-euroc_player_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_parameters *cp)
+euroc_player_configure_capture(xrt_fs *xfs, xrt_fs_capture_parameters *cp)
 {
 	// Noop, this is a playback routine, there's no parameters to support.
 	return XRT_SUCCESS;
 }
 
 #define DEFINE_RECEIVE_CAM(cam_id)                                                                                     \
-	static void receive_cam##cam_id(struct xrt_frame_sink *sink, struct xrt_frame *xf)                             \
+	static void receive_cam##cam_id(xrt_frame_sink *sink, xrt_frame *xf)                                           \
 	{                                                                                                              \
-		struct euroc_player *ep = container_of(sink, struct euroc_player, cam_sinks[cam_id]);                  \
+		euroc_player *ep = container_of(sink, euroc_player, cam_sinks[cam_id]);                                \
 		EUROC_TRACE(ep, "cam%d img t=%ld source_t=%ld", cam_id, xf->timestamp, xf->source_timestamp);          \
 		u_sink_debug_push_frame(&ep->ui_cam_sinks[cam_id], xf);                                                \
 		if (ep->out_sinks.cams[cam_id]) {                                                                      \
@@ -695,49 +758,33 @@ euroc_player_configure_capture(struct xrt_fs *xfs, struct xrt_fs_capture_paramet
 		}                                                                                                      \
 	}
 
+XRT_TRACKING_FOR_EACH_CAM(DEFINE_RECEIVE_CAM)
 
-DEFINE_RECEIVE_CAM(0)
-DEFINE_RECEIVE_CAM(1)
-DEFINE_RECEIVE_CAM(2)
-DEFINE_RECEIVE_CAM(3)
-DEFINE_RECEIVE_CAM(4)
-DEFINE_RECEIVE_CAM(5)
-DEFINE_RECEIVE_CAM(6)
-DEFINE_RECEIVE_CAM(7)
+#undef DEFINE_RECEIVE_CAM
 
-//! Be sure to define the same number of definition as EUROC_MAX_CAMS and to add them to `receive_cam`.
-static void (*receive_cam[EUROC_MAX_CAMS])(struct xrt_frame_sink *, struct xrt_frame *) = {
-    receive_cam0, //
-    receive_cam1, //
-    receive_cam2, //
-    receive_cam3, //
-    receive_cam4, //
-    receive_cam5, //
-    receive_cam6, //
-    receive_cam7, //
-};
-
-static void
-receive_imu_sample(struct xrt_imu_sink *sink, struct xrt_imu_sample *s)
-{
-	struct euroc_player *ep = container_of(sink, struct euroc_player, imu_sink);
-
-	timepoint_ns ts = s->timestamp_ns;
-	xrt_vec3_f64 a = s->accel_m_s2;
-	xrt_vec3_f64 w = s->gyro_rad_secs;
-
-	// UI log
-	const xrt_vec3 gyro{(float)w.x, (float)w.y, (float)w.z};
-	const xrt_vec3 accel{(float)a.x, (float)a.y, (float)a.z};
-	m_ff_vec3_f32_push(ep->gyro_ff, &gyro, ts);
-	m_ff_vec3_f32_push(ep->accel_ff, &accel, ts);
-
-	// Trace log
-	EUROC_TRACE(ep, "imu t=%ld ax=%f ay=%f az=%f wx=%f wy=%f wz=%f", ts, a.x, a.y, a.z, w.x, w.y, w.z);
-	if (ep->out_sinks.imus[IMU_SINK_IDX]) {
-		xrt_sink_push_imu(ep->out_sinks.imus[IMU_SINK_IDX], s);
+#define DEFINE_RECEIVE_IMU(imu_id)                                                                                     \
+	static void receive_imu##imu_id(xrt_imu_sink *sink, xrt_imu_sample *s)                                         \
+	{                                                                                                              \
+		euroc_player *ep = container_of(sink, euroc_player, imu_sinks[imu_id]);                                \
+                                                                                                                       \
+		timepoint_ns ts = s->timestamp_ns;                                                                     \
+		xrt_vec3_f64 a = s->accel_m_s2;                                                                        \
+		xrt_vec3_f64 w = s->gyro_rad_secs;                                                                     \
+                                                                                                                       \
+		const xrt_vec3 gyro{(float)w.x, (float)w.y, (float)w.z};                                               \
+		const xrt_vec3 accel{(float)a.x, (float)a.y, (float)a.z};                                              \
+		m_ff_vec3_f32_push(ep->gyro_ffs[imu_id], &gyro, ts);                                                   \
+		m_ff_vec3_f32_push(ep->accel_ffs[imu_id], &accel, ts);                                                 \
+                                                                                                                       \
+		EUROC_TRACE(ep, "imu t=%ld ax=%f ay=%f az=%f wx=%f wy=%f wz=%f", ts, a.x, a.y, a.z, w.x, w.y, w.z);    \
+		if (ep->out_sinks.imus[imu_id]) {                                                                      \
+			xrt_sink_push_imu(ep->out_sinks.imus[imu_id], s);                                              \
+		}                                                                                                      \
 	}
-}
+
+XRT_TRACKING_FOR_EACH_IMU(DEFINE_RECEIVE_IMU)
+
+#undef DEFINE_RECEIVE_IMU
 
 /*!
  * This is the @ref xrt_fs stream start method, however as the euroc playback
@@ -746,22 +793,19 @@ receive_imu_sample(struct xrt_imu_sink *sink, struct xrt_imu_sample *s)
  * the user clicks the start button.
  */
 static xrt_result_t
-euroc_player_stream_start(struct xrt_fs *xfs,
-                          struct xrt_frame_sink *xs,
-                          enum xrt_fs_capture_type capture_type,
-                          uint32_t descriptor_index)
+euroc_player_stream_start(xrt_fs *xfs, xrt_frame_sink *xs, xrt_fs_capture_type capture_type, uint32_t descriptor_index)
 {
-	struct euroc_player *ep = euroc_player(xfs);
+	euroc_player *ep = euroc_player::fromXfs(xfs);
 
-	if (xs == NULL && capture_type == XRT_FS_CAPTURE_TYPE_TRACKING) {
+	if (xs == nullptr && capture_type == XRT_FS_CAPTURE_TYPE_TRACKING) {
 		EUROC_INFO(ep, "Starting Euroc Player in tracking mode");
-		if (ep->out_sinks.cams[0] == NULL) {
+		if (ep->out_sinks.cams[0] == nullptr) {
 			EUROC_WARN(ep, "No cam0 sink provided, will keep running but tracking is unlikely to work");
 		}
 		if (ep->playback.play_from_start) {
 			euroc_player_start_btn_cb(ep);
 		}
-	} else if (xs != NULL && capture_type == XRT_FS_CAPTURE_TYPE_CALIBRATION) {
+	} else if (xs != nullptr && capture_type == XRT_FS_CAPTURE_TYPE_CALIBRATION) {
 		EUROC_INFO(ep, "Starting Euroc Player in calibration mode, will stream only cam0 frames right away");
 		ep->out_sinks.cams[0] = xs;
 		euroc_player_start_btn_cb(ep);
@@ -776,17 +820,17 @@ euroc_player_stream_start(struct xrt_fs *xfs,
 }
 
 static xrt_result_t
-euroc_player_slam_stream_start(struct xrt_fs *xfs, struct xrt_slam_sinks *sinks)
+euroc_player_slam_stream_start(xrt_fs *xfs, xrt_slam_sinks *sinks)
 {
-	struct euroc_player *ep = euroc_player(xfs);
+	euroc_player *ep = euroc_player::fromXfs(xfs);
 	ep->out_sinks = *sinks;
-	return euroc_player_stream_start(xfs, NULL, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
+	return euroc_player_stream_start(xfs, nullptr, XRT_FS_CAPTURE_TYPE_TRACKING, 0);
 }
 
 static xrt_result_t
-euroc_player_stream_stop(struct xrt_fs *xfs)
+euroc_player_stream_stop(xrt_fs *xfs)
 {
-	struct euroc_player *ep = euroc_player(xfs);
+	euroc_player *ep = euroc_player::fromXfs(xfs);
 	ep->is_running = false;
 
 	// Destroy also stops the thread.
@@ -796,9 +840,9 @@ euroc_player_stream_stop(struct xrt_fs *xfs)
 }
 
 static xrt_result_t
-euroc_player_is_running(struct xrt_fs *xfs, bool *out_is_running)
+euroc_player_is_running(xrt_fs *xfs, bool *out_is_running)
 {
-	struct euroc_player *ep = euroc_player(xfs);
+	euroc_player *ep = euroc_player::fromXfs(xfs);
 	(*out_is_running) = ep->is_running;
 	return XRT_SUCCESS;
 }
@@ -807,36 +851,34 @@ euroc_player_is_running(struct xrt_fs *xfs, bool *out_is_running)
 // Frame node functionality
 
 static void
-euroc_player_break_apart(struct xrt_frame_node *node)
+euroc_player_break_apart(xrt_frame_node *node)
 {
-	struct euroc_player *ep = container_of(node, struct euroc_player, node);
+	euroc_player *ep = container_of(node, euroc_player, node);
 	euroc_player_stream_stop(&ep->base);
 }
 
 static void
-euroc_player_destroy(struct xrt_frame_node *node)
+euroc_player_destroy(xrt_frame_node *node)
 {
-	struct euroc_player *ep = container_of(node, struct euroc_player, node);
-
-	delete ep->gt;
-	delete ep->imus;
-	delete ep->imgs;
+	euroc_player *ep = container_of(node, euroc_player, node);
 
 	u_var_remove_root(ep);
-	for (int i = 0; i < ep->dataset.cam_count; i++) {
+	for (uint32_t i = 0; i < ep->dataset.cam_count; i++) {
 		u_sink_debug_destroy(&ep->ui_cam_sinks[i]);
 	}
-	m_ff_vec3_f32_free(&ep->gyro_ff);
-	m_ff_vec3_f32_free(&ep->accel_ff);
+	for (uint32_t i = 0; i < ep->dataset.imu_count; i++) {
+		m_ff_vec3_f32_free(&ep->gyro_ffs[i]);
+		m_ff_vec3_f32_free(&ep->accel_ffs[i]);
+	}
 
-	free(ep);
+	delete ep;
 }
 
 
 // UI functionality
 
 static void
-euroc_player_set_ui_state(struct euroc_player *ep, euroc_player_ui_state state)
+euroc_player_set_ui_state(euroc_player *ep, euroc_player_ui_state state)
 {
 	// -> UNINITIALIZED -> NOT_STREAMING -> STREAM_PLAYING <-> STREAM_PAUSED
 	//                                              └> STREAM_ENDED <┘
@@ -865,7 +907,7 @@ euroc_player_set_ui_state(struct euroc_player *ep, euroc_player_ui_state state)
 static void
 euroc_player_start_btn_cb(void *ptr)
 {
-	struct euroc_player *ep = (struct euroc_player *)ptr;
+	euroc_player *ep = (euroc_player *)ptr;
 
 	int ret = 0;
 	ret |= os_thread_helper_init(&ep->play_thread);
@@ -880,28 +922,23 @@ euroc_player_pause_btn_cb(void *ptr)
 {
 	//! @note: if you have groundtruth, pausing will unsync it from the tracker.
 
-	struct euroc_player *ep = (struct euroc_player *)ptr;
+	euroc_player *ep = (euroc_player *)ptr;
 	ep->playback.paused = !ep->playback.paused;
-
-	if (ep->playback.paused) {
-		ep->last_pause_ts = os_monotonic_get_ts();
-	} else {
-		time_duration_ns pause_length = os_monotonic_get_ts() - ep->last_pause_ts;
-		ep->offset_ts += pause_length;
-	}
 
 	euroc_player_set_ui_state(ep, ep->playback.paused ? STREAM_PAUSED : STREAM_PLAYING);
 }
 
 static void
-euroc_player_setup_gui(struct euroc_player *ep)
+euroc_player_setup_gui(euroc_player *ep)
 {
 	// Set sinks to display in UI
-	for (int i = 0; i < ep->dataset.cam_count; i++) {
+	for (uint32_t i = 0; i < ep->dataset.cam_count; i++) {
 		u_sink_debug_init(&ep->ui_cam_sinks[i]);
 	}
-	m_ff_vec3_f32_alloc(&ep->gyro_ff, 1000);
-	m_ff_vec3_f32_alloc(&ep->accel_ff, 1000);
+	for (uint32_t i = 0; i < ep->dataset.imu_count; i++) {
+		m_ff_vec3_f32_alloc(&ep->gyro_ffs[i], 1000);
+		m_ff_vec3_f32_alloc(&ep->accel_ffs[i], 1000);
+	}
 
 	// Set button callbacks
 	ep->start_btn.cb = euroc_player_start_btn_cb;
@@ -918,9 +955,10 @@ euroc_player_setup_gui(struct euroc_player *ep)
 	u_var_add_button(ep, &ep->pause_btn, "Pause");
 	u_var_add_log_level(ep, &ep->log_level, "Log level");
 
-	u_var_add_gui_header(ep, NULL, "Playback Options");
+	u_var_add_gui_header(ep, nullptr, "Playback Options");
 	u_var_add_ro_text(ep, "Set these before starting the stream", "Note");
-	u_var_add_i32(ep, &ep->playback.cam_count, "Use N cams (if available)");
+	u_var_add_u32(ep, &ep->playback.cam_count, "Use N cams (if available)");
+	u_var_add_u32(ep, &ep->playback.imu_count, "Use N IMUs (if available)");
 	u_var_add_bool(ep, &ep->playback.color, "Color (if available)");
 	u_var_add_bool(ep, &ep->playback.gt, "Groundtruth (if available)");
 	u_var_add_bool(ep, &ep->playback.skip_perc, "Skip percentage, otherwise skips seconds");
@@ -931,10 +969,15 @@ euroc_player_setup_gui(struct euroc_player *ep)
 	u_var_add_bool(ep, &ep->playback.send_all_imus_first, "Send all IMU samples first");
 	u_var_add_bool(ep, &ep->playback.use_source_ts, "Use original timestamps");
 
-	u_var_add_gui_header(ep, NULL, "Streams");
-	u_var_add_ro_ff_vec3_f32(ep, ep->gyro_ff, "Gyroscope");
-	u_var_add_ro_ff_vec3_f32(ep, ep->accel_ff, "Accelerometer");
-	for (int i = 0; i < ep->dataset.cam_count; i++) {
+	u_var_add_gui_header(ep, nullptr, "Streams");
+	for (uint32_t i = 0; i < ep->dataset.imu_count; i++) {
+		char label[] = "IMU(X) NNNNNNNNNN";
+		(void)snprintf(label, sizeof(label), "IMU(G) %d", i);
+		u_var_add_ro_ff_vec3_f32(ep, ep->gyro_ffs[i], label);
+		(void)snprintf(label, sizeof(label), "IMU(A) %d", i);
+		u_var_add_ro_ff_vec3_f32(ep, ep->accel_ffs[i], label);
+	}
+	for (uint32_t i = 0; i < ep->dataset.cam_count; i++) {
 		char label[] = "Camera NNNNNNNNNN";
 		(void)snprintf(label, sizeof(label), "Camera %d", i);
 		u_var_add_sink_debug(ep, &ep->ui_cam_sinks[i], label);
@@ -942,18 +985,20 @@ euroc_player_setup_gui(struct euroc_player *ep)
 }
 
 extern "C" void
-euroc_player_fill_default_config_for(struct euroc_player_config *config, const char *dataset_path)
+euroc_player_fill_default_config_for(euroc_player_config *config, const char *dataset_path)
 {
-	struct euroc_player_dataset_info dataset = {};
+	euroc_player_dataset_info dataset = {};
 	dataset.gt_device_name = debug_get_option_gt_device_name();
 	euroc_player_fill_dataset_info(dataset_path, &dataset);
 
-	struct euroc_player_playback_config playback = {};
+	euroc_player_playback_config playback = {};
 	const char *cam_count = debug_get_option_cam_count();
+	const char *imu_count = debug_get_option_imu_count();
 	const char *color = debug_get_option_color();
 	const char *gt = debug_get_option_gt();
 	const char *skip_option = debug_get_option_skip_first();
 	playback.cam_count = (int)debug_string_to_num(cam_count, dataset.cam_count);
+	playback.imu_count = (int)debug_string_to_num(imu_count, dataset.imu_count);
 	playback.color = color == nullptr ? dataset.is_colored : debug_string_to_bool(color);
 	playback.gt = gt == nullptr ? dataset.has_gt : debug_string_to_bool(gt);
 	playback.skip_perc = string(skip_option).back() == '%';
@@ -974,14 +1019,15 @@ euroc_player_fill_default_config_for(struct euroc_player_config *config, const c
 
 // Euroc driver creation
 
-extern "C" struct xrt_fs *
-euroc_player_create(struct xrt_frame_context *xfctx, const char *path, struct euroc_player_config *config)
+extern "C" xrt_fs *
+euroc_player_create(xrt_frame_context *xfctx, const char *path, euroc_player_config *config)
 {
-	struct euroc_player *ep = U_TYPED_CALLOC(struct euroc_player);
+	// Value-initialize so all the C members are zeroed, can't use braces as that would define a new struct.
+	euroc_player *ep = new euroc_player();
 
-	struct euroc_player_config *default_config = nullptr;
+	euroc_player_config *default_config = nullptr;
 	if (config == nullptr) {
-		default_config = U_TYPED_CALLOC(struct euroc_player_config);
+		default_config = U_TYPED_CALLOC(euroc_player_config);
 		euroc_player_fill_default_config_for(default_config, path);
 		config = default_config;
 	}
@@ -1007,23 +1053,29 @@ euroc_player_create(struct xrt_frame_context *xfctx, const char *path, struct eu
 	           ep->dataset.height);
 
 	// Using pointers to not mix vector with a C-compatible struct
-	ep->gt = new gt_trajectory{};
-	ep->imus = new imu_samples{};
-	ep->imgs = new vector<img_samples>(ep->dataset.cam_count);
+	ep->gt = {};
+	ep->imus = vector<imu_state>(ep->dataset.imu_count);
+	ep->cams = vector<camera_state>(ep->dataset.cam_count);
 
 	euroc_player_setup_gui(ep);
 
-	EUROC_ASSERT(receive_cam[ARRAY_SIZE(receive_cam) - 1] != nullptr, "See `receive_cam` docs");
 	ep->in_sinks.cam_count = ep->dataset.cam_count;
-	for (int i = 0; i < ep->dataset.cam_count; i++) {
-		ep->cam_sinks[i].push_frame = receive_cam[i];
-		ep->in_sinks.cams[i] = &ep->cam_sinks[i];
-	}
-	ep->imu_sink.push_imu = receive_imu_sample;
-	ep->in_sinks.imu_count = IMU_COUNT;
-	ep->in_sinks.imus[IMU_SINK_IDX] = &ep->imu_sink;
 
-	struct xrt_fs *xfs = &ep->base;
+#define DEFINE_RECEIVE_CAM(cam_id)                                                                                     \
+	ep->cam_sinks[cam_id].push_frame = receive_cam##cam_id;                                                        \
+	ep->in_sinks.cams[cam_id] = &ep->cam_sinks[cam_id];
+	XRT_TRACKING_FOR_EACH_CAM(DEFINE_RECEIVE_CAM)
+#undef DEFINE_RECEIVE_CAM
+
+	ep->in_sinks.imu_count = ep->dataset.imu_count;
+
+#define DEFINE_RECEIVE_IMU(imu_id)                                                                                     \
+	ep->imu_sinks[imu_id].push_imu = receive_imu##imu_id;                                                          \
+	ep->in_sinks.imus[imu_id] = &ep->imu_sinks[imu_id];
+	XRT_TRACKING_FOR_EACH_IMU(DEFINE_RECEIVE_IMU)
+#undef DEFINE_RECEIVE_IMU
+
+	xrt_fs *xfs = &ep->base;
 	u_frameserver_populate_function_pointers(xfs);
 	xfs->enumerate_modes = euroc_player_enumerate_modes;
 	xfs->configure_capture = euroc_player_configure_capture;
@@ -1038,7 +1090,7 @@ euroc_player_create(struct xrt_frame_context *xfctx, const char *path, struct eu
 	(void)snprintf(xfs->serial, sizeof(xfs->serial), EUROC_PLAYER_STR " Serial");
 	xfs->source_id = 0xECD0FEED;
 
-	struct xrt_frame_node *xfn = &ep->node;
+	xrt_frame_node *xfn = &ep->node;
 	xfn->break_apart = euroc_player_break_apart;
 	xfn->destroy = euroc_player_destroy;
 

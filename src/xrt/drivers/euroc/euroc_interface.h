@@ -34,7 +34,8 @@ extern "C" {
  */
 struct euroc_player_playback_config
 {
-	int cam_count;            //!< Number of cameras to stream from the dataset
+	uint32_t cam_count;       //!< Number of cameras to stream from the dataset
+	uint32_t imu_count;       //!< Number of IMUs to stream from the dataset
 	bool color;               //!< If RGB available but this is false, images will be loaded in grayscale
 	bool gt;                  //!< Whether to send groundtruth data (if available) to the SLAM tracker
 	bool skip_perc;           //!< Whether @ref skip_first represents percentage or seconds
@@ -57,11 +58,15 @@ struct euroc_player_playback_config
 struct euroc_player_dataset_info
 {
 	char path[256];
-	int cam_count;
+	uint32_t cam_count;
+	uint32_t imu_count;
 	bool is_colored;
-	bool has_gt; //!< Whether this dataset has groundtruth data available
+	//! Whether this dataset has groundtruth data available
+	bool has_gt;
 	const char *gt_device_name;
+	//! The width for the camera frames
 	uint32_t width;
+	//! The height for the camera frames
 	uint32_t height;
 };
 
