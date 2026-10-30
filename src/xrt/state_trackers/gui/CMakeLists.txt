@@ -41,6 +41,7 @@ add_library(
 	gui_prober.c
 	gui_scene_calibrate.c
 	gui_scene_constellation_tracker_test.cpp
+	gui_scene_euroc_playback.c
 	gui_scene_hand_tracking_demo.c
 	gui_scene_main_menu.c
 	gui_scene_record.c
@@ -77,6 +78,10 @@ endif()
 
 if(XRT_BUILD_DRIVER_DEPTHAI)
 	target_link_libraries(st_gui PRIVATE drv_depthai)
+endif()
+
+if(XRT_BUILD_DRIVER_EUROC)
+	target_link_libraries(st_gui PRIVATE drv_euroc)
 endif()
 
 if(XRT_BUILD_DRIVER_HANDTRACKING)

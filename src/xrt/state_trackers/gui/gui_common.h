@@ -239,6 +239,17 @@ void
 gui_scene_record_euroc(struct gui_program *p);
 
 /*!
+ * EuRoC dataset playback with no downstream consumers, for viewing the player's own stream visualizations.
+ *
+ * @param p self
+ * @param path Optional dataset path, falls back to the EUROC_PATH environment variable.
+ *
+ * @public @memberof gui_program
+ */
+void
+gui_scene_euroc_playback(struct gui_program *p, const char *path);
+
+/*!
  * Create a recording view scene.
  *
  * @public @memberof gui_program
