@@ -21,6 +21,9 @@ int
 cli_cmd_calibration_dump(int argc, const char **argv);
 
 int
+cli_cmd_constellationbatch(int argc, const char **argv);
+
+int
 cli_cmd_info(int argc, const char **argv);
 
 int

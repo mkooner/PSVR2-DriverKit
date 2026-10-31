@@ -11,6 +11,7 @@ add_executable(
 	cli_cmd_lighthouse.c
 	cli_cmd_probe.c
 	cli_cmd_slambatch.c
+	cli_cmd_constellationbatch.c
 	cli_cmd_test.c
 	cli_common.h
 	cli_main.c
@@ -26,6 +27,10 @@ if(XRT_HAVE_OPENCV)
 	target_link_libraries(cli PRIVATE aux_tracking)
 endif()
 
+if(XRT_MODULE_CONSTELLATION_TRACKING)
+	target_link_libraries(cli PRIVATE constellation)
+endif()
+
 set_target_properties(cli PROPERTIES OUTPUT_NAME monado-cli PREFIX "")
 
 target_link_libraries(
@@ -33,6 +38,7 @@ target_link_libraries(
 	PRIVATE
 		aux_os
 		aux_os_ble
+		tracking-includes
 		aux_util
 		aux_math
 		target_instance_no_comp

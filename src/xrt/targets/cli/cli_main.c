@@ -34,6 +34,7 @@ cli_print_help(int argc, const char **argv)
 	P("  calibrate  - Calibrate a camera and save config (not implemented yet).\n");
 	P("  calib-dump - Load and dump a calibration to stdout.\n");
 	P("  slambatch  - Runs a sequence of EuRoC datasets with the SLAM tracker.\n");
+	P("  constellationbatch - Runs EuRoC datasets with the constellation tracker.\n");
 
 	return 1;
 }
@@ -64,6 +65,9 @@ main(int argc, const char **argv)
 	}
 	if (strcmp(argv[1], "lighthouse") == 0) {
 		return cli_cmd_lighthouse(argc, argv);
+	}
+	if (strcmp(argv[1], "constellationbatch") == 0) {
+		return cli_cmd_constellationbatch(argc, argv);
 	}
 	if (strcmp(argv[1], "slambatch") == 0) {
 		return cli_cmd_slambatch(argc, argv);
