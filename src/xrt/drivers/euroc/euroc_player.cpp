@@ -21,8 +21,11 @@
 #include "util/u_var.h"
 #include "util/u_sink.h"
 #include "util/u_frameserver.h"
+#include "util/u_json.hpp"
 
 #include "tracking/t_frame_cv_mat_wrapper.hpp"
+#include "tracking/t_tracking.h"
+#include "tracking/t_euroc_recorder.h"
 
 #include "math/m_api.h"
 #include "math/m_filter_fifo.h"
@@ -71,6 +74,7 @@ using std::stof;
 using std::string;
 using std::to_string;
 using std::vector;
+using xrt::auxiliary::util::json::JSONNode;
 
 struct img_sample
 {
@@ -135,9 +139,9 @@ template <typename T> struct stream_state
 	}
 };
 
-using camera_state = stream_state<img_sample>;
-using imu_state = stream_state<xrt_imu_sample>;
-using gt_state = stream_state<xrt_pose_sample>;
+using camera_stream = stream_state<img_sample>;
+using imu_stream = stream_state<xrt_imu_sample>;
+using gt_stream = stream_state<xrt_pose_sample>;
 
 enum euroc_player_ui_state : std::uint8_t
 {
@@ -172,10 +176,10 @@ struct euroc_player
 	bool is_running;                       //!< Set only at start, stop and end of frameserver stream
 	os_thread_helper play_thread;
 
-	timepoint_ns playback_ns;  //!< The playback timestamp of the stream.
-	vector<imu_state> imus;    //!< The list of IMUs in this dataset.
-	vector<camera_state> cams; //!< The list of cameras in this dataset.
-	gt_state gt;               //!< The state of the ground truth player.
+	timepoint_ns playback_ns;   //!< The playback timestamp of the stream.
+	vector<imu_stream> imus;    //!< The list of IMUs in this dataset.
+	vector<camera_stream> cams; //!< The list of cameras in this dataset.
+	gt_stream gt;               //!< The state of the ground truth player.
 
 	// Timestamp correction fields (can be disabled through `use_source_ts`)
 	timepoint_ns base_ns; //!< First sample timestamp, stream timestamps are relative to this
@@ -208,7 +212,7 @@ euroc_player_set_ui_state(euroc_player *ep, euroc_player_ui_state state);
 //! If `read_n` > 0, read at most that amount of samples
 //! Returns whether the appropriate data.csv file could be opened
 static bool
-euroc_player_preload_imu_data(const string &dataset_path, imu_state &imu, uint32_t imu_id, int64_t read_n = -1)
+euroc_player_preload_imu_data(const string &dataset_path, imu_stream &imu, uint32_t imu_id, int64_t read_n = -1)
 {
 	string imu_name = "imu" + to_string(imu_id);
 	string csv_filename = dataset_path + "/mav0/" + imu_name + "/data.csv";
@@ -241,6 +245,84 @@ euroc_player_preload_imu_data(const string &dataset_path, imu_state &imu, uint32
 	return true;
 }
 
+string
+slurp(ifstream &in)
+{
+	std::ostringstream sstr;
+	sstr << in.rdbuf();
+	return sstr.str();
+}
+
+static void
+euroc_player_load_imu_led_model(const string &dataset_path, euroc_player_dataset_imu &imu, uint32_t imu_id)
+{
+	string imu_name = "led_model" + to_string(imu_id);
+	string imu_path = dataset_path + "/mav0/" + imu_name;
+	string csv_filename = imu_path + "/data.csv";
+	string json_filename = imu_path + "/sensor.json";
+
+	imu.has_led_model = false;
+
+	ifstream fin{csv_filename};
+	if (!fin.is_open()) {
+		return;
+	}
+
+	ifstream fin_json{json_filename};
+	if (!fin_json.is_open()) {
+		return;
+	}
+	string json_contents = slurp(fin_json);
+
+	try {
+		JSONNode sensor{json_contents};
+		if (sensor["sensor_type"].asString() != EUROC_SENSOR_TYPE_LED_MODEL) {
+			U_LOG_E("Invalid sensor type %s, expected led_model_mnd",
+			        sensor["sensor_type"].asString().c_str());
+			return;
+		}
+
+		imu.led_model.match_parameters.min_leds_for_correspondence_search_without_prior =
+		    sensor["min_leds_for_correspondence_search_without_prior"].asInt();
+		imu.led_model.match_parameters.min_leds_for_correspondence_search_with_prior =
+		    sensor["min_leds_for_correspondence_search_with_prior"].asInt();
+	} catch (std::exception &e) {
+		U_LOG_E("Got exception parsing led model sensor info: %s", e.what());
+		return;
+	}
+
+	// #pos_x [m],pos_y [m],pos_z [m],norm_x [unit],norm_y [unit],norm_z [unit],radius [m],visibility_angle [rad],id
+	constexpr int COLUMN_COUNT = 9; // EuRoC imu columns: ts wx wy wz ax ay az
+	string line;
+	getline(fin, line); // Skip header line
+
+	while (getline(fin, line)) {
+		double v[COLUMN_COUNT];
+		size_t i = 0;
+		size_t j = line.find(',');
+		v[0] = stod(line.substr(i, j));
+		for (size_t k = 1; k < COLUMN_COUNT; k++) {
+			i = j;
+			j = line.find(',', i + 1);
+			v[k] = stod(line.substr(i + 1, j));
+		}
+
+		t_constellation_tracker_led led;
+		led.position.x = v[0];
+		led.position.y = v[1];
+		led.position.z = v[2];
+		led.normal.x = v[3];
+		led.normal.y = v[4];
+		led.normal.z = v[5];
+		led.radius_m = v[6];
+		led.visibility_angle = v[7];
+		led.id = static_cast<t_constellation_led_id_it>(v[8]);
+		imu.led_storage[imu.led_model.led_count++] = led;
+	}
+	imu.led_model.leds = imu.led_storage;
+	imu.has_led_model = true;
+}
+
 /*!
  * Parse and load ground truth device name and trajectory into `gtdev` and
  * `trajectory` respectively
@@ -259,7 +341,7 @@ euroc_player_preload_imu_data(const string &dataset_path, imu_state &imu, uint32
  * @returns Whether the appropriate data.csv file could be opened
  */
 static bool
-euroc_player_preload_gt_data(const string &dataset_path, const char *&gtdev, gt_state &gt, int64_t read_n = -1)
+euroc_player_preload_gt_data(const string &dataset_path, const char *&gtdev, gt_stream &gt, int64_t read_n = -1)
 {
 	vector<const char *> gt_devices = {"vicon0", "mocap0", "state_groundtruth_estimate0", "leica0"};
 	if (gtdev != nullptr && !string(gtdev).empty()) {
@@ -308,7 +390,7 @@ euroc_player_preload_gt_data(const string &dataset_path, const char *&gtdev, gt_
 //! If read_n > 0, read at most that amount of samples
 //! Returns whether the appropriate data.csv file could be opened
 static bool
-euroc_player_preload_img_data(const string &dataset_path, camera_state &cam, uint32_t cam_id, int64_t read_n = -1)
+euroc_player_preload_img_data(const string &dataset_path, camera_stream &cam, uint32_t cam_id, int64_t read_n = -1)
 {
 	// Parse image data, assumes data.csv is well formed
 	string cam_name = "cam" + to_string(cam_id);
@@ -340,6 +422,74 @@ euroc_player_preload_img_data(const string &dataset_path, camera_state &cam, uin
 	return true;
 }
 
+static void
+euroc_player_load_cam_calib(const string &dataset_path, euroc_player_dataset_camera &cam, uint32_t cam_id)
+{
+	// Parse image data, assumes data.csv is well formed
+	string cam_name = "cam" + to_string(cam_id);
+	string json_filename = dataset_path + "/mav0/" + cam_name + "/sensor.json";
+	ifstream fin{json_filename};
+	if (!fin.is_open()) {
+		cam.calib_valid = false;
+		return;
+	}
+
+	string contents = slurp(fin);
+	JSONNode node{contents};
+
+	try {
+		t_camera_calibration calib{};
+		xrt_pose pose XRT_POSE_IDENTITY;
+
+		if (node["sensor_type"].asString() != EUROC_SENSOR_TYPE_CAMERA) {
+			throw std::runtime_error("Invalid sensor type " + node["sensor_type"].asString("INVALID"));
+		}
+
+		auto T_BS = node["T_BS"].asObject();
+		if (T_BS["cols"].asInt() != 4 || T_BS["rows"].asInt() != 4 || !T_BS["data"].isArray()) {
+			throw std::runtime_error("Invalid T_BS");
+		}
+
+		xrt_matrix_4x4 mat;
+		auto T_BS_data = T_BS["data"].asArray();
+		for (uint32_t i = 0; i < 16; i++) {
+			mat.v[i] = T_BS_data[i].asDouble();
+		}
+		math_matrix_4x4_transpose(&mat, &mat); // row major (EuRoC) -> col major (Monado)
+		math_pose_from_isometry(&mat, &pose);
+
+		auto resolution = node["resolution"].asArray();
+		calib.image_size_pixels.w = resolution[0].asInt(-1);
+		calib.image_size_pixels.h = resolution[1].asInt(-1);
+		if (calib.image_size_pixels.w == -1 || calib.image_size_pixels.h == -1) {
+			throw std::runtime_error("Missing image size (pixels)");
+		}
+
+		calib.distortion_model = t_euroc_model_to_distortion_model(node["distortion_model"].asString().c_str());
+
+		auto intrinsics = node["intrinsics"].asArray();
+		t_camera_calibration_fill_intrinsics( //
+		    &calib,                           //
+		    intrinsics[0].asDouble(),         //
+		    intrinsics[1].asDouble(),         //
+		    intrinsics[2].asDouble(),         //
+		    intrinsics[3].asDouble());        //
+
+		auto distortion_coefficients = node["distortion_coefficients"].asArray();
+		for (uint32_t i = 0;
+		     i < distortion_coefficients.size() && i < ARRAY_SIZE(calib.distortion_parameters_as_array); i++) {
+			calib.distortion_parameters_as_array[i] = distortion_coefficients[i].asDouble();
+		}
+
+		cam.calib = calib;
+		cam.pose = pose;
+		cam.calib_valid = true;
+	} catch (std::exception &e) {
+		U_LOG_E("Failed to load EuRoC camera calibration, got %s", e.what());
+		cam.calib_valid = false;
+	}
+}
+
 //! Trims cameras sequences so that they all start and end at the same sample
 //! Note that this function does not guarantee that the dataset is free of framedrops
 //! and it assumes it is properly formatted with monotonically increasing timestamps.
@@ -349,7 +499,7 @@ euroc_player_match_cams_seqs(euroc_player *ep)
 	// Find newest first timestamp and oldest last timestamp
 	timepoint_ns first_ts = INT64_MIN;
 	timepoint_ns last_ts = INT64_MAX;
-	for (const camera_state &cam : ep->cams) {
+	for (const camera_stream &cam : ep->cams) {
 		auto &imgs = cam.samples;
 		EUROC_ASSERT(!imgs.empty(), "Camera with no samples");
 
@@ -367,7 +517,7 @@ euroc_player_match_cams_seqs(euroc_player *ep)
 	auto is_first = [first_ts](const img_sample &s) { return s.timestamp_ns == first_ts; };
 	auto is_last = [last_ts](const img_sample &s) { return s.timestamp_ns == last_ts; };
 
-	for (camera_state &cam : ep->cams) {
+	for (camera_stream &cam : ep->cams) {
 		auto &imgs = cam.samples;
 		auto new_first = find_if(imgs.begin(), imgs.end(), is_first);
 		auto new_last = find_if(imgs.begin(), imgs.end(), is_last);
@@ -381,20 +531,20 @@ euroc_player_preload(euroc_player *ep)
 {
 	for (uint32_t i = 0; i < ep->imus.size(); i++) {
 		auto &imu = ep->imus[i];
-		imu = imu_state{};
+		imu = imu_stream{};
 		euroc_player_preload_imu_data(ep->dataset.path, imu, i);
 	}
 
 	for (size_t i = 0; i < ep->cams.size(); i++) {
 		auto &cam = ep->cams[i];
-		cam = camera_state{};
+		cam = camera_stream{};
 		euroc_player_preload_img_data(ep->dataset.path, cam, i);
 	}
 
 	euroc_player_match_cams_seqs(ep);
 
 	if (ep->dataset.has_gt) {
-		ep->gt = gt_state{};
+		ep->gt = gt_stream{};
 		euroc_player_preload_gt_data(ep->dataset.path, ep->dataset.gt_device_name, ep->gt);
 	}
 
@@ -443,14 +593,20 @@ static void
 euroc_player_fill_dataset_info(const char *path, euroc_player_dataset_info *dataset)
 {
 	(void)snprintf(dataset->path, sizeof(dataset->path), "%s", path);
-	camera_state cam{};
-	imu_state imu{};
-	gt_state gt{};
+	camera_stream cam{};
+	imu_stream imu{};
+	gt_stream gt{};
 
 	uint32_t i = 0;
 	bool has_camera = euroc_player_preload_img_data(dataset->path, cam, i, 1);
+	if (has_camera) {
+		euroc_player_load_cam_calib(dataset->path, dataset->cams[i], i);
+	}
 	while (has_camera) {
 		has_camera = euroc_player_preload_img_data(dataset->path, cam, ++i, 0);
+		if (has_camera) {
+			euroc_player_load_cam_calib(dataset->path, dataset->cams[i], i);
+		}
 	}
 	uint32_t cam_count = i;
 	EUROC_ASSERT(cam_count <= XRT_TRACKING_MAX_CAMS, "Increase XRT_TRACKING_MAX_CAMS (dataset with %u cams)",
@@ -458,8 +614,14 @@ euroc_player_fill_dataset_info(const char *path, euroc_player_dataset_info *data
 
 	i = 0;
 	bool has_imu = euroc_player_preload_imu_data(dataset->path, imu, i, 0);
+	if (has_imu) {
+		euroc_player_load_imu_led_model(dataset->path, dataset->imus[i], i);
+	}
 	while (has_imu) {
 		has_imu = euroc_player_preload_imu_data(dataset->path, imu, ++i, 0);
+		if (has_imu) {
+			euroc_player_load_imu_led_model(dataset->path, dataset->imus[i], i);
+		}
 	}
 	uint32_t imu_count = i;
 	EUROC_ASSERT(imu_count <= XRT_TRACKING_MAX_IMUS, "Increase XRT_TRACKING_MAX_IMUS (dataset with %u imus)",
@@ -1036,6 +1198,11 @@ euroc_player_create(xrt_frame_context *xfctx, const char *path, euroc_player_con
 	ep->dataset = config->dataset;
 	ep->playback = config->playback;
 
+	// Update the pointers now that we've copied it.
+	for (auto &imu : ep->dataset.imus) {
+		imu.led_model.leds = imu.led_storage;
+	}
+
 	if (default_config != nullptr) {
 		free(default_config);
 	}
@@ -1054,8 +1221,8 @@ euroc_player_create(xrt_frame_context *xfctx, const char *path, euroc_player_con
 
 	// Using pointers to not mix vector with a C-compatible struct
 	ep->gt = {};
-	ep->imus = vector<imu_state>(ep->dataset.imu_count);
-	ep->cams = vector<camera_state>(ep->dataset.cam_count);
+	ep->imus = vector<imu_stream>(ep->dataset.imu_count);
+	ep->cams = vector<camera_stream>(ep->dataset.cam_count);
 
 	euroc_player_setup_gui(ep);
 
@@ -1099,4 +1266,12 @@ euroc_player_create(xrt_frame_context *xfctx, const char *path, euroc_player_con
 	EUROC_DEBUG(ep, "Euroc player created");
 
 	return xfs;
+}
+
+void
+euroc_player_get_dataset_info(struct xrt_fs *xfs, const struct euroc_player_dataset_info **out_dataset_info)
+{
+	euroc_player *ep = euroc_player::fromXfs(xfs);
+
+	(*out_dataset_info) = &ep->dataset;
 }

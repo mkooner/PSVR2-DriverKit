@@ -9,8 +9,13 @@
 
 #pragma once
 
-#include "util/u_logging.h"
 #include "xrt/xrt_frameserver.h"
+
+#include "tracking/t_tracking.h"
+#include "tracking/t_constellation.h"
+
+#include "util/u_logging.h"
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,6 +55,20 @@ struct euroc_player_playback_config
 	bool print_progress;      //!< Whether to print progress to stdout (useful for CLI runs)
 };
 
+struct euroc_player_dataset_camera
+{
+	bool calib_valid;
+	struct t_camera_calibration calib;
+	struct xrt_pose pose;
+};
+
+struct euroc_player_dataset_imu
+{
+	bool has_led_model;
+	struct t_constellation_tracker_led led_storage[XRT_CONSTELLATION_MAX_LEDS_PER_DEVICE];
+	struct t_constellation_tracker_led_model led_model;
+};
+
 /*!
  * Describes information about a particular EuRoC dataset residing in `path`.
  *
@@ -58,8 +77,13 @@ struct euroc_player_playback_config
 struct euroc_player_dataset_info
 {
 	char path[256];
+
 	uint32_t cam_count;
+	struct euroc_player_dataset_camera cams[XRT_TRACKING_MAX_CAMS];
+
 	uint32_t imu_count;
+	struct euroc_player_dataset_imu imus[XRT_TRACKING_MAX_IMUS];
+
 	bool is_colored;
 	//! Whether this dataset has groundtruth data available
 	bool has_gt;
@@ -97,6 +121,12 @@ euroc_player_fill_default_config_for(struct euroc_player_config *config, const c
  */
 struct xrt_fs *
 euroc_player_create(struct xrt_frame_context *xfctx, const char *path, struct euroc_player_config *config);
+
+/*!
+ * Gets the dataset info for a EuRoC player.
+ */
+void
+euroc_player_get_dataset_info(struct xrt_fs *xfs, const struct euroc_player_dataset_info **out_dataset_info);
 
 /*!
  * Create a auto prober for the fake euroc device.
