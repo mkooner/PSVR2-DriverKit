@@ -60,6 +60,8 @@ DEBUG_GET_ONCE_BOOL_OPTION(send_all_imus_first, "EUROC_SEND_ALL_IMUS_FIRST", fal
 DEBUG_GET_ONCE_BOOL_OPTION(use_source_ts, "EUROC_USE_SOURCE_TS", false)
 DEBUG_GET_ONCE_BOOL_OPTION(play_from_start, "EUROC_PLAY_FROM_START", false)
 DEBUG_GET_ONCE_BOOL_OPTION(print_progress, "EUROC_PRINT_PROGRESS", false)
+DEBUG_GET_ONCE_FLOAT_OPTION(cam_delay_ms, "EUROC_CAM_DELAY_MS", 0.0f)
+DEBUG_GET_ONCE_FLOAT_OPTION(imu_delay_ms, "EUROC_IMU_DELAY_MS", 0.0f)
 
 #define EUROC_PLAYER_STR "Euroc Player"
 
@@ -85,6 +87,8 @@ struct img_sample
 template <typename T> struct stream_state
 {
 	ssize_t latest_sent{-1};
+	//! Samples are delivered this long after their timestamp; the timestamp itself is left untouched.
+	time_duration_ns delay_ns{0};
 	vector<T> samples{}; //!< List of all image names to read from the dataset per cameras
 
 	optional<T *>
@@ -99,7 +103,7 @@ template <typename T> struct stream_state
 		}
 
 		auto &next = this->samples[this->latest_sent + 1];
-		if (playback_ns >= next.timestamp_ns) {
+		if (playback_ns >= next.timestamp_ns + this->delay_ns) {
 			return &next;
 		}
 		return std::nullopt;
@@ -126,7 +130,7 @@ template <typename T> struct stream_state
 			return std::nullopt;
 		}
 
-		return this->samples[this->latest_sent + 1].timestamp_ns;
+		return this->samples[this->latest_sent + 1].timestamp_ns + this->delay_ns;
 	}
 
 	void
@@ -532,12 +536,14 @@ euroc_player_preload(euroc_player *ep)
 	for (uint32_t i = 0; i < ep->imus.size(); i++) {
 		auto &imu = ep->imus[i];
 		imu = imu_stream{};
+		imu.delay_ns = ep->playback.imu_delay_ns;
 		euroc_player_preload_imu_data(ep->dataset.path, imu, i);
 	}
 
 	for (size_t i = 0; i < ep->cams.size(); i++) {
 		auto &cam = ep->cams[i];
 		cam = camera_stream{};
+		cam.delay_ns = ep->playback.cam_delay_ns;
 		euroc_player_preload_img_data(ep->dataset.path, cam, i);
 	}
 
@@ -1173,6 +1179,8 @@ euroc_player_fill_default_config_for(euroc_player_config *config, const char *da
 	playback.use_source_ts = debug_get_bool_option_use_source_ts();
 	playback.play_from_start = debug_get_bool_option_play_from_start();
 	playback.print_progress = debug_get_bool_option_print_progress();
+	playback.cam_delay_ns = (time_duration_ns)(debug_get_float_option_cam_delay_ms() * U_TIME_1MS_IN_NS);
+	playback.imu_delay_ns = (time_duration_ns)(debug_get_float_option_imu_delay_ms() * U_TIME_1MS_IN_NS);
 
 	config->log_level = debug_get_log_option_euroc_log();
 	config->dataset = dataset;

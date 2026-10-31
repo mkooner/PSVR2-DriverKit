@@ -53,6 +53,8 @@ struct euroc_player_playback_config
 	bool use_source_ts;       //!< If true, use the original timestamps from the dataset
 	bool play_from_start;     //!< If set, the euroc player does not wait for user input to start
 	bool print_progress;      //!< Whether to print progress to stdout (useful for CLI runs)
+	int64_t cam_delay_ns;     //!< Delay camera frame delivery by this many ns, without changing their timestamps
+	int64_t imu_delay_ns;     //!< Delay IMU sample delivery by this many ns, without changing their timestamps
 };
 
 struct euroc_player_dataset_camera
