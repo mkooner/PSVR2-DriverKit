@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include "xrt/xrt_tracking.h"
+
 #include "tracking/t_constellation.h"
 
 #include "math/m_api.h"
@@ -35,6 +37,44 @@ static struct xrt_vec3 T_led_imu_right = {
     .x = -0.0200727f,
     .y = -0.0122481f,
     .z = -0.0060039f,
+};
+
+/*!
+ * IMU noise model for the PS VR2 controllers.
+ */
+static const struct xrt_imu_calibration PSSENSE_IMU_CALIBRATION = {
+    .gyro =
+        {
+            // 3e-4 (rad/s)^2 per sample
+            .noise_density = 1.5e-3,
+            // 0.5% scale factor and 0.25% cross axis error per sample
+            .scale_factor_noise_density = 4.3301270e-4,
+            .cross_axis_noise_density = 2.1650635e-4,
+            // 1900 deg/s, a saturated axis gets (100 deg/s)^2 per sample
+            .axis_saturation = 33.1612587,
+            .saturated_noise_density = 0.15114995,
+            // (0.001 deg/s)^2 per second
+            .bias_random_walk = 1.745e-5,
+            // 0.025 deg/s on factory calibrated samples
+            .bias_initial_sigma = 4.363e-4,
+        },
+    .accel =
+        {
+            // 1.08e-4 G^2 per sample
+            .noise_density = 8.8259848e-3,
+            .scale_factor_noise_density = 4.3301270e-4,
+            .cross_axis_noise_density = 2.1650635e-4,
+            // 7.8 G, a saturated axis gets (2.5 G)^2 per sample
+            .axis_saturation = 76.49187,
+            .saturated_noise_density = 2.1232020,
+            // The PS VR2 driver's fusion has no accelerometer bias random walk, this is Monado's default
+            .bias_random_walk = 1e-3,
+            // 1 mg on factory calibrated samples
+            .bias_initial_sigma = 9.807e-3,
+        },
+    // The PS VR2 driver's fusion doesn't estimate the accelerometer scale, these are Monado's defaults
+    .accel_scale_random_walk = 1e-5,
+    .accel_scale_initial_sigma = 0.05,
 };
 
 /*

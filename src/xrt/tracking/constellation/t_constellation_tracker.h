@@ -85,6 +85,10 @@ struct t_constellation_tracker_device_params
 	 * to the constellation tracker, drivers should send IMU samples to this sink.
 	 */
 	struct xrt_imu_sink *imu_sink;
+	/*!
+	 * The calibration details for the pushed IMU samples.
+	 */
+	struct xrt_imu_calibration imu_calibration;
 };
 
 enum t_constellation_tracker_flags

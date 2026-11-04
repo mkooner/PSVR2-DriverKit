@@ -20,6 +20,7 @@
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_results.h"
 #include "xrt/xrt_compiler.h"
+#include "xrt/xrt_tracking.h"
 
 #include "math/m_relation_history.h"
 #include "math/m_clock_tracking.h"
@@ -1467,11 +1468,47 @@ rift_hmd_frame_timestamp_callback(void *user_data,             //
 	return true;
 }
 
+/*!
+ * IMU noise model of the CV1 headset.
+ */
+static const struct xrt_imu_calibration RIFT_CV1_IMU_CALIBRATION = {
+    .gyro =
+        {
+            // 0.01 rad/s per sample
+            .noise_density = 3.1622777e-4,
+            // An isotropic 2.5e-5/3 of the squared rate per sample, so the same on and across axes
+            .scale_factor_noise_density = 9.1287093e-5,
+            .cross_axis_noise_density = 9.1287093e-5,
+            // 0.97 * 2000 deg/s
+            .axis_saturation = 33.8593875,
+            //! @todo This is a placeholder
+            .saturated_noise_density = 0.15114995,
+            .bias_random_walk = 1e-4,
+            .bias_initial_sigma = 1.9513374e-4,
+        },
+    .accel =
+        {
+            // 0.05 m/s^2 per sample
+            .noise_density = 1.5811388e-3,
+            .scale_factor_noise_density = 9.1287093e-5,
+            .cross_axis_noise_density = 9.1287093e-5,
+            // 0.97 * 4 G
+            .axis_saturation = 38.0628,
+            //! @todo This is a placeholder
+            .saturated_noise_density = 2.1232020,
+            .bias_random_walk = 1e-3,
+            .bias_initial_sigma = 1.1485572e-3,
+        },
+    .accel_scale_random_walk = 1e-5,
+    .accel_scale_initial_sigma = 0.05,
+};
+
 int
 rift_add_to_constellation_tracker(struct rift_hmd *hmd, struct t_constellation_tracker *tracker)
 {
 	struct t_constellation_tracker_device_params params = {
 	    .led_model = hmd->led_model,
+	    .imu_calibration = RIFT_CV1_IMU_CALIBRATION,
 	};
 
 	hmd->constellation_tracker = tracker;

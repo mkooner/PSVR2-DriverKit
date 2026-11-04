@@ -171,6 +171,8 @@ struct RigCalibration
 private: // Fields
 	u_logging_level log_level;
 	std::map<t_constellation_device_id_t, DeviceSamples> device_samples;
+	//! The noise model and bias behaviour of each device's IMU, kept apart since the samples get cleared.
+	std::map<t_constellation_device_id_t, xrt_imu_calibration> sensor_calibrations;
 	std::vector<CameraDescription> cameras;
 	mutable os::Mutex lock;
 	bool collecting_data{false};
@@ -190,6 +192,14 @@ public: // Methods
 	//! Adds a camera to the rig with an optional anchored world pose.
 	void
 	addCamera(const CameraDescription &camera_description);
+
+	//! Adds a device, with the noise model and bias behaviour of its IMU.
+	void
+	addDevice(t_constellation_device_id_t device_id, const xrt_imu_calibration &sensor_calibration);
+
+	//! Removes a device previously added with @ref addDevice.
+	void
+	removeDevice(t_constellation_device_id_t device_id);
 
 	//! Begins collecting data for the rig optimization.
 	void
@@ -236,6 +246,7 @@ private: // Methods
 	 * @param camera_samples        The camera samples to solve against. Taken by value because the offset is
 	 *                              applied to the copy and the ordering is reworked in place.
 	 * @param imu_samples           The IMU samples to solve against, must already be sorted by timestamp.
+	 * @param sensor_calibration    The noise model and bias behaviour of the device's IMU.
 	 * @param camera_time_offset_ns Added to every camera sample timestamp before anything else happens.
 	 * @param[out] out_result       Written only when this returns true.
 	 *
@@ -246,6 +257,7 @@ private: // Methods
 	                          const std::vector<CameraDescription> &cameras,
 	                          std::vector<DeviceCameraSample> camera_samples,
 	                          const std::vector<xrt_imu_sample> &imu_samples,
+	                          const xrt_imu_calibration &sensor_calibration,
 	                          time_duration_ns camera_time_offset_ns,
 	                          CalibrationResult &out_result);
 };

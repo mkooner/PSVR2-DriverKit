@@ -1962,6 +1962,7 @@ pssense_add_to_constellation_tracker(struct xrt_device *xdev, struct t_constella
 
 	struct t_constellation_tracker_device_params params = {
 	    .led_model = pssense->led_model,
+	    .imu_calibration = PSSENSE_IMU_CALIBRATION,
 	};
 	int ret = t_constellation_tracker_add_device(tracker, &params, &pssense->constellation_device,
 	                                             &pssense->tracking.constellation_device_id);

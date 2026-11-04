@@ -246,6 +246,9 @@ public: // Fields
 
 	const t_constellation_tracker_led_model *const led_model;
 
+	//! The noise model and bias behaviour of the device's IMU, as the driver gave it.
+	const xrt_imu_calibration sensor_calibration;
+
 	//! The latest fused solve.
 	std::optional<DeviceSolveState> latest_solve;
 	//! The solved state for the latest IMU dead reckoned position.
@@ -294,7 +297,9 @@ public: // Fields
 	std::array<RingImuSample, kImuBufferSize> imu_samples;
 
 public: // Methods
-	Device(t_constellation_device_id_t id, const t_constellation_tracker_led_model *led_model);
+	Device(t_constellation_device_id_t id,
+	       const t_constellation_tracker_led_model *led_model,
+	       const xrt_imu_calibration &sensor_calibration);
 	~Device();
 
 	Device(const Device &) = delete;
@@ -567,13 +572,15 @@ public: // Methods
 	 * @param context       The Ceres context to use
 	 * @param deterministic Whether to not startup a separate thread, and run the fusion on the same
 	 *                      thread as the callee's push functions.
-	 * @param id            The ID of the constellation device
-	 * @param led_model     The LED model of the device
+	 * @param id                 The ID of the constellation device
+	 * @param led_model          The LED model of the device
+	 * @param sensor_calibration The noise model and bias behaviour of the device's IMU
 	 */
 	SensorFusion(ceres::Context *context,
 	             bool deterministic,
 	             t_constellation_device_id_t id,
-	             const t_constellation_tracker_led_model *led_model);
+	             const t_constellation_tracker_led_model *led_model,
+	             const xrt_imu_calibration &sensor_calibration);
 
 	~SensorFusion();
 

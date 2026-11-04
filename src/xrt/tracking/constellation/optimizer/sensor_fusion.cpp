@@ -1514,6 +1514,7 @@ struct SensorFusionProblem
 		this->dropPriorIfBlocksMissingLocked(fusion, keyframe_mask);
 
 		const auto &latest_imu_calib = device.getLatestImuCalibration();
+		const xrt_imu_calibration &sensor_calib = device.sensor_calibration;
 
 		if (keyframe_mask != 0) {
 			auto &imu_extrinsics_block = blocks.imu_extrinsics;
@@ -1795,8 +1796,12 @@ struct SensorFusionProblem
 				blocks.keyframe_marginalization_residuals[start_age_idx].push_back(
 				    problem.AddResidualBlock(
 				        anchorJacobians(
-				            new ImuBiasRandomWalkCostFunction(new ImuBiasRandomWalkCostFunctor(
-				                {preintegration.imu_preintegration.dt})), //
+				            new ImuBiasRandomWalkCostFunction(new ImuBiasRandomWalkCostFunctor({
+				                .dt = preintegration.imu_preintegration.dt,
+				                .accel_bias_random_walk = sensor_calib.accel.bias_random_walk,
+				                .gyro_bias_random_walk = sensor_calib.gyro.bias_random_walk,
+				                .accel_scale_random_walk = sensor_calib.accel_scale_random_walk,
+				            })), //
 				            {
 				                {start_imu_bias_block.anchorData(), nullptr},
 				                {end_imu_bias_block.anchorData(), nullptr},
@@ -1825,9 +1830,13 @@ struct SensorFusionProblem
 					    problem.AddResidualBlock(
 					        anchorJacobians(
 					            new ImuBiasAnchorCostFunction(new ImuBiasAnchorCostFunctor({
-					                ImuBias<double>(map_vec3_f64(latest_imu_calib.accel_bias),
-					                                map_vec3_f64(latest_imu_calib.gyro_bias),
-					                                map_vec3_f64(latest_imu_calib.accel_scale)),
+					                .anchor =
+					                    ImuBias<double>(map_vec3_f64(latest_imu_calib.accel_bias),
+					                                    map_vec3_f64(latest_imu_calib.gyro_bias),
+					                                    map_vec3_f64(latest_imu_calib.accel_scale)),
+					                .accel_bias_sigma = sensor_calib.accel.bias_initial_sigma,
+					                .gyro_bias_sigma = sensor_calib.gyro.bias_initial_sigma,
+					                .accel_scale_sigma = sensor_calib.accel_scale_initial_sigma,
 					            })),
 					            {{oldest_bias.anchorData(), nullptr}}), //
 					        nullptr,                                    //
@@ -2198,15 +2207,17 @@ struct SensorFusionProblem
  */
 
 Device::Device(t_constellation_device_id_t id,
-               const t_constellation_tracker_led_model *led_model)
-    : id(id),                          //
-      led_model(led_model),            //
-      latest_solve(std::nullopt),      //
-      latest_imu_reckon(std::nullopt), //
-      imu_relation_history(),          //
-      stored_imu_calibration(),        //
-      imu_write_count(0),              //
-      imu_samples()                    //
+               const t_constellation_tracker_led_model *led_model,
+               const xrt_imu_calibration &sensor_calibration)
+    : id(id),                                 //
+      led_model(led_model),                   //
+      sensor_calibration(sensor_calibration), //
+      latest_solve(std::nullopt),             //
+      latest_imu_reckon(std::nullopt),        //
+      imu_relation_history(),                 //
+      stored_imu_calibration(),               //
+      imu_write_count(0),                     //
+      imu_samples()                           //
 {
 	this->resetLocked();
 }
@@ -2444,11 +2455,12 @@ SensorFusion::pullReadyCameraSamplesLocked(timepoint_ns now_ns, std::vector<cons
 SensorFusion::SensorFusion(ceres::Context *context,
                            bool deterministic,
                            t_constellation_device_id_t id,
-                           const t_constellation_tracker_led_model *led_model)
+                           const t_constellation_tracker_led_model *led_model,
+                           const xrt_imu_calibration &sensor_calibration)
     : context(context),                                    //
       log_level(debug_get_log_option_sensor_fusion_log()), //
       deterministic(deterministic),                        //
-      device(id, led_model),                               //
+      device(id, led_model, sensor_calibration),           //
       sample_queue()                                       //
 {
 	this->problem = new SensorFusionProblem();
@@ -2955,6 +2967,7 @@ SensorFusion::preintegrateDeviceLocked(bool &work_remaining)
 		                                                                                 num_samples), //
 		                                                 first_after,                                  //
 		                                                 bias,                                         //
+		                                                 this->device.sensor_calibration,              //
 		                                                 start_keyframe->timestamp_ns,                 //
 		                                                 end_keyframe.timestamp_ns);                   //
 

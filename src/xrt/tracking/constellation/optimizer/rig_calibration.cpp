@@ -1169,6 +1169,23 @@ RigCalibration::addCamera(const CameraDescription &camera_description)
 }
 
 void
+RigCalibration::addDevice(t_constellation_device_id_t device_id, const xrt_imu_calibration &sensor_calibration)
+{
+	std::unique_lock<os::Mutex> lock(this->lock);
+
+	this->sensor_calibrations[device_id] = sensor_calibration;
+}
+
+void
+RigCalibration::removeDevice(t_constellation_device_id_t device_id)
+{
+	std::unique_lock<os::Mutex> lock(this->lock);
+
+	this->sensor_calibrations.erase(device_id);
+	this->device_samples.erase(device_id);
+}
+
+void
 RigCalibration::beginCollectingData()
 {
 	std::unique_lock<os::Mutex> lock(this->lock);
@@ -1307,6 +1324,7 @@ RigCalibration::optimize(CalibrationResult &out_result)
 	 */
 	std::vector<CameraDescription> cameras;
 	DeviceSamples device_samples;
+	xrt_imu_calibration sensor_calibration;
 	t_constellation_device_id_t device_to_optimize_for;
 
 	{
@@ -1338,6 +1356,13 @@ RigCalibration::optimize(CalibrationResult &out_result)
 			         collected.imu_samples.size(), device_to_optimize_for);
 			return false;
 		}
+
+		auto calibration_it = this->sensor_calibrations.find(device_to_optimize_for);
+		if (calibration_it == this->sensor_calibrations.end()) {
+			RS_ERROR(this, "Device %u has no IMU calibration.", device_to_optimize_for);
+			return false;
+		}
+		sensor_calibration = calibration_it->second;
 
 		cameras = this->cameras;
 		device_samples = std::move(collected);
@@ -1416,7 +1441,7 @@ RigCalibration::optimize(CalibrationResult &out_result)
 			CalibrationResult candidate{};
 			if (!this->solveWithCameraTimeOffset(device_to_optimize_for, cameras,
 			                                     device_samples.camera_samples, device_samples.imu_samples,
-			                                     offset_ns, candidate)) {
+			                                     sensor_calibration, offset_ns, candidate)) {
 				RS_WARN(this, "Camera time offset %+" PRId64 " ns did not produce a usable solve",
 				        offset_ns);
 				continue;
@@ -1455,7 +1480,8 @@ RigCalibration::optimize(CalibrationResult &out_result)
 			        "is probably outside it. Widen T_OFFLINE_SENSOR_CALIBRATION_SWEEP_RANGE_NS.");
 		}
 	} else if (!this->solveWithCameraTimeOffset(device_to_optimize_for, cameras, device_samples.camera_samples,
-	                                            device_samples.imu_samples, base_offset_ns, result)) {
+	                                            device_samples.imu_samples, sensor_calibration, base_offset_ns,
+	                                            result)) {
 		return false;
 	}
 
@@ -1548,6 +1574,7 @@ RigCalibration::solveWithCameraTimeOffset(t_constellation_device_id_t device_id,
                                           const std::vector<CameraDescription> &cameras,
                                           std::vector<DeviceCameraSample> camera_samples,
                                           const std::vector<xrt_imu_sample> &imu_samples,
+                                          const xrt_imu_calibration &sensor_calibration,
                                           time_duration_ns camera_time_offset_ns,
                                           CalibrationResult &out_result)
 {
@@ -1684,7 +1711,7 @@ RigCalibration::solveWithCameraTimeOffset(t_constellation_device_id_t device_id,
 			 * No +1 on `imu_end_it` seems like a bug, but that is very intentional since the iterator
 			 * produces the item *after*.
 			 */
-			kf_start.preintegration = preintegrate(imu_samples, *imu_end_it, imu_bias,
+			kf_start.preintegration = preintegrate(imu_samples, *imu_end_it, imu_bias, sensor_calibration,
 			                                       kf_start.timestamp_ns, kf_end.timestamp_ns);
 		} else {
 			kf_start.preintegration = PreintegratedImuSamples::Identity();

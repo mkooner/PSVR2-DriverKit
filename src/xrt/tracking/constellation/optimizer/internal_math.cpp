@@ -113,20 +113,58 @@ quaternionJetToSO3Jacobian(const Quaternion<ceres::Jet<double, N>> &q_jet, int p
 }
 
 /*!
+ * Per-axis noise density squared of one sensor's reading, see @ref xrt_imu_sensor_calibration for the model.
+ *
+ * @param reading     The sensor reading.
+ * @param calibration The calibration of the sensor the reading came from.
+ */
+static Vector3d
+sampleNoiseDensitySquared(const Vector3d &reading, const xrt_imu_sensor_calibration &calibration)
+{
+	const Vector3d squared = reading.cwiseAbs2();
+	const double squared_sum = squared.sum();
+
+	const double noise = calibration.noise_density;
+	const double scale_factor = calibration.scale_factor_noise_density;
+	const double cross_axis = calibration.cross_axis_noise_density;
+	const double saturated = calibration.saturated_noise_density;
+
+	Vector3d density_squared;
+	for (int i = 0; i < 3; i++) {
+		if (std::abs(reading[i]) > calibration.axis_saturation) {
+			density_squared[i] = saturated * saturated;
+			continue;
+		}
+
+		density_squared[i] = noise * noise +                            //
+		                     scale_factor * scale_factor * squared[i] + //
+		                     cross_axis * cross_axis * (squared_sum - squared[i]);
+	}
+
+	return density_squared;
+}
+
+/*!
  * Propagates the covariance for this sample.
  *
  * @param[in]  Q_start_cur     Rotation accumulated *before* this sample.
+ * @param[in]  measured_accel  Acceleration as measured, in the IMU frame, which the sample noise depends on.
+ * @param[in]  measured_gyro   Gyroscope reading as measured, which the sample noise depends on.
  * @param[in]  corrected_accel Bias and scale-corrected acceleration, in the IMU frame.
  * @param[in]  corrected_gyro  Bias-corrected gyroscope reading.
  * @param[in]  accel_scale     The accelerometer scale.
+ * @param[in]  imu_calibration The noise model of the IMU.
  * @param      dt              Delta time
  * @param[out] covariance      Out covariance matrix
  */
 static void
 propagateCovariance(const Quaterniond &Q_start_cur,
+                    const Vector3d &measured_accel,
+                    const Vector3d &measured_gyro,
                     const Vector3d &corrected_accel,
                     const Vector3d &corrected_gyro,
                     const Vector3d &accel_scale,
+                    const xrt_imu_calibration &imu_calibration,
                     double dt,
                     PreintegrationCovarianceMatrix &covariance)
 {
@@ -164,13 +202,16 @@ propagateCovariance(const Quaterniond &Q_start_cur,
 	B.block<3, 3>(kImuBiasVelCovIndex, 3) = dR * scale * dt;
 	B.block<3, 3>(kImuBiasPosCovIndex, 3) = 0.5 * dR * scale * dt * dt;
 
+	const Vector3d gyro_density_squared = sampleNoiseDensitySquared(measured_gyro, imu_calibration.gyro);
+	const Vector3d accel_density_squared = sampleNoiseDensitySquared(measured_accel, imu_calibration.accel);
+
 	/*
 	 * Density squared over the interval this sample covers, so the partial steps at the keyframe
-	 * boundaries contribute proportionally less than a full 1ms one.
+	 * boundaries contribute proportionally less than a full one.
 	 */
 	Matrix<double, 6, 6> noise = Matrix<double, 6, 6>::Zero();
-	noise.block<3, 3>(0, 0) = Matrix3d::Identity() * (kGyroNoiseDensity * kGyroNoiseDensity / dt);
-	noise.block<3, 3>(3, 3) = Matrix3d::Identity() * (kAccelNoiseDensity * kAccelNoiseDensity / dt);
+	noise.block<3, 3>(0, 0) = (gyro_density_squared / dt).asDiagonal();
+	noise.block<3, 3>(3, 3) = (accel_density_squared / dt).asDiagonal();
 
 	covariance = A * covariance * A.transpose() + B * noise * B.transpose();
 }
@@ -181,6 +222,7 @@ integrateSingleSample(const xrt_imu_sample &sample,
                       const Vector3<ImuBiasJet> &accel_bias,
                       const Vector3<ImuBiasJet> &gyro_bias,
                       const Vector3<ImuBiasJet> &accel_scale,
+                      const xrt_imu_calibration &imu_calibration,
                       Quaternion<ImuBiasJet> &Q_start_cur,
                       Vector3<ImuBiasJet> &delta_velocity,
                       Vector3<ImuBiasJet> &delta_position,
@@ -204,12 +246,15 @@ integrateSingleSample(const xrt_imu_sample &sample,
 		const Quaterniond real_Q_start_cur = {Q_start_cur.w().a, Q_start_cur.x().a, //
 		                                      Q_start_cur.y().a, Q_start_cur.z().a};
 
-		propagateCovariance(real_Q_start_cur, //
-		                    real_accel,       //
-		                    real_gyro,        //
-		                    real_scale,       //
-		                    dt,               //
-		                    covariance);      //
+		propagateCovariance(real_Q_start_cur,                   //
+		                    map_vec3_f64(sample.accel_m_s2),    //
+		                    map_vec3_f64(sample.gyro_rad_secs), //
+		                    real_accel,                         //
+		                    real_gyro,                          //
+		                    real_scale,                         //
+		                    imu_calibration,                    //
+		                    dt,                                 //
+		                    covariance);                        //
 	}
 
 	// Rotate accel into starting frame, since it's in IMU frame when passed to us.
@@ -374,6 +419,7 @@ PreintegratedImuSamples
 preintegrate(const std::span<const xrt_imu_sample> &imu_samples,
              const xrt_imu_sample &first_sample_after_end_time,
              const ImuBias<ImuBiasJet> &imu_bias,
+             const xrt_imu_calibration &imu_calibration,
              timepoint_ns start_time_ns,
              timepoint_ns end_time_ns)
 {
@@ -401,8 +447,8 @@ preintegrate(const std::span<const xrt_imu_sample> &imu_samples,
 		// Interpolate the first sample to the start time.
 		double dt = static_cast<double>(first_sample.timestamp_ns - start_time_ns) * 1e-9;
 
-		integrateSingleSample(first_sample, dt, accel_bias, gyro_bias, accel_scale, Q_start_cur, delta_velocity,
-		                      delta_position, covariance);
+		integrateSingleSample(first_sample, dt, accel_bias, gyro_bias, accel_scale, imu_calibration,
+		                      Q_start_cur, delta_velocity, delta_position, covariance);
 	}
 
 	// Integrate all samples in the sliding window.
@@ -412,8 +458,8 @@ preintegrate(const std::span<const xrt_imu_sample> &imu_samples,
 		const auto &next_sample = imu_samples[i + 1];
 		double dt = static_cast<double>(next_sample.timestamp_ns - sample.timestamp_ns) * 1e-9;
 
-		integrateSingleSample(next_sample, dt, accel_bias, gyro_bias, accel_scale, Q_start_cur, delta_velocity,
-		                      delta_position, covariance);
+		integrateSingleSample(next_sample, dt, accel_bias, gyro_bias, accel_scale, imu_calibration, Q_start_cur,
+		                      delta_velocity, delta_position, covariance);
 	}
 
 	xrt_vec3_f64 body_angular_velocity = imu_samples.back().gyro_rad_secs;
@@ -422,8 +468,8 @@ preintegrate(const std::span<const xrt_imu_sample> &imu_samples,
 	if (last_sample.timestamp_ns < end_time_ns) {
 		double dt = static_cast<double>(end_time_ns - last_sample.timestamp_ns) * 1e-9;
 
-		integrateSingleSample(first_sample_after_end_time, dt, accel_bias, gyro_bias, accel_scale, Q_start_cur,
-		                      delta_velocity, delta_position, covariance);
+		integrateSingleSample(first_sample_after_end_time, dt, accel_bias, gyro_bias, accel_scale,
+		                      imu_calibration, Q_start_cur, delta_velocity, delta_position, covariance);
 
 		body_angular_velocity = first_sample_after_end_time.gyro_rad_secs;
 	}

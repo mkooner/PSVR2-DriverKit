@@ -150,9 +150,11 @@ public: // Methods
 		this->tracker = std::make_unique<ConstellationTracker>(&params);
 
 		for (auto &device : this->dataset.devices) {
+			// These datasets carry no IMU samples, so there is nothing for an IMU calibration to describe.
 			t_constellation_tracker_device_params device_params = {
 			    .led_model = device.led_model,
 			    .imu_sink = nullptr,
+			    .imu_calibration = {},
 			};
 
 			this->tracker->addDevice(&device_params, &stub_device);
