@@ -67,6 +67,8 @@ struct euroc_recorder_settings
 	{
 		//! The LED models of each device, must have @ref imu_count LED models populated.
 		struct t_constellation_tracker_led_model *led_models[XRT_TRACKING_MAX_IMUS];
+		//! The IMU calibration of each device, must have @ref imu_count calibrations populated.
+		struct xrt_imu_calibration *imu_calibrations[XRT_TRACKING_MAX_IMUS];
 	} constellation;
 };
 

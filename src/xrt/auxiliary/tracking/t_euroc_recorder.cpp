@@ -58,8 +58,29 @@ union euroc_sensor_info {
 	{
 		t_camera_calibration calib;
 	} camera;
-	t_constellation_tracker_led_model *led_model;
+	struct
+	{
+		t_constellation_tracker_led_model *led_model;
+	} constellation;
+	struct
+	{
+		//! May be null, in which case generic noise values are written.
+		const xrt_imu_calibration *calibration;
+	} imu;
 };
+
+static void
+writeImuSensorCalibration(JSONBuilder &jb, const string &name, const xrt_imu_sensor_calibration &calib)
+{
+	// The noise density and random walk are standard EuRoC keys, the rest extend the schema in the same style.
+	jb << name + "_noise_density" << calib.noise_density;                           // [ unit / sqrt(Hz) ]
+	jb << name + "_random_walk" << calib.bias_random_walk;                          // [ unit / s / sqrt(Hz) ]
+	jb << name + "_scale_factor_noise_density" << calib.scale_factor_noise_density; // [ 1 / sqrt(Hz) ]
+	jb << name + "_cross_axis_noise_density" << calib.cross_axis_noise_density;     // [ 1 / sqrt(Hz) ]
+	jb << name + "_axis_saturation" << calib.axis_saturation;                       // [ unit ]
+	jb << name + "_saturated_noise_density" << calib.saturated_noise_density;       // [ unit / sqrt(Hz) ]
+	jb << name + "_bias_initial_sigma" << calib.bias_initial_sigma;                 // [ unit ]
+}
 
 static void
 writeSensorInfo(const string &data_path,
@@ -91,10 +112,18 @@ writeSensorInfo(const string &data_path,
 
 	if (sensor_type == EUROC_SENSOR_TYPE_IMU) {
 		jb << "rate_hz" << 200;                           // reasonable guess until we have this data here
-		jb << "gyroscope_noise_density" << 1.6968e-04;    // [ rad / s / sqrt(Hz) ]
-		jb << "gyroscope_random_walk" << 1.9393e-05;      // [ rad / s^2 / sqrt(Hz) ]
-		jb << "accelerometer_noise_density" << 2.0000e-3; // [ m / s^2 / sqrt(Hz) ]
-		jb << "accelerometer_random_walk" << 3.0000e-3;   // [ m / s^3 / sqrt(Hz) ]
+		const xrt_imu_calibration *calib = sensor_info.imu.calibration;
+		if (calib != nullptr) {
+			writeImuSensorCalibration(jb, "gyroscope", calib->gyro);
+			writeImuSensorCalibration(jb, "accelerometer", calib->accel);
+			jb << "accelerometer_scale_random_walk" << calib->accel_scale_random_walk; // [ 1 / sqrt(s) ]
+			jb << "accelerometer_scale_initial_sigma" << calib->accel_scale_initial_sigma; // [ unitless ]
+		} else {
+			jb << "gyroscope_noise_density" << 1.6968e-04;    // [ rad / s / sqrt(Hz) ]
+			jb << "gyroscope_random_walk" << 1.9393e-05;      // [ rad / s^2 / sqrt(Hz) ]
+			jb << "accelerometer_noise_density" << 2.0000e-3; // [ m / s^2 / sqrt(Hz) ]
+			jb << "accelerometer_random_walk" << 3.0000e-3;   // [ m / s^3 / sqrt(Hz) ]
+		}
 	} else if (sensor_type == EUROC_SENSOR_TYPE_CAMERA) {
 		const auto &calib = sensor_info.camera.calib;
 
@@ -124,7 +153,7 @@ writeSensorInfo(const string &data_path,
 			break;
 		}
 	} else if (sensor_type == EUROC_SENSOR_TYPE_LED_MODEL) {
-		const auto &match = sensor_info.led_model->match_parameters;
+		const auto &match = sensor_info.constellation.led_model->match_parameters;
 
 		jb << "min_leds_for_correspondence_search_without_prior"
 		   << (int)match.min_leds_for_correspondence_search_without_prior;
@@ -211,7 +240,11 @@ struct euroc_recorder
 			    EUROC_SENSOR_TYPE_IMU, //
 			    "IMU " + to_string(i), //
 			    XRT_POSE_IDENTITY,     //
-			    {});                   //
+			    {
+			        .imu = {.calibration = this->settings.constellation_recording
+				                           ? this->settings.constellation.imu_calibrations[i]
+				                           : nullptr},
+			    });
 			this->imus_csv[i] = new ofstream{data_path + "/data.csv"};
 			*this->imus_csv[i] << std::fixed << std::setprecision(CSV_PRECISION);
 			*this->imus_csv[i]
@@ -228,7 +261,10 @@ struct euroc_recorder
 			    "LED Model " + to_string(i), //
 			    XRT_POSE_IDENTITY,           //
 			    {
-			        .led_model = this->settings.constellation.led_models[i],
+			        .constellation =
+			            {
+			                .led_model = this->settings.constellation.led_models[i],
+			            },
 			    });
 			writeLedModel(data_path, this->settings.constellation.led_models[i]);
 		}
