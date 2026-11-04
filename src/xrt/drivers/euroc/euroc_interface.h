@@ -10,6 +10,7 @@
 #pragma once
 
 #include "xrt/xrt_data_source.h"
+#include "xrt/xrt_tracking.h"
 
 #include "util/u_logging.h"
 
@@ -71,6 +72,10 @@ struct euroc_player_dataset_imu
 	bool has_led_model;
 	struct t_constellation_tracker_led led_storage[XRT_CONSTELLATION_MAX_LEDS_PER_DEVICE];
 	struct t_constellation_tracker_led_model led_model;
+
+	//! Whether the dataset recorded the IMU calibration in the IMU sensor.json.
+	bool has_imu_calibration;
+	struct xrt_imu_calibration imu_calibration;
 };
 
 /*!

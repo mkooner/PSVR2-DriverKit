@@ -257,6 +257,51 @@ slurp(ifstream &in)
 	return sstr.str();
 }
 
+static xrt_imu_sensor_calibration
+euroc_player_parse_imu_sensor_calibration(const JSONNode &node, const string &name)
+{
+	return xrt_imu_sensor_calibration{
+	    .noise_density = node[name + "_noise_density"].asDouble(),
+	    .scale_factor_noise_density = node[name + "_scale_factor_noise_density"].asDouble(),
+	    .cross_axis_noise_density = node[name + "_cross_axis_noise_density"].asDouble(),
+	    .axis_saturation = node[name + "_axis_saturation"].asDouble(),
+	    .saturated_noise_density = node[name + "_saturated_noise_density"].asDouble(),
+	    .bias_random_walk = node[name + "_random_walk"].asDouble(),
+	    .bias_initial_sigma = node[name + "_bias_initial_sigma"].asDouble(),
+	};
+}
+
+//! Loads the IMU calibration from the IMU's sensor.json, if the dataset has one.
+static void
+euroc_player_load_imu_calibration(const string &dataset_path, euroc_player_dataset_imu &imu, uint32_t imu_id)
+{
+	imu.has_imu_calibration = false;
+
+	ifstream fin_json{dataset_path + "/mav0/imu" + to_string(imu_id) + "/sensor.json"};
+	if (!fin_json.is_open()) {
+		return;
+	}
+	string json_contents = slurp(fin_json);
+
+	try {
+		JSONNode sensor{json_contents};
+		// Datasets from before the noise model only have the standard EuRoC noise keys.
+		if (!cJSON_HasObjectItem(sensor.getCJSON(), "gyroscope_scale_factor_noise_density")) {
+			return;
+		}
+
+		imu.imu_calibration = xrt_imu_calibration{
+		    .gyro = euroc_player_parse_imu_sensor_calibration(sensor, "gyroscope"),
+		    .accel = euroc_player_parse_imu_sensor_calibration(sensor, "accelerometer"),
+		    .accel_scale_random_walk = sensor["accelerometer_scale_random_walk"].asDouble(),
+		    .accel_scale_initial_sigma = sensor["accelerometer_scale_initial_sigma"].asDouble(),
+		};
+		imu.has_imu_calibration = true;
+	} catch (std::exception &e) {
+		U_LOG_E("Got exception parsing IMU sensor info: %s", e.what());
+	}
+}
+
 static void
 euroc_player_load_imu_led_model(const string &dataset_path, euroc_player_dataset_imu &imu, uint32_t imu_id)
 {
@@ -622,11 +667,13 @@ euroc_player_fill_dataset_info(const char *path, euroc_player_dataset_info *data
 	bool has_imu = euroc_player_preload_imu_data(dataset->path, imu, i, 0);
 	if (has_imu) {
 		euroc_player_load_imu_led_model(dataset->path, dataset->imus[i], i);
+		euroc_player_load_imu_calibration(dataset->path, dataset->imus[i], i);
 	}
 	while (has_imu) {
 		has_imu = euroc_player_preload_imu_data(dataset->path, imu, ++i, 0);
 		if (has_imu) {
 			euroc_player_load_imu_led_model(dataset->path, dataset->imus[i], i);
+			euroc_player_load_imu_calibration(dataset->path, dataset->imus[i], i);
 		}
 	}
 	uint32_t imu_count = i;
