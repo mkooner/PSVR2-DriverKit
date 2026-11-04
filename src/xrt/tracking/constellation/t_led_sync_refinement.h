@@ -376,6 +376,8 @@ struct t_led_sync_refinement
 		uint8_t decoded_gray_code;
 		//! The last time we had an accepted gray code (or the start of this phase).
 		timepoint_ns last_accepted_gray_code_ns;
+		//! When the current decode attempt started, either entering the phase or the last recovery jump.
+		timepoint_ns attempt_start_ns;
 	} decode_gray;
 
 	struct

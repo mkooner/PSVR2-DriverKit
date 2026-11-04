@@ -43,6 +43,10 @@
 #define GRAY_CODE_MATCHES_NEEDED 3
 //! How long to wait without an accepted gray code before resetting back to phase 1
 #define GRAY_CODE_TIMEOUT_NS (U_TIME_1S_IN_NS * 10LL)
+//! How long a decode attempt may go without reaching the target code before the LEDs are moved and it starts over.
+#define GRAY_DECODE_TIMEOUT_NS (U_TIME_1S_IN_NS * 4LL)
+//! How far to move the LEDs when an attempt times out, off the 250us code grid so it lands somewhere new.
+#define GRAY_DECODE_RECOVERY_JUMP_NS (U_TIME_1US_IN_NS * 375LL)
 
 #define BG_NUM_FRAMES T_LED_SYNC_BRIGHTNESS_CURVE_NUM_SAMPLES
 //! Each frame of the BG curve is shifted this much further than the last.
@@ -770,6 +774,7 @@ handle_decode_gray_tick(struct t_led_sync_refinement *refinement)
 		set_pssense_mode(refinement, T_LED_SYNC_SAMPLE_PSSENSE_MODE_BROAD, NULL);
 
 		refinement->decode_gray.applied_gray_start = true;
+		refinement->decode_gray.attempt_start_ns = os_monotonic_get_ns();
 	}
 
 	// Every 10 sequence events reanchor the period
@@ -779,6 +784,26 @@ handle_decode_gray_tick(struct t_led_sync_refinement *refinement)
 		bool applied = advance_clock_offset_pssense_locked(refinement, 0);
 		(void)applied; // ignore errors, it's fine
 	}
+
+	if (!refinement->decode_gray.applied_gray_start) {
+		return;
+	}
+
+	timepoint_ns now_ns = os_monotonic_get_ns();
+	if (now_ns - refinement->decode_gray.attempt_start_ns < GRAY_DECODE_TIMEOUT_NS) {
+		return;
+	}
+
+	if (!advance_clock_offset_pssense_locked(refinement, GRAY_DECODE_RECOVERY_JUMP_NS)) {
+		return;
+	}
+
+	LOG_DEBUG(refinement, "No gray code lock after %" PRId64 "ms, moving %" PRId64 "us and retrying",
+	          (int64_t)((now_ns - refinement->decode_gray.attempt_start_ns) / U_TIME_1MS_IN_NS),
+	          (int64_t)(GRAY_DECODE_RECOVERY_JUMP_NS / U_TIME_1US_IN_NS));
+
+	refinement->decode_gray.attempt_start_ns = now_ns;
+	refinement->decode_gray.matching_decodes = 0;
 }
 
 static void

@@ -336,6 +336,7 @@ set_phase_locked(struct t_led_sync_refinement *refinement, enum t_led_sync_phase
 		refinement->decode_gray.matching_decodes = 0;
 		refinement->decode_gray.decoded_gray_code = 0;
 		refinement->decode_gray.last_accepted_gray_code_ns = os_monotonic_get_ns();
+		refinement->decode_gray.attempt_start_ns = refinement->decode_gray.last_accepted_gray_code_ns;
 
 		break;
 	}
