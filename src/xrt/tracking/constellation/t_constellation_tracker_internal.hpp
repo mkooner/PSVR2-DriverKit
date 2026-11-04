@@ -298,6 +298,7 @@ public: // Methods (t_constellation_tracker.cpp)
 	tryDevicePose(Device *device,
 	              CameraSample &sample,
 	              DeviceState &device_state,
+	              bool need_matching_ids,
 	              const std::optional<xrt_space_relation> &Tcv_cam_device_prior,
 	              const xrt_pose &Tcv_cam_device_candidate);
 

@@ -393,6 +393,7 @@ bool
 Camera::tryDevicePose(Device *device,
                       CameraSample &sample,
                       DeviceState &device_state,
+                      bool need_matching_ids,
                       const std::optional<xrt_space_relation> &Tcv_cam_device_prior,
                       const xrt_pose &Tcv_cam_device_candidate)
 {
@@ -429,7 +430,10 @@ Camera::tryDevicePose(Device *device,
 		return false;
 	}
 
-	if (POSE_HAS_FLAGS(&score, POSE_MATCH_GOOD | POSE_MATCH_LED_IDS)) {
+	bool was_good = POSE_HAS_FLAGS(&score, POSE_MATCH_GOOD | (need_matching_ids ? POSE_MATCH_LED_IDS : 0));
+	bool was_strong = POSE_HAS_FLAGS(&score, POSE_MATCH_STRONG);
+
+	if (was_good || was_strong) {
 		this->pushPose(               //
 		    sample,                   //
 		    device_state,             //
@@ -859,6 +863,7 @@ Camera::processSampleFast(CameraSample &sample)
 		    this->tryDevicePose(device,             //
 		                        sample,             //
 		                        device_state,       //
+		                        false,              //
 		                        std::nullopt,       //
 		                        Tcv_cam_device_predicted.value().pose)) {
 			CT_DEBUG(tracker, "Fast processing for device %d succeeded with predicted pose", device->id);
@@ -894,6 +899,7 @@ Camera::processSampleFast(CameraSample &sample)
 		    this->tryDevicePose(device,                   //
 		                        sample,                   //
 		                        device_state,             //
+		                        true,                     //
 		                        Tcv_cam_device_predicted, //
 		                        Tcv_cam_device_last_known.value())) {
 			CT_DEBUG(tracker, "Fast processing for device %d succeeded with last known pose", device->id);
@@ -980,6 +986,8 @@ Camera::pushPose(CameraSample &camera_sample,
 			         "blobs failed",
 			         0, 0, device->id, camera_sample.blob_count);
 		} else {
+			Tcv_cam_device = Tcv_cam_device_optimized;
+
 			CT_DEBUG(tracker,
 			         "Camera %d (group %d) RANSAC-PnP refinement for device %d from %u "
 			         "blobs. Produced pose %f,%f,%f,%f pos %f,%f,%f",
@@ -987,8 +995,6 @@ Camera::pushPose(CameraSample &camera_sample,
 			         Tcv_cam_device.orientation.y, Tcv_cam_device.orientation.z,
 			         Tcv_cam_device.orientation.w, Tcv_cam_device.position.x, Tcv_cam_device.position.y,
 			         Tcv_cam_device.position.z);
-
-			Tcv_cam_device = Tcv_cam_device_optimized;
 
 			// Now that we've optimized the pose, we gotta update the match info
 			pose_metrics_match_pose_to_blobs(&Tcv_cam_device, camera_sample.blobs, camera_sample.blob_count,
