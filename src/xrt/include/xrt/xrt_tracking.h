@@ -147,6 +147,46 @@ struct xrt_imu_sample
 };
 
 /*!
+ * Noise model and bias calibration of one IMU sensor, in that sensor's units (rad/s or m/s^2), called "unit" below.
+ */
+struct xrt_imu_sensor_calibration
+{
+	//! Noise density at rest, in unit/sqrt(Hz).
+	double noise_density;
+	//! Noise density per unit of reading on the same axis, the scale factor error, in 1/sqrt(Hz).
+	double scale_factor_noise_density;
+	//! Noise density per unit of reading on the other axes, the cross axis error, in 1/sqrt(Hz).
+	double cross_axis_noise_density;
+	//! Reading past which an axis is saturated, in unit.
+	double axis_saturation;
+	//! Noise density of a saturated axis, in unit/sqrt(Hz).
+	double saturated_noise_density;
+	//! Bias random walk, in unit/sqrt(s).
+	double bias_random_walk;
+	//! Standard deviation of the bias before anything has been observed, in unit.
+	double bias_initial_sigma;
+};
+
+/*!
+ * IMU noise model and bias calibration, the noise density grows with the reading on each axis.
+ *
+ * @note This doesn't contain bias/scale itself,
+ *       that should be applied by the drivers before sending to trackers.
+ */
+struct xrt_imu_calibration
+{
+	//! Gyroscope calibration, in rad/s.
+	struct xrt_imu_sensor_calibration gyro;
+	//! Accelerometer calibration, in m/s^2.
+	struct xrt_imu_sensor_calibration accel;
+
+	//! Accelerometer scale random walk, in 1/sqrt(s).
+	double accel_scale_random_walk;
+	//! Standard deviation of the accelerometer scale before anything has been observed, unitless.
+	double accel_scale_initial_sigma;
+};
+
+/*!
  * Pose sample.
  */
 struct xrt_pose_sample
