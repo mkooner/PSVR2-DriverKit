@@ -232,7 +232,6 @@ RerunContext::logDevice(const SolveSnapshot &snapshot)
 
 	this->stream->log(device_entity, toRerunTransform(newest.Tcv_world_device));
 	this->stream->log(device_entity + "/axes", rerun::TransformAxes3D(kAxisLength));
-
 	/*
 	 * The device entity is the solved LED model pose, and the IMU factors see the IMU through this rotation on top
 	 * of it, so the angle between these axes and the device's is the offset the solve is holding. Drawn longer so
@@ -265,6 +264,24 @@ RerunContext::logDevice(const SolveSnapshot &snapshot)
 	        })                                           //
 	        .with_colors({deviceColor(device.id, 1.0f)}) //
 	);                                                   //
+
+	const std::string camera_device_covariance_entity = device_entity + "/covariance";
+	xrt_vec3 radii;
+	xrt_quat Q_origin_cov;
+	covariancePositionRadius(newest.covariance, radii, Q_origin_cov);
+
+	xrt_quat Q_device_world;
+	math_quat_invert(&newest.Tcv_world_device.orientation, &Q_device_world);
+
+	xrt_quat Q_device_cov;
+	math_quat_rotate(&Q_device_world, &Q_origin_cov, &Q_device_cov);
+
+	this->stream->log(                                    //
+	    camera_device_covariance_entity,                  //
+	    toRerunTransform({Q_device_cov, XRT_VEC3_ZERO})); //
+	this->stream->log(
+	    camera_device_covariance_entity,
+	    rerun::archetypes::Ellipsoids3D::from_half_sizes(rerun::components::HalfSize3D(radii.x, radii.y, radii.z)));
 }
 
 void
@@ -333,6 +350,27 @@ RerunContext::logDeviceMetrics(const SolveSnapshot &snapshot)
 	                  rerun::Scalars(static_cast<double>(std::popcount(device.keyframe_mask))));
 
 	this->stream->log(metrics + "/speed_m_s", rerun::Scalars(map_vec3_f64(newest.linear_velocity).norm()));
+
+	/*
+	 * The same 3 sigma the covariance ellipsoid is drawn with. The principal radii are the ellipsoid's half sizes,
+	 * sorted smallest first, and the world axis ones are read straight off the diagonal for comparing against the
+	 * world axes.
+	 */
+	xrt_vec3 position_radii;
+	xrt_quat Q_origin_cov;
+	covariancePositionRadius(newest.covariance, position_radii, Q_origin_cov);
+
+	this->stream->log(metrics + "/position_3sigma_principal_min_m", rerun::Scalars(position_radii.x));
+	this->stream->log(metrics + "/position_3sigma_principal_mid_m", rerun::Scalars(position_radii.y));
+	this->stream->log(metrics + "/position_3sigma_principal_max_m", rerun::Scalars(position_radii.z));
+
+	const auto position_sigma_3 = 3.0 * newest.covariance.diagonal()
+	                                        .segment<3>(kPosePosCovIndex)
+	                                        .cwiseMax(0.0)
+	                                        .cwiseSqrt();
+	this->stream->log(metrics + "/position_3sigma_world_x_m", rerun::Scalars(position_sigma_3.x()));
+	this->stream->log(metrics + "/position_3sigma_world_y_m", rerun::Scalars(position_sigma_3.y()));
+	this->stream->log(metrics + "/position_3sigma_world_z_m", rerun::Scalars(position_sigma_3.z()));
 
 	// The biases are what the IMU factors are really solving for, and they are the first thing to go somewhere
 	// unphysical when the window is too weak to constrain them.

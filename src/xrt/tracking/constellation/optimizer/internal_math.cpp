@@ -7,6 +7,8 @@
  * @ingroup tracking
  */
 
+#include "math/m_api.h"
+
 #include "internal_math.hpp"
 #include "imu_preintegration.hpp"
 
@@ -166,7 +168,7 @@ propagateCovariance(const Quaterniond &Q_start_cur,
                     const Vector3d &accel_scale,
                     const xrt_imu_calibration &imu_calibration,
                     double dt,
-                    PreintegrationCovarianceMatrix &covariance)
+                    PoseCovarianceMatrix &covariance)
 {
 	if (dt <= 0.0) {
 		// A duplicated sample timestamp contributes nothing and would divide by zero below.
@@ -182,25 +184,25 @@ propagateCovariance(const Quaterniond &Q_start_cur,
 	 * blocks are where a rotation error leaks into velocity and position: point the accelerometer slightly
 	 * wrong and you integrate the acceleration slightly sideways.
 	 */
-	Matrix<double, kNumImuBiasCovIndices, kNumImuBiasCovIndices> A =
-	    Matrix<double, kNumImuBiasCovIndices, kNumImuBiasCovIndices>::Identity();
-	A.block<3, 3>(kImuBiasRotCovIndex, kImuBiasRotCovIndex) = //
+	Matrix<double, kNumPoseCovIndices, kNumPoseCovIndices> A =
+	    Matrix<double, kNumPoseCovIndices, kNumPoseCovIndices>::Identity();
+	A.block<3, 3>(kPoseRotCovIndex, kPoseRotCovIndex) = //
 	    quat_exp_so3(Vector3d(-corrected_gyro * dt)).toRotationMatrix();
-	A.block<3, 3>(kImuBiasVelCovIndex, kImuBiasRotCovIndex) = //
+	A.block<3, 3>(kPoseVelCovIndex, kPoseRotCovIndex) = //
 	    -dR * accel_skew * dt;
-	A.block<3, 3>(kImuBiasPosCovIndex, kImuBiasRotCovIndex) = //
+	A.block<3, 3>(kPosePosCovIndex, kPoseRotCovIndex) = //
 	    -0.5 * dR * accel_skew * dt * dt;
-	A.block<3, 3>(kImuBiasPosCovIndex, kImuBiasVelCovIndex) = //
+	A.block<3, 3>(kPosePosCovIndex, kPoseVelCovIndex) = //
 	    Matrix3d::Identity() * dt;
 
 	/*
 	 * How this sample's sensor noise enters. The gyro noise turns into a rotation through the right Jacobian.
 	 * The accel noise is scaled along with the signal, since the scale is applied to the reading.
 	 */
-	Matrix<double, kNumImuBiasCovIndices, 6> B = Matrix<double, kNumImuBiasCovIndices, 6>::Zero();
-	B.block<3, 3>(kImuBiasRotCovIndex, 0) = rightJacobianSo3(corrected_gyro * dt) * dt;
-	B.block<3, 3>(kImuBiasVelCovIndex, 3) = dR * scale * dt;
-	B.block<3, 3>(kImuBiasPosCovIndex, 3) = 0.5 * dR * scale * dt * dt;
+	Matrix<double, kNumPoseCovIndices, 6> B = Matrix<double, kNumPoseCovIndices, 6>::Zero();
+	B.block<3, 3>(kPoseRotCovIndex, 0) = rightJacobianSo3(corrected_gyro * dt) * dt;
+	B.block<3, 3>(kPoseVelCovIndex, 3) = dR * scale * dt;
+	B.block<3, 3>(kPosePosCovIndex, 3) = 0.5 * dR * scale * dt * dt;
 
 	const Vector3d gyro_density_squared = sampleNoiseDensitySquared(measured_gyro, imu_calibration.gyro);
 	const Vector3d accel_density_squared = sampleNoiseDensitySquared(measured_accel, imu_calibration.accel);
@@ -226,7 +228,7 @@ integrateSingleSample(const xrt_imu_sample &sample,
                       Quaternion<ImuBiasJet> &Q_start_cur,
                       Vector3<ImuBiasJet> &delta_velocity,
                       Vector3<ImuBiasJet> &delta_position,
-                      PreintegrationCovarianceMatrix &covariance)
+                      PoseCovarianceMatrix &covariance)
 {
 	// Convert the sample to a Jet type
 	Vector3<ImuBiasJet> cur_accel = map_vec3_f64(sample.accel_m_s2).cast<ImuBiasJet>();
@@ -335,6 +337,36 @@ evaluateFactorFitness(ceres::Problem &problem, const std::vector<ceres::Residual
 }
 
 void
+covariancePositionRadius(const PoseCovarianceMatrix &covariance, xrt_vec3 &out_radii, xrt_quat &out_Q_origin_cov)
+{
+	const Eigen::Matrix3d &pos_covariance = covariance.block<3, 3>(
+	    static_cast<int>(PoseCovarianceIndex::PositionX), static_cast<int>(PoseCovarianceIndex::PositionX));
+
+	Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(pos_covariance);
+
+	if (solver.info() != Eigen::Success) {
+		// @todo handle failure better, if possible
+		U_LOG_E("Failed to compute eigenvalues for position covariance matrix.");
+		out_radii = {0.0f, 0.0f, 0.0f};
+		out_Q_origin_cov = XRT_QUAT_IDENTITY;
+		return;
+	}
+
+	const Eigen::Vector3d &eigenvalues = solver.eigenvalues();
+	Eigen::Matrix3d eigenvectors = solver.eigenvectors();
+
+	if (eigenvectors.determinant() < 0.0) {
+		eigenvectors.col(2) *= -1.0;
+	}
+
+	Eigen::Quaterniond q(eigenvectors);
+	map_quat(out_Q_origin_cov) = q.cast<float>();
+
+	Eigen::Vector3d half_sizes = 3.0 * eigenvalues.cwiseMax(0.0).cwiseSqrt();
+	map_vec3(out_radii) = half_sizes.cast<float>();
+}
+
+void
 matrixCrsToEigen(const ceres::CRSMatrix &mat_crs, Eigen::MatrixXd &mat)
 {
 	// Clear out the Eigen matrix
@@ -433,7 +465,7 @@ preintegrate(const std::span<const xrt_imu_sample> &imu_samples,
 	const auto &gyro_bias = imu_bias.gyro_bias;
 	const auto &accel_scale = imu_bias.accel_scale;
 
-	PreintegrationCovarianceMatrix covariance = PreintegrationCovarianceMatrix::Zero();
+	PoseCovarianceMatrix covariance = PoseCovarianceMatrix::Zero();
 
 	auto &first_sample = imu_samples.front();
 	auto &last_sample = imu_samples.back();
@@ -506,15 +538,15 @@ preintegrate(const std::span<const xrt_imu_sample> &imu_samples,
 	};
 
 	// Sigma = L L^T, so the whitener is L^-1 — a triangular solve, not an inverse.
-	Eigen::LLT<PreintegrationCovarianceMatrix> llt(covariance);
+	Eigen::LLT<PoseCovarianceMatrix> llt(covariance);
 	if (llt.info() != Eigen::Success) {
 		/*
 		 * Nothing sane to weight with. Matching the camera factor's sentinel, make it contribute almost
 		 * nothing rather than contribute a full-strength bogus factor.
 		 */
-		preintegrated.whitening = PreintegrationCovarianceMatrix::Identity() * 1e-3;
+		preintegrated.whitening = PoseCovarianceMatrix::Identity() * 1e-3;
 	} else {
-		preintegrated.whitening = llt.matrixL().solve(PreintegrationCovarianceMatrix::Identity());
+		preintegrated.whitening = llt.matrixL().solve(PoseCovarianceMatrix::Identity());
 	}
 
 	return preintegrated;

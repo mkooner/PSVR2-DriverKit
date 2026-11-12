@@ -121,6 +121,16 @@ public: // Methods
 	}
 
 	/*!
+	 * Returns the data to use for a parameter, asserts you have seeded the data before this.
+	 */
+	const T *
+	data() const
+	{
+		assert(this->seeded);
+		return this->vec.data();
+	}
+
+	/*!
 	 * Returns the vector for you to write into and seed. Assumes you have seeded it after this function is called.
 	 */
 	VectorType &

@@ -136,21 +136,31 @@ template <typename T> struct ImuBias
 	seed() const
 	{
 		auto seeded = ImuBias<ImuBiasJet>();
-		seeded.accel_bias = {{this->accel_bias.x(), kAccelBiasIndex + 0},
-		                     {this->accel_bias.y(), kAccelBiasIndex + 1},
-		                     {this->accel_bias.z(), kAccelBiasIndex + 2}};
-		seeded.gyro_bias = {{this->gyro_bias.x(), kGyroBiasIndex + 0},
-		                    {this->gyro_bias.y(), kGyroBiasIndex + 1},
-		                    {this->gyro_bias.z(), kGyroBiasIndex + 2}};
-		seeded.accel_scale = {{this->accel_scale.x(), kAccelScaleIndex + 0},
-		                      {this->accel_scale.y(), kAccelScaleIndex + 1},
-		                      {this->accel_scale.z(), kAccelScaleIndex + 2}};
+		seeded.accel_bias = {
+		    {this->accel_bias.x(), kAccelBiasIndex + 0},
+		    {this->accel_bias.y(), kAccelBiasIndex + 1},
+		    {this->accel_bias.z(), kAccelBiasIndex + 2},
+		};
+		seeded.gyro_bias = {
+		    {this->gyro_bias.x(), kGyroBiasIndex + 0},
+		    {this->gyro_bias.y(), kGyroBiasIndex + 1},
+		    {this->gyro_bias.z(), kGyroBiasIndex + 2},
+		};
+		seeded.accel_scale = {
+		    {this->accel_scale.x(), kAccelScaleIndex + 0},
+		    {this->accel_scale.y(), kAccelScaleIndex + 1},
+		    {this->accel_scale.z(), kAccelScaleIndex + 2},
+		};
 		return seeded;
 	}
 };
 
-enum class ImuBiasCovarianceIndex : int
+enum class PoseCovarianceIndex : int
 {
+	PositionX,
+	PositionY,
+	PositionZ,
+
 	RotX,
 	RotY,
 	RotZ,
@@ -159,20 +169,28 @@ enum class ImuBiasCovarianceIndex : int
 	VelocityY,
 	VelocityZ,
 
-	PositionX,
-	PositionY,
-	PositionZ,
-
 	NumIndices,
 };
 
-static constexpr int kImuBiasRotCovIndex = static_cast<int>(ImuBiasCovarianceIndex::RotX);
-static constexpr int kImuBiasVelCovIndex = static_cast<int>(ImuBiasCovarianceIndex::VelocityX);
-static constexpr int kImuBiasPosCovIndex = static_cast<int>(ImuBiasCovarianceIndex::PositionX);
-static constexpr int kNumImuBiasCovIndices = static_cast<int>(ImuBiasCovarianceIndex::NumIndices);
+static constexpr int kPosePosCovIndex = static_cast<int>(PoseCovarianceIndex::PositionX);
+static constexpr int kPoseRotCovIndex = static_cast<int>(PoseCovarianceIndex::RotX);
+static constexpr int kPoseVelCovIndex = static_cast<int>(PoseCovarianceIndex::VelocityX);
+static constexpr int kNumPoseCovIndices = static_cast<int>(PoseCovarianceIndex::NumIndices);
 
-//! [rotation; velocity; position], the order computeImuResidual writes its residual in.
-typedef Matrix<double, kNumImuBiasCovIndices, kNumImuBiasCovIndices> PreintegrationCovarianceMatrix;
+//! [position; rotation; velocity], the order computeImuResidual writes its residual in.
+typedef Matrix<double, kNumPoseCovIndices, kNumPoseCovIndices> PoseCovarianceMatrix;
+
+/*!
+ * Computes the radii and covariance orientation from the 3x3 position part of the pose covariance matrix
+ * (3x eigenvalue, so 99%-ish probability containment).
+ *
+ * @param      covariance    The raw pose covariance matrix to compute the radii and orientation from.
+ * @param[out] out_radii     The radii of the position covariance will be written to this variable.
+ * @param[out] out_Q_cam_cov The orientation of the covariance will be written to this variable.
+ */
+void
+covariancePositionRadius(const PoseCovarianceMatrix &covariance, xrt_vec3 &out_radii, xrt_quat &out_Q_cam_cov);
+
 
 struct PreintegratedImuSamples
 {
@@ -191,7 +209,7 @@ struct PreintegratedImuSamples
 	Vector3d body_angular_velocity;
 
 	//! The whitening matrix for this preintegration, the lower triangular.
-	PreintegrationCovarianceMatrix whitening;
+	PoseCovarianceMatrix whitening;
 
 	double dt;
 
@@ -224,7 +242,7 @@ struct PreintegratedImuSamples
 		    .body_angular_velocity_valid = false,
 		    .body_angular_velocity = Vector3d::Zero(),
 
-		    .whitening = PreintegrationCovarianceMatrix::Zero(),
+		    .whitening = PoseCovarianceMatrix::Zero(),
 
 		    .dt = 0,
 
@@ -329,9 +347,11 @@ computeImuResidual(const PreintegratedImuSamples &imu_preintegration,
 		delta_rotation_error.coeffs() = -delta_rotation_error.coeffs();
 	}
 
-	residual.template segment<3>(0) = quat_ln_so3(delta_rotation_error);
-	residual.template segment<3>(3) = predicted_start_delta_velocity - corrected_start_delta_velocity;
-	residual.template segment<3>(6) = predicted_start_delta_position - corrected_start_delta_position;
+	residual.template segment<3>(kPosePosCovIndex) =
+	    predicted_start_delta_position - corrected_start_delta_position;
+	residual.template segment<3>(kPoseRotCovIndex) = quat_ln_so3(delta_rotation_error);
+	residual.template segment<3>(kPoseVelCovIndex) =
+	    predicted_start_delta_velocity - corrected_start_delta_velocity;
 }
 
 /*
@@ -359,17 +379,21 @@ struct ImuCostFunctor
 	           T *residuals) const
 	{
 		const WorldGravity<T> world_gravity{
-		    Map<const Vector<T, WorldGravity<T>::kNumParameters>>(world_gravity_parameters)};
+		    Map<const Vector<T, WorldGravity<T>::kNumParameters>>(world_gravity_parameters),
+		};
 
 		const ImuBias<T> imu_bias{Map<const Vector<T, ImuBias<T>::kNumParameters>>(imu_bias_parameters)};
 
 		const ImuExtrinsics<T> imu_extrinsics{
-		    Map<const Vector<T, ImuExtrinsics<T>::kNumParameters>>(imu_extrinsics_parameters)};
+		    Map<const Vector<T, ImuExtrinsics<T>::kNumParameters>>(imu_extrinsics_parameters),
+		};
 
 		const PoseWithVelocity<T> start_T_world_model{
-		    Map<const Vector<T, PoseWithVelocity<T>::kNumParameters>>(start_keyframe_parameters)};
+		    Map<const Vector<T, PoseWithVelocity<T>::kNumParameters>>(start_keyframe_parameters),
+		};
 		const PoseWithVelocity<T> end_T_world_model{
-		    Map<const Vector<T, PoseWithVelocity<T>::kNumParameters>>(end_keyframe_parameters)};
+		    Map<const Vector<T, PoseWithVelocity<T>::kNumParameters>>(end_keyframe_parameters),
+		};
 
 		Vector<T, PreintegratedImuSamples::kNumResiduals> computed_residual;
 		computeImuResidual<T>(this->preintegration,                           //
