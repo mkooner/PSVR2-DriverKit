@@ -16,6 +16,7 @@
 #include "tracking/t_constellation.h"
 
 #include "constellation/t_constellation_tracker.h"
+#include "constellation/trace_log/t_constellation_tracker_trace_log.hpp"
 
 #include "math/m_relation_history.hpp"
 
@@ -97,6 +98,22 @@ struct DeviceObservation
 	uint32_t num_points;
 };
 
+/*!
+ * The trace log of a sample folded into a keyframe, held on to until a solve covers the keyframe (making the sample's
+ * pose available to consumers), or the keyframe leaves the window without ever being covered.
+ */
+struct PendingFusionTrace
+{
+	TraceLogRef trace_log{};
+	timepoint_ns frame_timestamp_ns{0};
+	time_duration_ns start_latency_ns{0};
+	t_constellation_tracker_trace_log_fusion_sample_result sample_result{CONSTELLATION_FUSION_SAMPLE_INVALID};
+	time_duration_ns process_time_ns{0};
+	uint32_t batch_size{0};
+	//! Successful solves that ran while this was waiting, but didn't cover its keyframe.
+	uint32_t num_solves_waited{0};
+};
+
 struct Keyframe
 {
 	//! The mosaic this keyframe corresponds to
@@ -111,6 +128,13 @@ struct Keyframe
 
 	std::array<DeviceObservation, XRT_TRACKING_MAX_CAMS> observations;
 	uint32_t num_observations;
+
+	/*!
+	 * Trace logs of the samples folded in that no solve has covered yet. Entries past @ref num_pending_traces are
+	 * always empty, so a reused slot holds no stale references.
+	 */
+	std::array<PendingFusionTrace, XRT_TRACKING_MAX_CAMS> pending_traces;
+	uint32_t num_pending_traces;
 };
 
 /*!
@@ -673,9 +697,45 @@ public: // Methods
 	 * Folds one queued camera sample into the window, or drops if it's no longer able to be merged in.
 	 *
 	 * This is the far side of @ref sample_queue, and the only thing that grows the window.
+	 *
+	 * @param[out] out_keyframe If non-null, set to the keyframe the sample was written to, if it was.
+	 *
+	 * @return What happened to the sample, for the trace log.
+	 */
+	t_constellation_tracker_trace_log_fusion_sample_result
+	processCameraSampleLocked(const constellation::CameraSample &sample, Keyframe **out_keyframe = nullptr);
+
+	/*!
+	 * @ref processCameraSampleLocked, plus tracing. If the sample made it into a keyframe its trace log is held on
+	 * that keyframe until a solve covers it, otherwise its trace entry is pushed straight away.
+	 *
+	 * @param batch_size How many samples are being folded in this pass.
 	 */
 	void
-	processCameraSampleLocked(const constellation::CameraSample &sample);
+	processCameraSampleTracedLocked(const constellation::CameraSample &sample, uint32_t batch_size);
+
+	//! Push the trace entry for a sample dropped before it could be folded in.
+	void
+	traceDroppedSample(const constellation::CameraSample &sample,
+	                   t_constellation_tracker_trace_log_fusion_sample_result result);
+
+	/*!
+	 * Push the trace entries of every sample waiting on @p keyframe and release them.
+	 *
+	 * @param solve_result  Why they're being released.
+	 * @param now_ns        When they're being released, the time the poses became available if they were covered.
+	 * @param solve_time_ns The time spent in the pass that released them.
+	 */
+	void
+	flushKeyframeTracesLocked(Keyframe &keyframe,
+	                          t_constellation_tracker_trace_log_fusion_solve_result solve_result,
+	                          timepoint_ns now_ns,
+	                          time_duration_ns solve_time_ns);
+
+	//! @ref flushKeyframeTracesLocked on every keyframe in the window, for when the window is about to be dropped.
+	void
+	flushAllKeyframeTracesLocked(t_constellation_tracker_trace_log_fusion_solve_result solve_result,
+	                             time_duration_ns solve_time_ns);
 
 	/*!
 	 * Dead reckons @p inout_solve forward through every IMU sample that has arrived since it, pushing a pose for
@@ -701,6 +761,8 @@ public: // Methods
 	 *
 	 * @param have_new_input Whether this pass drained any camera samples, rather than being woken by an IMU
 	 *                       sample arriving to unpark a preintegration.
+	 *
+	 * When a solve succeeds, the trace logs waiting on every keyframe it covered are released.
 	 */
 	void
 	tickLocked(bool have_new_input);

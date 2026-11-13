@@ -205,6 +205,8 @@ struct t_rift_blobwatch
 	struct os_mutex mutex;
 
 	struct t_blob_sink *target_sink;
+	//! Not owned, null disables trace logging.
+	struct t_constellation_trace_log_sink *trace_log_sink;
 
 	uint32_t next_blob_id;
 	struct t_rift_blobwatch_params params;
@@ -889,7 +891,6 @@ blobwatch_process(struct t_rift_blobwatch *bw, struct xrt_frame *frame, struct b
 {
 	os_mutex_lock(&bw->mutex);
 	struct blobservation *ob = pop_queue(&bw->observation_q);
-
 	os_mutex_unlock(&bw->mutex);
 
 	assert(ob != NULL);
@@ -1057,11 +1058,35 @@ t_rift_blobwatch_push_frame(struct xrt_frame_sink *sink, struct xrt_frame *frame
 {
 	struct t_rift_blobwatch *bw = container_of(sink, struct t_rift_blobwatch, frame_sink);
 
+	timepoint_ns processing_start_ns = os_monotonic_get_ns();
+	timepoint_ns pipeline_latency_ns = processing_start_ns - frame->timestamp;
+
 	struct blobservation *output;
 	blobwatch_process(bw, frame, &output);
 
+	time_duration_ns process_time_ns = os_monotonic_get_ns() - processing_start_ns;
+
+	struct t_constellation_tracker_trace_log *trace_log = NULL;
+	if (bw->trace_log_sink) {
+		trace_log = t_constellation_tracker_trace_log_create(bw->trace_log_sink);
+	}
+
+	if (trace_log) {
+		t_constellation_tracker_trace_log_push_entry( //
+		    trace_log,                                //
+		    &(struct t_constellation_tracker_trace_log_entry){
+		        .type = CONSTELLATION_TRACE_LOG_ENTRY_BLOBWATCH,
+		        .blobwatch =
+		            {
+		                .pipeline_latency_ns = pipeline_latency_ns,
+		                .process_time_ns = process_time_ns,
+		            },
+		    }); //
+	}
+
 	if (bw->target_sink == NULL) {
 		blobwatch_release_observation(bw, output);
+		t_constellation_tracker_trace_log_ref(&trace_log, NULL);
 		return;
 	}
 
@@ -1111,12 +1136,16 @@ t_rift_blobwatch_push_frame(struct xrt_frame_sink *sink, struct xrt_frame *frame
 	    .num_blobs = output->num_blobs,
 	    .frame = NULL,
 	};
+	// Copy the trace log into the blobservation.
+	t_constellation_tracker_trace_log_ref(&xbo.trace_log, trace_log);
 
 	// The sink takes ownership of this reference
 	xrt_frame_reference(&xbo.frame, frame);
 
 	t_blob_sink_push_blobs(bw->target_sink, &xbo);
+
 	blobwatch_release_observation(bw, output);
+	t_constellation_tracker_trace_log_ref(&trace_log, NULL);
 }
 
 /*
@@ -1303,4 +1332,12 @@ t_rift_blobwatch_create(const struct t_rift_blobwatch_params *params,
 	}
 
 	return 0;
+}
+
+void
+t_rift_blobwatch_set_trace_log_sink(struct t_blobwatch *tbw, struct t_constellation_trace_log_sink *trace_log_sink)
+{
+	struct t_rift_blobwatch *bw = t_rift_blobwatch(tbw);
+
+	bw->trace_log_sink = trace_log_sink;
 }

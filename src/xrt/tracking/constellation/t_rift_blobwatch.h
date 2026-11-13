@@ -12,6 +12,7 @@
 #include "xrt/xrt_config_build.h"
 
 #include "constellation/t_constellation_tracker.h"
+#include "constellation/trace_log/t_constellation_tracker_trace_log.h"
 
 
 #ifdef __cplusplus
@@ -64,6 +65,15 @@ t_rift_blobwatch_create(const struct t_rift_blobwatch_params *params,
                         struct t_blob_sink *blob_sink,
                         struct xrt_frame_sink **out_frame_sink,
                         struct t_blobwatch **out_blobwatch);
+
+/*!
+ * Set the sink that trace logs created by this blobwatch are pushed into, null disables trace logging. The sink is not
+ * owned by the blobwatch, and must outlive it and every trace log it creates.
+ *
+ * @public @memberof t_rift_blobwatch
+ */
+void
+t_rift_blobwatch_set_trace_log_sink(struct t_blobwatch *tbw, struct t_constellation_trace_log_sink *trace_log_sink);
 
 #ifdef __cplusplus
 }

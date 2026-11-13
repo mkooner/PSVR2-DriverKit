@@ -30,6 +30,7 @@
 #include "led_search_model.h"
 #include "pose_metrics.h"
 #include "t_constellation_tracker.h"
+#include "trace_log/t_constellation_tracker_trace_log.hpp"
 #include "optimizer/pose_optimize.hpp"
 #include "optimizer/rig_calibration.hpp"
 #include "optimizer/sensor_fusion.hpp"
@@ -120,6 +121,8 @@ struct DeviceState
 	//! The final found pose of the device in this specific sample.
 	std::optional<FoundDevicePose> found_pose{std::nullopt};
 
+	t_constellation_tracker_trace_log_solve_type solve_type{CONSTELLATION_SOLVE_TYPE_NO_SOLVE};
+
 	//! Whether the device needs to have the slow processing thread run over it
 	bool needs_slow_processing{false};
 };
@@ -128,6 +131,14 @@ struct CameraSample
 {
 public: // Fields
 	t_blobwatch *source{nullptr};
+
+	//! The trace log for this sample, null if tracing is disabled.
+	TraceLogRef trace_log{};
+
+	time_duration_ns pipeline_latency_ns{};
+	std::optional<timepoint_ns> fast_duration_ns{std::nullopt};
+	std::optional<timepoint_ns> slow_duration_ns{std::nullopt};
+
 	uint64_t id{};
 	uint64_t sequence_id{};
 	int64_t timestamp_ns{};
@@ -165,6 +176,8 @@ public: // Methods
 	{
 		t_blob_observation obs = {
 		    .source = this->source,
+		    // The returned observation is non-owning, so it can't carry a trace log reference.
+		    .trace_log = nullptr,
 		    .id = this->id,
 		    .sequence_id = this->sequence_id,
 		    .timestamp_ns = this->timestamp_ns,
@@ -300,13 +313,17 @@ public: // Methods (t_constellation_tracker.cpp)
 	              DeviceState &device_state,
 	              bool need_matching_ids,
 	              const std::optional<xrt_space_relation> &Tcv_cam_device_prior,
-	              const xrt_pose &Tcv_cam_device_candidate);
+	              const xrt_pose &Tcv_cam_device_candidate,
+	              t_constellation_tracker_trace_log_solve_type solve_type);
 
 	bool
 	tryDeviceBlobRecovery(Device *device,
 	                      CameraSample &sample,
 	                      DeviceState &device_state,
 	                      const std::optional<xrt_space_relation> &Tcv_cam_device_prior);
+
+	void
+	handleStepComplete(CameraSample &sample);
 
 	void
 	handleProcessingComplete(CameraSample &sample);
@@ -324,7 +341,8 @@ public: // Methods (t_constellation_tracker.cpp)
 	         Device *device,
 	         pose_metrics &score,
 	         const xrt_pose &Tcv_cam_device,
-	         bool was_optimized);
+	         bool was_optimized,
+	         t_constellation_tracker_trace_log_solve_type solve_type);
 
 public: // Methods (constellation_debug_scribble.cpp)
 	void

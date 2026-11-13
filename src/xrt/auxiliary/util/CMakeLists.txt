@@ -231,7 +231,6 @@ endif()
 add_library(
 	aux_util_sink STATIC
 	u_sink.h
-	u_sink_blob_visualizer.c
 	u_sink_combiner.c
 	u_sink_force_genlock.c
 	u_sink_converter.c
@@ -255,6 +254,11 @@ target_link_libraries(
 if(XRT_HAVE_JPEG)
 	target_link_libraries(aux_util_sink PRIVATE ${JPEG_LIBRARIES})
 	target_include_directories(aux_util_sink PRIVATE ${JPEG_INCLUDE_DIRS})
+endif()
+
+if(XRT_MODULE_CONSTELLATION_TRACKING)
+	target_sources(aux_util_sink PRIVATE u_sink_blob_visualizer.c)
+	target_link_libraries(aux_util_sink PRIVATE constellation tracking-includes)
 endif()
 
 ####

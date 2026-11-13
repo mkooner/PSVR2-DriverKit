@@ -13,6 +13,9 @@
 #include "util/u_sink.h"
 #include "util/u_frame.h"
 
+#include "constellation/trace_log/t_constellation_tracker_trace_log.h"
+
+
 /*!
  * An @ref xrt_blob_sink that visualizes blobs to a frame
  * @implements xrt_blob_sink
@@ -67,8 +70,17 @@ visualize_blobs(struct t_blob_sink *xbs, struct t_blob_observation *tbo)
 {
 	struct u_sink_blob_visualizer *bv = (struct u_sink_blob_visualizer *)xbs;
 
+	timepoint_ns processing_start_ns = os_monotonic_get_ns();
+	timepoint_ns pipeline_latency_ns = processing_start_ns - tbo->timestamp_ns;
+
+	struct t_constellation_tracker_trace_log *trace_log = NULL;
+	t_constellation_tracker_trace_log_ref(&trace_log, tbo->trace_log);
+
 	if (bv->downstream_blob_sink) {
 		bv->downstream_blob_sink->push_blobs(bv->downstream_blob_sink, tbo);
+	} else {
+		// If we have no downstream then we need to clear the trace log on the blobservation
+		t_constellation_tracker_trace_log_ref(&tbo->trace_log, NULL);
 	}
 
 	struct xrt_frame *frame = NULL;
@@ -116,6 +128,22 @@ visualize_blobs(struct t_blob_sink *xbs, struct t_blob_observation *tbo)
 	u_sink_debug_push_frame(bv->downstream_frame_sink, frame);
 
 	xrt_frame_reference(&frame, NULL);
+
+	time_duration_ns process_time_ns = os_monotonic_get_ns() - processing_start_ns;
+
+	if (trace_log) {
+		t_constellation_tracker_trace_log_push_entry( //
+		    trace_log,                                //
+		    &(struct t_constellation_tracker_trace_log_entry){
+		        .type = CONSTELLATION_TRACE_LOG_BLOB_VISUALIZER,
+		        .blob_visualizer =
+		            {
+		                .pipeline_latency_ns = pipeline_latency_ns,
+		                .process_time_ns = process_time_ns,
+		            },
+		    }); //
+	}
+	t_constellation_tracker_trace_log_ref(&trace_log, NULL);
 }
 
 static void

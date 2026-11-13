@@ -1107,6 +1107,22 @@ integrateToTimestampHistory(const double world_gravity_mag,
 	inout_solve.time_ns = pose_ns;
 }
 
+//! Push a sensor fusion trace entry, if the sample has a trace log.
+void
+pushFusionTraceEntry(t_constellation_tracker_trace_log *trace_log,
+                     const t_constellation_tracker_trace_log_sensor_fusion_entry &sensor_fusion)
+{
+	if (trace_log == nullptr) {
+		return;
+	}
+
+	t_constellation_tracker_trace_log_entry entry{
+	    .type = CONSTELLATION_TRACE_LOG_ENTRY_SENSOR_FUSION,
+	    .sensor_fusion = sensor_fusion,
+	};
+	t_constellation_tracker_trace_log_push_entry(trace_log, &entry);
+}
+
 extern "C" void *
 thread_runner(void *ptr)
 {
@@ -1144,9 +1160,11 @@ thread_runner(void *ptr)
 			// Update the latest device relation history
 			fusion->updateDeviceRelationHistoryLocked();
 
+			const uint32_t batch_size = static_cast<uint32_t>(pending.size());
 			for (const auto &sample : pending) {
-				fusion->processCameraSampleLocked(sample);
+				fusion->processCameraSampleTracedLocked(sample, batch_size);
 			}
+			// Folded samples' trace logs are held by their keyframes now, until a solve covers them.
 			pending.clear();
 
 			fusion->tickLocked(have_new_input);
@@ -2380,6 +2398,10 @@ SensorFusion::pushKeyframeLocked(const constellation::CameraSample &sample)
 
 		// Evict the age for the fusion problem
 		this->problem->evictLocked(*this, evicted_age);
+
+		// Anything still waiting on the evicted keyframe will never be covered now.
+		this->flushKeyframeTracesLocked(this->keyframeLocked(evicted_age), CONSTELLATION_FUSION_SOLVE_NEVER_COVERED,
+		                                os_monotonic_get_ns(), 0);
 	} else {
 		this->num_keyframes += 1;
 	}
@@ -2395,6 +2417,9 @@ SensorFusion::pushKeyframeLocked(const constellation::CameraSample &sample)
 	 * Deliberately not clearing `observations`, would be very expensive.
 	 */
 	keyframe.num_observations = 0;
+	// Already flushed when the slot's previous keyframe left the window.
+	assert(keyframe.num_pending_traces == 0);
+	keyframe.num_pending_traces = 0;
 
 	/*
 	 * Nothing has integrated the interval ending at this keyframe yet, and the slot still holds the preintegration
@@ -2546,6 +2571,9 @@ SensorFusion::~SensorFusion()
 	// Joins the fusion thread, so nothing can be mid-solve by the time the problem and the stream go away.
 	os_thread_helper_destroy(&this->thread);
 
+	// Whatever is still waiting on a solve never got one.
+	this->flushAllKeyframeTracesLocked(CONSTELLATION_FUSION_SOLVE_NEVER_COVERED, 0);
+
 	delete this->problem;
 }
 
@@ -2606,6 +2634,7 @@ SensorFusion::pushCameraSample(constellation::ConstellationTracker *tracker, con
 
 	// Ignore samples with no camera position
 	if (!sample.Txr_world_cam.has_value()) {
+		this->traceDroppedSample(sample, CONSTELLATION_FUSION_SAMPLE_DROPPED_NO_CAMERA_POSE);
 		return;
 	}
 
@@ -2615,7 +2644,7 @@ SensorFusion::pushCameraSample(constellation::ConstellationTracker *tracker, con
 	if (this->deterministic) {
 		// Mirror the fusion thread's pass, which dead reckons to the newest IMU before folding samples in.
 		this->updateDeviceRelationHistoryLocked();
-		this->processCameraSampleLocked(sample);
+		this->processCameraSampleTracedLocked(sample, 1);
 		this->tickLocked(true);
 		return;
 	}
@@ -2633,6 +2662,8 @@ SensorFusion::pushCameraSample(constellation::ConstellationTracker *tracker, con
 		        " dropped so far)",
 		        kMaxQueuedCameraSamples, sample.mosaic_index, sample.camera_index, sample.timestamp_ns,
 		        num_dropped);
+
+		this->traceDroppedSample(sample, CONSTELLATION_FUSION_SAMPLE_DROPPED_QUEUE_FULL);
 		return;
 	}
 
@@ -2666,8 +2697,8 @@ SensorFusion::writeSampleToKeyframe(Keyframe &keyframe, const DeviceObservation 
 	this->dirty = true;
 }
 
-void
-SensorFusion::processCameraSampleLocked(const constellation::CameraSample &sample)
+t_constellation_tracker_trace_log_fusion_sample_result
+SensorFusion::processCameraSampleLocked(const constellation::CameraSample &sample, Keyframe **out_keyframe)
 {
 	Keyframe *keyframe = nullptr;
 
@@ -2687,7 +2718,7 @@ SensorFusion::processCameraSampleLocked(const constellation::CameraSample &sampl
 				assert(!"Unreachable"); // The tracker never pushes already handled samples.
 
 				// Early exit in release modes
-				return;
+				return CONSTELLATION_FUSION_SAMPLE_DROPPED_BAD_OBSERVATION;
 			}
 
 			break;
@@ -2696,13 +2727,13 @@ SensorFusion::processCameraSampleLocked(const constellation::CameraSample &sampl
 
 	if (device_state == nullptr) {
 		assert(!"Unreachable."); // We should only be given samples with poses?
-		return;
+		return CONSTELLATION_FUSION_SAMPLE_DROPPED_BAD_OBSERVATION;
 	}
 
 	DeviceObservation observation;
 	if (!constructObservation(this, sample, *device_state, observation)) {
 		// Something's gone wrong.
-		return;
+		return CONSTELLATION_FUSION_SAMPLE_DROPPED_BAD_OBSERVATION;
 	}
 
 	/*
@@ -2734,12 +2765,14 @@ SensorFusion::processCameraSampleLocked(const constellation::CameraSample &sampl
 			         sample.mosaic_index, sample.camera_index, sample.timestamp_ns,
 			         this->num_late_samples_dropped);
 
-			return;
+			return CONSTELLATION_FUSION_SAMPLE_DROPPED_KEYFRAME_SEALED;
 		}
 
 		keyframe = &candidate;
 		break;
 	}
+
+	auto result = CONSTELLATION_FUSION_SAMPLE_EXISTING_KEYFRAME;
 
 	// Device was found, but this is a new keyframe
 	if (keyframe == nullptr) {
@@ -2758,7 +2791,7 @@ SensorFusion::processCameraSampleLocked(const constellation::CameraSample &sampl
 			         sample.mosaic_index, sample.camera_index, sample.timestamp_ns,
 			         this->num_late_samples_dropped);
 
-			return;
+			return CONSTELLATION_FUSION_SAMPLE_DROPPED_TOO_OLD;
 		}
 
 		// If the gap is too wide, just reset fusion.
@@ -2769,10 +2802,131 @@ SensorFusion::processCameraSampleLocked(const constellation::CameraSample &sampl
 		}
 
 		keyframe = &this->pushKeyframeLocked(sample);
+		result = CONSTELLATION_FUSION_SAMPLE_NEW_KEYFRAME;
 	}
 
 	// Write the sample of the found device
 	this->writeSampleToKeyframe(*keyframe, observation, sample.camera_index);
+
+	if (out_keyframe != nullptr) {
+		*out_keyframe = keyframe;
+	}
+
+	return result;
+}
+
+void
+SensorFusion::processCameraSampleTracedLocked(const constellation::CameraSample &sample, uint32_t batch_size)
+{
+	const timepoint_ns start_ns = os_monotonic_get_ns();
+
+	Keyframe *keyframe = nullptr;
+	const auto result = this->processCameraSampleLocked(sample, &keyframe);
+
+	const time_duration_ns process_time_ns = os_monotonic_get_ns() - start_ns;
+
+	if (!sample.trace_log) {
+		return;
+	}
+
+	t_constellation_tracker_trace_log_sensor_fusion_entry entry{
+	    .device_id = this->device.id,
+	    .start_latency_ns = start_ns - sample.timestamp_ns,
+	    .pipeline_latency_ns = -1,
+	    .sample_result = result,
+	    .process_time_ns = process_time_ns,
+	    .solve_result = CONSTELLATION_FUSION_SOLVE_NOT_RUN,
+	    .solve_time_ns = 0,
+	    .batch_size = batch_size,
+	    .num_solves_waited = 0,
+	};
+
+	// Dropped, no solve will ever cover it.
+	if (keyframe == nullptr) {
+		pushFusionTraceEntry(sample.trace_log.get(), entry);
+		return;
+	}
+
+	// Can't happen, a keyframe holds at most one observation per camera.
+	if (keyframe->num_pending_traces >= keyframe->pending_traces.size()) {
+		entry.solve_result = CONSTELLATION_FUSION_SOLVE_NEVER_COVERED;
+		pushFusionTraceEntry(sample.trace_log.get(), entry);
+		return;
+	}
+
+	keyframe->pending_traces[keyframe->num_pending_traces++] = PendingFusionTrace{
+	    .trace_log = sample.trace_log,
+	    .frame_timestamp_ns = sample.timestamp_ns,
+	    .start_latency_ns = entry.start_latency_ns,
+	    .sample_result = result,
+	    .process_time_ns = process_time_ns,
+	    .batch_size = batch_size,
+	    .num_solves_waited = 0,
+	};
+}
+
+void
+SensorFusion::traceDroppedSample(const constellation::CameraSample &sample,
+                                 t_constellation_tracker_trace_log_fusion_sample_result result)
+{
+	if (!sample.trace_log) {
+		return;
+	}
+
+	pushFusionTraceEntry(sample.trace_log.get(), {
+	                                                 .device_id = this->device.id,
+	                                                 .start_latency_ns = os_monotonic_get_ns() - sample.timestamp_ns,
+	                                                 .pipeline_latency_ns = -1,
+	                                                 .sample_result = result,
+	                                                 .process_time_ns = 0,
+	                                                 .solve_result = CONSTELLATION_FUSION_SOLVE_NOT_RUN,
+	                                                 .solve_time_ns = 0,
+	                                                 .batch_size = 0,
+	                                                 .num_solves_waited = 0,
+	                                             });
+}
+
+void
+SensorFusion::flushKeyframeTracesLocked(Keyframe &keyframe,
+                                        t_constellation_tracker_trace_log_fusion_solve_result solve_result,
+                                        timepoint_ns now_ns,
+                                        time_duration_ns solve_time_ns)
+{
+	for (uint32_t i = 0; i < keyframe.num_pending_traces; i++) {
+		PendingFusionTrace &pending = keyframe.pending_traces[i];
+
+		const bool covered = solve_result == CONSTELLATION_FUSION_SOLVE_SUCCEEDED;
+		const bool solved = covered || solve_result == CONSTELLATION_FUSION_SOLVE_FAILED;
+
+		pushFusionTraceEntry(pending.trace_log.get(), {
+		                                                  .device_id = this->device.id,
+		                                                  .start_latency_ns = pending.start_latency_ns,
+		                                                  .pipeline_latency_ns =
+		                                                      covered ? now_ns - pending.frame_timestamp_ns : -1,
+		                                                  .sample_result = pending.sample_result,
+		                                                  .process_time_ns = pending.process_time_ns,
+		                                                  .solve_result = solve_result,
+		                                                  .solve_time_ns = solved ? solve_time_ns : 0,
+		                                                  .batch_size = pending.batch_size,
+		                                                  .num_solves_waited = pending.num_solves_waited,
+		                                              });
+
+		// Keep the slot empty, so a reused keyframe holds no stale references.
+		pending = PendingFusionTrace{};
+	}
+
+	keyframe.num_pending_traces = 0;
+}
+
+void
+SensorFusion::flushAllKeyframeTracesLocked(t_constellation_tracker_trace_log_fusion_solve_result solve_result,
+                                           time_duration_ns solve_time_ns)
+{
+	const timepoint_ns now_ns = os_monotonic_get_ns();
+
+	for (uint32_t age = 0; age < this->num_keyframes; age++) {
+		this->flushKeyframeTracesLocked(this->keyframeLocked(age), solve_result, now_ns, solve_time_ns);
+	}
 }
 
 void
@@ -2895,6 +3049,9 @@ SensorFusion::getKeyframeTrackedPose(timepoint_ns requested_time_ns, xrt_space_r
 void
 SensorFusion::resetLocked()
 {
+	// The window is being dropped, so anything still waiting on a solve never got one.
+	this->flushAllKeyframeTracesLocked(CONSTELLATION_FUSION_SOLVE_NEVER_COVERED, 0);
+
 	// Reset the active sensor fusion problem
 	this->problem->resetLocked();
 
@@ -3104,6 +3261,8 @@ SensorFusion::tickLocked(bool have_new_input)
 		return;
 	}
 
+	const timepoint_ns tick_start_ns = os_monotonic_get_ns();
+
 	/*
 	 * Set by anything that wants to be run again, so that a preintegration left unfinished is retried rather than
 	 * silently forgotten until the next camera sample happens along.
@@ -3182,11 +3341,15 @@ SensorFusion::tickLocked(bool have_new_input)
 	// Check for invalid solve.
 	if (!summary.IsSolutionUsable()) {
 		SF_ERROR(this, "Fusion solve is not usable. Reason: %s", summary.message.c_str());
+		this->flushAllKeyframeTracesLocked(CONSTELLATION_FUSION_SOLVE_FAILED,
+		                                   os_monotonic_get_ns() - tick_start_ns);
 		this->resetLocked();
 		return;
 	}
 
 	if (!this->problem->fillSnapshotLocked(this)) {
+		this->flushAllKeyframeTracesLocked(CONSTELLATION_FUSION_SOLVE_FAILED,
+		                                   os_monotonic_get_ns() - tick_start_ns);
 		this->resetLocked();
 		return;
 	}
@@ -3294,6 +3457,24 @@ SensorFusion::tickLocked(bool have_new_input)
 		SF_DEBUG(this, "Got new solved pose for device %d at %" PRIi64, this->device.id, keyframe.timestamp_ns);
 
 		break;
+	}
+
+	/*
+	 * The relation histories read by getTrackedPose now hold the poses of every keyframe the solve covered, so the
+	 * samples waiting on those are done.
+	 */
+	const timepoint_ns poses_available_ns = os_monotonic_get_ns();
+	for (uint32_t age = 0; age < this->num_keyframes; age++) {
+		Keyframe &keyframe = this->keyframeLocked(age);
+
+		if (snapshot.device.keyframe_mask & (1u << age)) {
+			this->flushKeyframeTracesLocked(keyframe, CONSTELLATION_FUSION_SOLVE_SUCCEEDED, poses_available_ns,
+			                                poses_available_ns - tick_start_ns);
+		} else {
+			for (uint32_t i = 0; i < keyframe.num_pending_traces; i++) {
+				keyframe.pending_traces[i].num_solves_waited += 1;
+			}
+		}
 	}
 
 	SF_DEBUG(this, "Solved system in %zu iterations, %.3f -> %.3f sigma RMS over %d residuals (%s). Report: %s",
