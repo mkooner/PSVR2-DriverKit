@@ -18,6 +18,11 @@ add_library(
 	t_constellation_tracker_dataset.cpp
 	t_constellation_tracker_dataset.hpp
 	t_constellation_tracker_internal.hpp
+	trace_log/t_constellation_tracker_trace_log.c
+	trace_log/t_constellation_tracker_trace_log.h
+	trace_log/t_constellation_tracker_trace_log.hpp
+	trace_log/t_constellation_tracker_trace_sink_csv.c
+	trace_log/t_constellation_tracker_trace_sink_csv.h
 	t_constellation_tracker.cpp
 	t_constellation_tracker.h
 	t_led_sync_refinement.h

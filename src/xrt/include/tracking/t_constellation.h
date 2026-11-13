@@ -16,6 +16,9 @@
 extern "C" {
 #endif
 
+struct xrt_frame;
+struct t_constellation_tracker_trace_log;
+
 typedef int8_t t_constellation_device_id_t;
 typedef int8_t t_constellation_led_id_it;
 
@@ -98,11 +101,11 @@ struct t_blob
 	float greysum;
 };
 
-struct xrt_frame;
-
 struct t_blob_observation
 {
 	struct t_blobwatch *source;
+
+	struct t_constellation_tracker_trace_log *trace_log;
 
 	/*!
 	 * Internal ID for this observation, may be set by the blobwatch implementation if it needs
