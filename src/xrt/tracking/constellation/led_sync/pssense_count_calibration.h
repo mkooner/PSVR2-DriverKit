@@ -42,6 +42,8 @@
 //! Hold: how often to probe both window edges, and sooner when the controller isn't seen.
 #define COUNT_HOLD_PROBE_NS (U_TIME_1S_IN_NS * 3)
 #define COUNT_HOLD_PROBE_UNSEEN_NS (U_TIME_1S_IN_NS * 1)
+//! Longest probe interval once the blink stays centred.
+#define COUNT_HOLD_PROBE_MAX_NS (U_TIME_1S_IN_NS * 30)
 //! Hold: how far inside each window edge the probes go, and the correction step.
 #define COUNT_HOLD_PROBE_MARGIN_NS (U_TIME_1US_IN_NS * 100)
 #define COUNT_HOLD_STEP_NS (U_TIME_1US_IN_NS * 100)
@@ -300,6 +302,8 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	cc->hold_corrections_sum_ns = 0;
 	cc->hold_trim_integral_ns = 0;
 	cc->hold_unseen_probes = 0;
+	cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
+	cc->hold_centred_streak = 0;
 	count_calib_set_offset(refinement, centre_ns);
 	refinement->frames_since_last_visually_seen = 0;
 	set_phase_locked(refinement, T_LED_SYNC_PHASE_COUNT_HOLD);
@@ -573,7 +577,7 @@ handle_count_hold(struct t_led_sync_refinement *refinement)
 	if (cc->hold_sub == 0) {
 		bool unseen = refinement->frames_since_last_visually_seen > 60;
 		time_duration_ns since_probe_ns = now_ns - cc->hold_last_probe_ns;
-		if (since_probe_ns >= COUNT_HOLD_PROBE_NS || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS)) {
+		if (since_probe_ns >= cc->hold_interval_ns || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS)) {
 			if (!count_calib_take_token(refinement)) {
 				// The other controller is calibrating or probing, ask it to yield between steps.
 				atomic_store(&count_probe_wanted, refinement);
@@ -664,13 +668,30 @@ handle_count_hold(struct t_led_sync_refinement *refinement)
 	} else {
 		cc->hold_unseen_probes++;
 	}
+
+	/*
+	 * Each probe dims and briefly turns off this controller's LEDs, and on hardware (01:28 run) 12 of the 22
+	 * outages over 0.3s had a probe in them: the tracker needs 0.4-1.2s to find the controller again. While the
+	 * probes keep finding the blink centred, double the interval up to 30s; any correction or loss goes back to 3s.
+	 * Simulated with the measured numbers (analysis/hold_sim.py): 19.8 -> 3.8-6.2 probes/min, never lost at +-47ppm
+	 * drift or after a sudden 300/600us shift, max error 255-457us against the 1280us loss point.
+	 */
+	if (in_view && e == 0) {
+		if (++cc->hold_centred_streak >= 3) {
+			cc->hold_interval_ns = MIN(cc->hold_interval_ns * 2, COUNT_HOLD_PROBE_MAX_NS);
+		}
+	} else {
+		cc->hold_centred_streak = 0;
+		cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
+	}
 	cc->hold_in_view = in_view;
 
 	LOG_DEBUG(refinement,
 	          "Count hold probe: centre %+.1f left %+.1f right %+.1f blobs over %.1f off -> %s, centre %" PRId64
-	          "us, cycle trim %+.1fppm, %u corrections in %.0fs",
+	          "us, cycle trim %+.1fppm, %u corrections in %.0fs, next in %.0fs",
 	          c, l, r, off, verdict, (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), cc->skew * 1e6,
-	          cc->hold_corrections, (double)t_ns / U_TIME_1S_IN_NS);
+	          cc->hold_corrections, (double)t_ns / U_TIME_1S_IN_NS,
+	          (double)cc->hold_interval_ns / U_TIME_1S_IN_NS);
 
 	count_calib_release_token(refinement);
 	cc->hold_last_probe_ns = now_ns;

@@ -378,6 +378,9 @@ struct t_led_sync_refinement
 		timepoint_ns hold_start_ns, hold_trim_last_ns;
 		double hold_corrections_sum_ns, hold_trim_integral_ns;
 		uint32_t hold_unseen_probes;
+		//! Adaptive probe interval: lengthened while the probes keep finding the blink centred.
+		time_duration_ns hold_interval_ns;
+		uint32_t hold_centred_streak;
 		//! The last probe saw the controller, drift is only applied then.
 		bool hold_in_view;
 		timepoint_ns hold_last_probe_ns, hold_last_apply_ns;
