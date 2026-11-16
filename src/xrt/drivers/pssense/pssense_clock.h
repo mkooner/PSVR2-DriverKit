@@ -34,8 +34,11 @@
 //! An offset this far below the estimate means the controller clock jumped (reports can't arrive early).
 #define PSSENSE_CLOCK_RESET_BELOW_NS (U_TIME_1MS_IN_NS * 20)
 #define PSSENSE_CLOCK_RESET_COUNT 20
-//! Output slew per report (~133Hz, so ~130us/s): real skew measured 7-14ppm (14us/s) on an uncongested link.
-#define PSSENSE_CLOCK_SLEW_NS (U_TIME_1US_IN_NS * 1)
+/*!
+ * Output slew per report (~133Hz, so ~650us/s). 1us (~130us/s) was too slow on hardware: one controller's offset
+ * moved ~330us/s and the output chased it at the limit, so the LEDs drifted out of the window mid calibration.
+ */
+#define PSSENSE_CLOCK_SLEW_NS (U_TIME_1US_IN_NS * 5)
 //! Reports before the estimate is used.
 #define PSSENSE_CLOCK_MIN_SAMPLES 20
 
