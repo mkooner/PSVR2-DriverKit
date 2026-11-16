@@ -663,6 +663,16 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	// Is this the right pose? (camera 0's pose from the headset SLAM; to verify on hardware)
 	psvr2_constellation_tracking_source_push(hmd->constellation_origin_source, &cam0_relation, vts_ns);
 
+	if (hmd->record_file != NULL) {
+		// Raw camera 0 fields next to the head pose, to work out which frame they are in (offline).
+		os_mutex_lock(&hmd->data_lock);
+		fprintf(hmd->record_file, "C,%" PRId64 ",%.6f,%.6f,%.6f,%.7f,%.7f,%.7f,%.7f\n", (int64_t)vts_ns,
+		        cam0_relation.pose.position.x, cam0_relation.pose.position.y, cam0_relation.pose.position.z,
+		        cam0_relation.pose.orientation.x, cam0_relation.pose.orientation.y,
+		        cam0_relation.pose.orientation.z, cam0_relation.pose.orientation.w);
+		os_mutex_unlock(&hmd->data_lock);
+	}
+
 	m_relation_history_push_with_motion_estimation(hmd->slam_relation_history, &relation, pose_sample.timestamp_ns);
 }
 
