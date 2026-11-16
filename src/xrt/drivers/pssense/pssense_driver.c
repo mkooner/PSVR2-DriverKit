@@ -95,6 +95,11 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR
  */
 #define PSSENSE_KEEPALIVE_NS (U_TIME_1MS_IN_NS * 100)
 
+//! Display smoothing around optical loss/return, see pssense_tracking::last_tracked_vel.
+#define PSSENSE_SMOOTH_COAST_TAU_S 0.08f
+#define PSSENSE_SMOOTH_BLEND_TAU_S 0.12f
+#define PSSENSE_SMOOTH_MAX_SPEED_M_S 2.0f
+
 /*
  * Bluetooth output report rate cap, per controller, when no PCM haptics are playing. Each report is a full PS5 format
  * report, and sending them as fast as the loop runs (~94Hz, e.g. while an LED sync sample waits to be marked as
@@ -326,6 +331,20 @@ struct pssense_device
 		uint32_t fusion_overrides;
 		//! Held position (tracker space) while the prediction is stale, and whether we're holding.
 		bool holding_position;
+
+		/*!
+		 * Smoothing around optical loss and return (display only): on loss the position keeps moving on the last
+		 * tracked velocity, decaying, instead of freezing; on return the shown position slides to the tracked one
+		 * instead of jumping.
+		 */
+		struct xrt_vec3 last_tracked_vel;
+		struct xrt_vec3 last_shown_pos;
+		bool have_last_shown;
+		timepoint_ns hold_start_ns;
+		struct xrt_vec3 hold_base_pos;
+		bool blend_active;
+		struct xrt_vec3 blend_offset;
+		timepoint_ns blend_start_ns;
 		uint32_t holds_started;
 		struct t_constellation_tracker *constellation_tracker;
 		t_constellation_device_id_t constellation_device_id;
@@ -1422,23 +1441,67 @@ pssense_get_constellation_pose(struct pssense_device *pssense,
 			// Recent optical fix: the (fused or optical) pose is trustworthy, remember where it was.
 			pssense->tracking.have_last_optical_position = true;
 			pssense->tracking.last_optical_position = out_relation->pose.position;
+			if ((out_relation->relation_flags & XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT) != 0 &&
+			    m_vec3_len(out_relation->linear_velocity) < PSSENSE_SMOOTH_MAX_SPEED_M_S) {
+				pssense->tracking.last_tracked_vel = out_relation->linear_velocity;
+			} else {
+				pssense->tracking.last_tracked_vel = (struct xrt_vec3)XRT_VEC3_ZERO;
+			}
 			if (pssense->tracking.holding_position) {
 				pssense->tracking.holding_position = false;
 				PSSENSE_DEBUG(pssense, "Optical fix again, releasing held position");
+				/*
+				 * Slide from where the controller was shown to the tracked position instead of jumping: on
+				 * hardware the catch-up on return was a median 5.7-7.2cm, p90 ~26cm, max 60cm, in one frame
+				 * (01:45/01:47 runs); with a 120ms time constant a 26cm catch-up starts at 2.3cm per 90Hz frame.
+				 */
+				if (pssense->tracking.have_last_shown && PSSENSE_SMOOTH_BLEND_TAU_S > 0.0f) {
+					pssense->tracking.blend_offset =
+					    m_vec3_sub(pssense->tracking.last_shown_pos, out_relation->pose.position);
+					pssense->tracking.blend_start_ns = at_timestamp_ns;
+					pssense->tracking.blend_active = true;
+				}
 			}
+			if (pssense->tracking.blend_active) {
+				double t = time_ns_to_s(at_timestamp_ns - pssense->tracking.blend_start_ns);
+				float k = t > 0.0 ? (float)exp(-t / PSSENSE_SMOOTH_BLEND_TAU_S) : 1.0f;
+				struct xrt_vec3 off = m_vec3_mul_scalar(pssense->tracking.blend_offset, k);
+				if (m_vec3_len(off) < 0.001f) {
+					pssense->tracking.blend_active = false;
+				} else {
+					out_relation->pose.position = m_vec3_add(out_relation->pose.position, off);
+				}
+			}
+			pssense->tracking.last_shown_pos = out_relation->pose.position;
+			pssense->tracking.have_last_shown = true;
 			return;
 		}
 
 		// Stale: keep the tracker's orientation, hold position where it was last backed by an optical fix.
 		if (!pssense->tracking.holding_position) {
 			pssense->tracking.holding_position = true;
+			pssense->tracking.hold_start_ns = at_timestamp_ns;
+			pssense->tracking.hold_base_pos = pssense->tracking.have_last_shown
+			                                      ? pssense->tracking.last_shown_pos
+			                                      : pssense->tracking.last_optical_position;
+			pssense->tracking.blend_active = false;
 			pssense->tracking.holds_started++;
 			PSSENSE_DEBUG(pssense, "No optical fix for %" PRId64 "ms, holding position (hold #%u)",
 			              (int64_t)((at_timestamp_ns - pssense->tracking.last_optical_fix_ns) / U_TIME_1MS_IN_NS),
 			              pssense->tracking.holds_started);
 		}
 		if (pssense->tracking.have_last_optical_position) {
-			out_relation->pose.position = pssense->tracking.last_optical_position;
+			/*
+			 * Keep moving on the last tracked velocity, decaying with an 80ms time constant (at most 16cm at the
+			 * 2m/s cap), instead of freezing: 18-42% of holds on hardware were under 150ms.
+			 */
+			double t = time_ns_to_s(at_timestamp_ns - pssense->tracking.hold_start_ns);
+			float travel = t > 0.0 ? (float)(PSSENSE_SMOOTH_COAST_TAU_S * (1.0 - exp(-t / PSSENSE_SMOOTH_COAST_TAU_S)))
+			                       : 0.0f;
+			out_relation->pose.position = m_vec3_add(
+			    pssense->tracking.hold_base_pos, m_vec3_mul_scalar(pssense->tracking.last_tracked_vel, travel));
+			pssense->tracking.last_shown_pos = out_relation->pose.position;
+			pssense->tracking.have_last_shown = true;
 		}
 		/*
 		 * Without fresh fixes the tracker keeps predicting its fused state, orientation included, and a diverged
