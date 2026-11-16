@@ -55,6 +55,14 @@ DEBUG_GET_ONCE_BOOL_OPTION(emulate_index_controller, "STEAMVR_EMULATE_INDEX_CONT
 
 DEBUG_GET_ONCE_NUM_OPTION(scale_percentage, "XRT_COMPOSITOR_SCALE_PERCENTAGE", 140)
 
+/*!
+ * Play area handed to SteamVR for our tracking universe (side length in meters, 0 disables).
+ *
+ * Inside-out headsets like the PS VR2 have no base stations, and without a chaperone for the driver's universe
+ * SteamVR sends the user through base station room setup, which can't complete. Providing one skips that.
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_play_area_size, "OVRD_PLAY_AREA_SIZE", 2.0f)
+
 #define MODELNUM_LEN (XRT_DEVICE_NAME_LEN + 9) // "[Monado] "
 
 #define OPENVR_BONE_COUNT 31
@@ -922,6 +930,8 @@ public:
 			grip_name = XRT_INPUT_TOUCH_GRIP_POSE;
 		} else if (m_xdev->name == XRT_DEVICE_SIMPLE_CONTROLLER) {
 			grip_name = XRT_INPUT_SIMPLE_GRIP_POSE;
+		} else if (m_xdev->name == XRT_DEVICE_PSSENSE) {
+			grip_name = XRT_INPUT_PSSENSE_GRIP_POSE;
 		} else {
 			ovrd_log("Unhandled device name %u\n", m_xdev->name);
 			grip_name = XRT_INPUT_GENERIC_HEAD_POSE; // ???
@@ -1270,6 +1280,37 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 
 	// return a constant that's not 0 (invalid) or 1 (reserved for Oculus)
 	vr::VRProperties()->SetUint64Property( m_ulPropertyContainer, vr::Prop_CurrentUniverseId_Uint64, 2);
+	// clang-format on
+
+	// Our poses are already floor-relative (the tracking origin's offset is applied), so the standing origin is
+	// the raw tracking origin. Seated apps reset their own zero pose.
+	float play_area = debug_get_float_option_ovrd_play_area_size();
+	if (play_area > 0.0f) {
+		float h = play_area / 2.0f;
+		char chaperone[2048];
+		snprintf(chaperone, sizeof(chaperone),
+		         "{\"jsonid\":\"chaperone_info\",\"version\":5,\"universes\":[{\"universeID\":\"2\","
+		         "\"play_area\":[%.3f,%.3f],"
+		         "\"collision_bounds\":["
+		         "[[-%.3f,0,-%.3f],[-%.3f,2.43,-%.3f],[-%.3f,2.43,%.3f],[-%.3f,0,%.3f]],"
+		         "[[-%.3f,0,%.3f],[-%.3f,2.43,%.3f],[%.3f,2.43,%.3f],[%.3f,0,%.3f]],"
+		         "[[%.3f,0,%.3f],[%.3f,2.43,%.3f],[%.3f,2.43,-%.3f],[%.3f,0,-%.3f]],"
+		         "[[%.3f,0,-%.3f],[%.3f,2.43,-%.3f],[-%.3f,2.43,-%.3f],[-%.3f,0,-%.3f]]],"
+		         "\"seated\":{\"translation\":[0,0,0],\"yaw\":0},"
+		         "\"standing\":{\"translation\":[0,0,0],\"yaw\":0}}]}",
+		         play_area, play_area,                    //
+		         h, h, h, h, h, h, h, h,                  //
+		         h, h, h, h, h, h, h, h,                  //
+		         h, h, h, h, h, h, h, h,                  //
+		         h, h, h, h, h, h, h, h);                 //
+		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_DriverProvidedChaperoneJson_String,
+		                                      chaperone);
+		vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer,
+		                                    vr::Prop_DriverProvidedChaperoneVisibility_Bool, true);
+		ovrd_log("Providing a %.1fm x %.1fm play area for universe 2, skipping room setup\n", play_area,
+		         play_area);
+	}
+	// clang-format off
 
 	// avoid "not fullscreen" warnings from vrmonitor
 	//vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer, vr::Prop_IsOnDesktop_Bool, false);

@@ -217,6 +217,10 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 	}
 
 	t_constellation_tracker_create(&hmd->xfctx, &constellation_tracker_params, &hmd->led_tracker);
+
+	// Controller poses are in the headset's SLAM space, so give them the same floor offset as the head.
+	t_constellation_tracker_get_tracking_origin(hmd->led_tracker)->initial_offset =
+	    hmd->base.tracking_origin->initial_offset;
 	// Write blob sinks into the blobwatch
 	for (size_t i = 0; i < mosaic->num_cameras; i++) {
 		hmd->blob_sinks[i] = mosaic->cameras[i].blob_sink;

@@ -80,6 +80,11 @@ DEBUG_GET_ONCE_LOG_OPTION(psvr2_log, "PSVR2_LOG", U_LOGGING_WARN)
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_pose_filter, "PSVR2_POSE_FILTER", true)
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_orient_tau, "PSVR2_POSE_ORIENT_TAU", 0.15f)
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_pos_tau, "PSVR2_POSE_POS_TAU", 0.03f)
+/*
+ * The headset's SLAM origin is where the head was at startup, not the floor. Raise the tracking origin by this much
+ * so poses are floor-relative: about your standing head height, or seated head height if you start seated.
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_floor_height, "PSVR2_FLOOR_HEIGHT", 1.6f)
 // Path to record raw IMU and SLAM samples to (CSV), for replaying through the pose simulator.
 DEBUG_GET_ONCE_OPTION(psvr2_record_file, "PSVR2_RECORD_FILE", NULL)
 
@@ -1519,6 +1524,7 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	snprintf(hmd->base.tracking_origin->name, XRT_TRACKING_NAME_LEN, "PS VR2 Tracking");
 	hmd->base.tracking_origin->type = XRT_TRACKING_TYPE_EXTERNAL_SLAM;
 	hmd->base.tracking_origin->initial_offset = (struct xrt_pose)XRT_POSE_IDENTITY;
+	hmd->base.tracking_origin->initial_offset.position.y = debug_get_float_option_psvr2_floor_height();
 
 	if (os_mutex_init(&hmd->data_lock) != 0) {
 		PSVR2_ERROR(hmd, "Failed to init data mutex!");
