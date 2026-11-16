@@ -8,6 +8,7 @@
  * @ingroup xrt_iface
  */
 
+#include "psvr2/psvr2.h"
 #include "xrt/xrt_config_drivers.h"
 #include "xrt/xrt_prober.h"
 #include "xrt/xrt_system.h"
@@ -36,6 +37,14 @@ struct psvr2_builder
 {
 	struct t_builder base;
 
+#ifdef XRT_BUILD_DRIVER_PSSENSE
+	struct xrt_device *pssense_left;
+	struct xrt_device *pssense_right;
+
+	struct t_timing_event_source *timing_event_source;
+
+	struct t_constellation_tracker *constellation_tracker;
+#endif
 	enum u_logging_level log_level;
 };
 
@@ -53,6 +62,8 @@ psvr2_builder(struct xrt_builder *xb)
 
 DEBUG_GET_ONCE_LOG_OPTION(psvr2_log, "PSVR2_LOG", U_LOGGING_WARN)
 
+#undef PSVR2_ERROR
+#undef PSVR2_DEBUG
 #define PSVR2_ERROR(p, ...) U_LOG_IFL_E(p->log_level, __VA_ARGS__)
 #define PSVR2_DEBUG(p, ...) U_LOG_IFL_D(p->log_level, __VA_ARGS__)
 
@@ -124,6 +135,7 @@ psvr2_open_system_impl(struct xrt_builder *xb,
                        struct xrt_frame_context *xfctx,
                        struct t_builder_options *tbo)
 {
+	struct psvr2_builder *pb = psvr2_builder(xb);
 	struct xrt_prober_device **xpdevs = NULL;
 	size_t xpdev_count = 0;
 	xrt_result_t xret = XRT_SUCCESS;
@@ -144,7 +156,7 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 			PSVR2_ERROR(psvr2_builder(xb), "PSVR2 HMD device creation failed");
 			goto unlock_and_fail;
 		}
-
+		pb->timing_event_source = psvr2_hmd_get_timing_event_source((struct psvr2_hmd *)head_xdev);
 		xsysd->static_xdevs[xsysd->static_xdev_count++] = head_xdev;
 	}
 
@@ -153,15 +165,19 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 	tbo->face = head_xdev;
 
 #ifdef XRT_BUILD_DRIVER_PSSENSE
+
 	struct xrt_device *left_xdev = NULL;
 	struct xrt_prober_device *left_xpdev =
 	    u_builder_find_prober_device(xpdevs, xpdev_count, PSSENSE_VID, PSSENSE_PID_LEFT, XRT_BUS_TYPE_ANY);
 	if (left_xpdev != NULL) {
-		left_xdev = pssense_create(xp, left_xpdev, xfctx, NULL);
+		struct t_timing_event_sink *timing_sink;
+		left_xdev = pssense_create(xp, left_xpdev, xfctx, &timing_sink);
 		if (left_xdev == NULL) {
 			PSVR2_ERROR(psvr2_builder(xb), "PS Sense left controller device creation failed");
 		} else {
 			xsysd->static_xdevs[xsysd->static_xdev_count++] = left_xdev;
+			t_timing_event_source_add_sink(pb->timing_event_source, timing_sink);
+			// pssense_add_to_constellation_tracker(left_xdev, pb->constellation_tracker);
 		}
 	}
 
@@ -169,16 +185,21 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 	struct xrt_prober_device *right_xpdev =
 	    u_builder_find_prober_device(xpdevs, xpdev_count, PSSENSE_VID, PSSENSE_PID_RIGHT, XRT_BUS_TYPE_ANY);
 	if (right_xpdev != NULL) {
-		right_xdev = pssense_create(xp, right_xpdev, xfctx, NULL);
+		struct t_timing_event_sink *timing_sink;
+		right_xdev = pssense_create(xp, right_xpdev, xfctx, &timing_sink);
 		if (right_xdev == NULL) {
 			PSVR2_ERROR(psvr2_builder(xb), "PS Sense right controller device creation failed");
 		} else {
 			xsysd->static_xdevs[xsysd->static_xdev_count++] = right_xdev;
+			t_timing_event_source_add_sink(pb->timing_event_source, timing_sink);
+			// pssense_add_to_constellation_tracker(right_xdev, pb->constellation_tracker);
 		}
 	}
 
 	tbo->left = left_xdev;
 	tbo->right = right_xdev;
+	((struct psvr2_hmd *)head_xdev)->pssense_left = left_xdev;
+	((struct psvr2_hmd *)head_xdev)->pssense_right = right_xdev;
 #endif
 
 	xret = xrt_prober_unlock_list(xp, &xpdevs);

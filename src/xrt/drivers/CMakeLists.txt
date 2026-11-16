@@ -249,14 +249,21 @@ if(XRT_BUILD_DRIVER_PSVR2)
 		psvr2/psvr2_protocol.h
 		psvr2/psvr2_distortion.c
 		psvr2/psvr2_eye.c
+		psvr2/psvr2_blobwatch.c
+		psvr2/psvr2_blobwatch.h
+		psvr2/psvr2_constellation_tracking.h
+		psvr2/psvr2_constellation_tracking.c
 		)
 	target_link_libraries(
 		drv_psvr2
 		PRIVATE
 			xrt-interfaces
 			aux_os
+			constellation
 			aux_util
+			tracking-includes
 			aux_tracking
+			base
 			${LIBUSB1_LIBRARIES}
 		)
 	target_include_directories(drv_psvr2 PRIVATE ${LIBUSB1_INCLUDE_DIRS})

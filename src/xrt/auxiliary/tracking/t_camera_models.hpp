@@ -493,6 +493,139 @@ cv1_undistort(const t_camera_model_params &dist, const T &x, const T &y, T &out_
 	out_y = qy + dy;
 }
 
+/*
+ * Functions for @ref T_DISTORTION_PSVR2 (un)projections
+ */
+
+//! Maximum Newton iterations when inverting the PSVR2 distortion.
+static constexpr int kPsvr2UndistortMaxIterations = 20;
+//! Step used for the numerical Jacobian when inverting the PSVR2 distortion.
+static constexpr double kPsvr2UndistortJacobianStep = 1e-4;
+//! Convergence target, in normalized image units, when inverting the PSVR2 distortion.
+static constexpr double kPsvr2UndistortTarget = 1e-6;
+
+/*!
+ * Applies the PSVR2 distortion to a pinhole ray tangent (@p x, @p y) = (X/Z, Y/Z), giving normalized
+ * distorted image coordinates (before fx/fy/cx/cy are applied).
+ *
+ * Rational radial term, tangential + thin prism terms, then a sensor tilt rotation R = Rx(p12) * Ry(p13).
+ */
+template <typename T>
+static inline void
+psvr2_distort(const t_camera_model_params &dist, const T &x, const T &y, T &out_x, T &out_y)
+{
+	const double *p = dist.psvr2.params;
+
+	const T x2 = x * x;
+	const T y2 = y * y;
+	const T r2 = x2 + y2;
+	const T two_xy = CAST(2.0) * x * y;
+	const T r8 = r2 * r2 * r2 * r2;
+	const T r10 = r8 * r2;
+
+	const T num = CAST(1.0) + ((CAST(p[4]) * r2 + CAST(p[1])) * r2 + CAST(p[0])) * r2 + CAST(p[16]) * r10 * r2 +
+	              CAST(p[15]) * r10 + CAST(p[14]) * r8;
+	const T den = CAST(1.0) + ((CAST(p[7]) * r2 + CAST(p[6])) * r2 + CAST(p[5])) * r2 + CAST(p[19]) * r10 * r2 +
+	              CAST(p[18]) * r10 + CAST(p[17]) * r8;
+
+	const bool den_ok = den > CAST(1e-9) || den < CAST(-1e-9);
+	const T radial = den_ok ? T(num / den) : CAST(1.0);
+
+	const T dx = (CAST(p[9]) * r2 + CAST(p[8])) * r2 + (x2 + x2 + r2) * CAST(p[3]) + radial * x + two_xy * CAST(p[2]);
+	const T dy = (CAST(p[11]) * r2 + CAST(p[10])) * r2 + two_xy * CAST(p[3]) + (y2 + y2 + r2) * CAST(p[2]) + radial * y;
+
+	// v' = Rx(a) * Ry(b) * (dx, dy, 1)
+	const T ca = CAST(cos(p[12]));
+	const T sa = CAST(sin(p[12]));
+	const T cb = CAST(cos(p[13]));
+	const T sb = CAST(sin(p[13]));
+
+	const T ry_x = cb * dx + sb;
+	const T ry_y = dy;
+	const T ry_z = cb - sb * dx;
+
+	const T vx = ry_x;
+	const T vy = ca * ry_y - sa * ry_z;
+	const T vz = sa * ry_y + ca * ry_z;
+
+	out_x = vx / vz;
+	out_y = vy / vz;
+}
+
+//! Maps a distorted pixel (@p u, @p v) to a pinhole ray tangent (X/Z, Y/Z) using Newton's method.
+template <typename T>
+static inline void
+psvr2_undistort(const t_camera_model_params &dist, const T &u, const T &v, T &out_x, T &out_y)
+{
+	const T target_x = (u - CAST(dist.cx)) / CAST(dist.fx);
+	const T target_y = (v - CAST(dist.cy)) / CAST(dist.fy);
+	const T h = CAST(kPsvr2UndistortJacobianStep);
+
+	// The distortion is close to identity near the centre, so the distorted point is a good first guess.
+	out_x = target_x;
+	out_y = target_y;
+
+	for (int i = 0; i < kPsvr2UndistortMaxIterations; i++) {
+		T res_x, res_y;
+		psvr2_distort(dist, out_x, out_y, res_x, res_y);
+
+		const T err_x = target_x - res_x;
+		const T err_y = target_y - res_y;
+
+		if (err_x * err_x + err_y * err_y < CAST(kPsvr2UndistortTarget * kPsvr2UndistortTarget)) {
+			return;
+		}
+
+		// Forward-difference Jacobian of the distortion.
+		T dx_x, dx_y, dy_x, dy_y;
+		psvr2_distort(dist, T(out_x + h), out_y, dx_x, dx_y);
+		psvr2_distort(dist, out_x, T(out_y + h), dy_x, dy_y);
+
+		const T j00 = (dx_x - res_x) / h;
+		const T j10 = (dx_y - res_y) / h;
+		const T j01 = (dy_x - res_x) / h;
+		const T j11 = (dy_y - res_y) / h;
+		const T det = j00 * j11 - j01 * j10;
+
+		if (det > CAST(-1e-12) && det < CAST(1e-12)) {
+			// Degenerate, fall back to a plain fixed-point step.
+			out_x += err_x;
+			out_y += err_y;
+			continue;
+		}
+
+		out_x += (j11 * err_x - j01 * err_y) / det;
+		out_y += (j00 * err_y - j10 * err_x) / det;
+	}
+}
+
+template <typename T>
+static inline bool
+psvr2_project(const t_camera_model_params &dist, const T &x, const T &y, const T &z, T &out_x, T &out_y)
+{
+	T dx, dy;
+	psvr2_distort(dist, T(x / z), T(y / z), dx, dy);
+	out_x = CAST(dist.fx) * dx + CAST(dist.cx);
+	out_y = CAST(dist.fy) * dy + CAST(dist.cy);
+	return z > CAST(0.0);
+}
+
+template <typename T>
+static inline bool
+psvr2_unproject(const t_camera_model_params &dist, const T &u, const T &v, T &out_x, T &out_y, T &out_z)
+{
+	T xp, yp;
+	// psvr2_undistort already returns normalized ray tangents, don't apply the intrinsics again.
+	psvr2_undistort(dist, u, v, xp, yp);
+
+	const T norm_inv = CAST(1.0) / sqrt(xp * xp + yp * yp + CAST(1.0));
+	out_x = xp * norm_inv;
+	out_y = yp * norm_inv;
+	out_z = norm_inv;
+
+	return true;
+}
+
 // This is a very common name, so make sure to undef it.
 #undef CAST
 
@@ -527,6 +660,9 @@ project(const t_camera_model_params &dist, //
 		// No projection path is present for CV1
 		return false;
 	}; break;
+	case T_DISTORTION_PSVR2: {
+		return psvr2_project(dist, x, y, z, out_x, out_y);
+	}; break;
 	// Return false so we don't get warnings on Release builds.
 	default: assert(false); return false;
 	}
@@ -550,6 +686,9 @@ undistort(const t_camera_model_params &dist, const T &x, const T &y, T &out_x, T
 	}; break;
 	case T_DISTORTION_RIFT_CV1: {
 		cv1_undistort(dist, x, y, out_x, out_y);
+	}; break;
+	case T_DISTORTION_PSVR2: {
+		psvr2_undistort(dist, x, y, out_x, out_y);
 	}; break;
 	// Return false so we don't get warnings on Release builds.
 	default: assert(false);

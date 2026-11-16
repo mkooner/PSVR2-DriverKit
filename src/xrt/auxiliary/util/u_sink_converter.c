@@ -464,6 +464,34 @@ from_BAYER_GR8_to_R8G8B8(struct xrt_frame *dst_frame, uint32_t w, uint32_t h, si
  *
  */
 
+/*!
+ * Creates a frame that the conversion should happen to, allows to set the size.
+ *
+ * @todo Allocate from a pool of frames.
+ */
+bool
+u_sink_create_conversion_frame_with_format_of_size(
+    struct xrt_frame *xf, uint32_t w, uint32_t h, enum xrt_format format, struct xrt_frame **out_frame)
+{
+	struct xrt_frame *frame = NULL;
+	u_frame_create_one_off(format, w, h, &frame);
+	if (frame == NULL) {
+		U_LOG_E("Failed to create target frame!");
+		*out_frame = NULL;
+		return false;
+	}
+
+	frame->timestamp = xf->timestamp;
+	frame->source_timestamp = xf->source_timestamp;
+	frame->source_sequence = xf->source_sequence;
+	frame->source_id = xf->source_id;
+	frame->stereo_format = xf->stereo_format;
+
+	*out_frame = frame;
+
+	return true;
+}
+
 
 /*!
  * Creates a frame that the conversion should happen to, allows to set the size.

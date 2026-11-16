@@ -53,6 +53,18 @@ struct t_camera_calibration_cv1_params_float
 };
 
 /*!
+ * Parameters for @ref T_DISTORTION_PSVR2, the PS VR2 headset tracking camera model.
+ *
+ * Indices: 0,1,4,14,15,16 radial numerator; 5,6,7,17,18,19 radial denominator; 2,3 tangential;
+ * 8..11 thin prism; 12,13 sensor tilt angles about X and Y. Kept as doubles like the source calibration.
+ * @ingroup aux_tracking
+ */
+struct t_camera_calibration_psvr2_params_float
+{
+	double params[20];
+};
+
+/*!
  * Floating point calibration data for a single calibrated camera.
  * @note This is basically @ref t_camera_calibration, just without some compatibility stuff and using single floats
  * instead of doubles.
@@ -65,11 +77,13 @@ struct t_camera_model_params
 		struct t_camera_calibration_kb4_params_float fisheye;
 		struct t_camera_calibration_rt8_params_float rt8;
 		struct t_camera_calibration_cv1_params_float cv1;
+		struct t_camera_calibration_psvr2_params_float psvr2;
 	};
 	// This model gets reinterpreted from values in the main t_camera_calibration struct to either
 	// * T_DISTORTION_FISHEYE_KB4
 	// * T_DISTORTION_OPENCV_RADTAN_8
 	// * T_DISTORTION_RIFT_CV1
+	// * T_DISTORTION_PSVR2
 	enum t_camera_distortion_model model;
 };
 

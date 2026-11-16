@@ -200,7 +200,9 @@ u_sink_force_genlock_create(struct xrt_frame_context *xfctx,
                             struct xrt_frame_sink **out_left_xfs,
                             struct xrt_frame_sink **out_right_xfs);
 
-
+bool
+u_sink_create_conversion_frame_with_format_of_size(
+    struct xrt_frame *xf, uint32_t w, uint32_t h, enum xrt_format format, struct xrt_frame **out_frame);
 /*
  *
  * Debugging sink,

@@ -11,6 +11,8 @@
  * @author Beyley Cardellio <ep1cm1n10n123@gmail.com>
  * @ingroup drv_psvr2
  */
+#include "xrt/xrt_byte_order.h"
+
 #pragma once
 
 
@@ -50,6 +52,8 @@
 #define IMU_FREQ 2000.0f
 #define IMU_PERIOD_NS ((time_duration_ns)(1000000000.0f / IMU_FREQ))
 
+#define PSVR2_PACKED __attribute__((packed, aligned(1)))
+
 enum psvr2_report_id
 {
 	PSVR2_REPORT_ID_SET_PERIPHERAL = 0x8,
@@ -69,6 +73,41 @@ enum psvr2_set_peripheral_subcommand
 {
 	PSVR2_SET_PERIPHERAL_SUBCMD_MOTOR = 0x01,
 };
+
+#define PSVR2_SLAM_INTERFACE 3
+#define PSVR2_SLAM_ENDPOINT 3
+
+#define PSVR2_GAZE_INTERFACE 5
+#define PSVR2_GAZE_ENDPOINT 0x85
+
+#define PSVR2_CAMERA_INTERFACE 6
+#define PSVR2_CAMERA_ENDPOINT 7
+
+#define PSVR2_STATUS_INTERFACE 7
+#define PSVR2_STATUS_ENDPOINT 8
+
+#define PSVR2_LD_INTERFACE 8
+#define PSVR2_LD_ENDPOINT 9
+
+#define PSVR2_RP_INTERFACE 9
+#define PSVR2_RP_ENDPOINT 10
+
+#define PSVR2_VD_INTERFACE 10
+#define PSVR2_VD_ENDPOINT 11
+
+#define USB_SLAM_XFER_SIZE 1024
+#define USB_STATUS_XFER_SIZE 1024
+#define USB_GAZE_XFER_SIZE 32768
+#define USB_CAM_MODE10_XFER_SIZE 1040640
+#define USB_CAM_MODE1_XFER_SIZE 819456
+#define USB_CAM_MODE4_XFER_SIZE 520448
+#define USB_LD_XFER_SIZE 36944
+#define USB_RP_XFER_SIZE 821120
+#define USB_VD_XFER_SIZE 32768
+
+#define USB_CAM_MODE10_WIDTH 1000
+#define USB_CAM_MODE10_PIXEL_STRIDE 1024
+#define USB_CAM_MODE10_HEIGHT 1000
 
 enum psvr2_camera_mode
 {
@@ -109,6 +148,63 @@ enum psvr2_camera_mode
 	PSVR2_CAMERA_MODE_BOTTOM_SBS_BC4 = 0x10,
 };
 
+/*!
+ * Unknown at this time what unit space these coordinates are in.
+ * left/right/top/bottommost seem to be the bounds of the LED blob.
+ */
+
+struct ld_led
+{
+	uint8_t unk[3];
+	uint16_t unk3;
+	// Guess: From inspecting this closely, the maximum value I was ever able to receive for these
+	// is 507, which implies half the reported camera dimension (1016), so I suspect that these are in a pixel/2 UV
+	// space.
+	uint16_t leftmost;
+	uint16_t rightmost;
+	uint16_t topmost;
+	uint16_t bottommost;
+	uint32_t depth_or_size_unk;
+	uint32_t depth_or_size_unk2;
+	uint32_t depth_or_size_unk3;
+	uint32_t depth_or_size_unk4;
+	uint32_t confidence_unk; // i SWEAR i saw this drop to zero *right* as the LED stopped being sent, this seems to
+	                         // be confidence?
+	uint8_t unk2;
+	uint16_t depth_or_size_unk5;
+} PSVR2_PACKED;
+static_assert(sizeof(struct ld_led) == 0x24, "bad size");
+
+struct ld_header
+{
+	uint16_t magic;         // 2
+	uint8_t unk1[6];        // 8
+	uint32_t timestamp;     // timestamp in microseconds
+	uint32_t unk2;          // 16
+	uint32_t unk3;          // 20
+	uint32_t frame_counter; // 24
+	uint8_t unk[40];        // 64
+} PSVR2_PACKED;
+static_assert(sizeof(struct ld_header) == 0x40, "bad size");
+
+#define PSVR2_MAX_LEDS_PER_CAMERA 256
+
+struct ld_camera
+{
+	uint8_t num_leds;
+	uint16_t unk;
+	struct ld_led leds[PSVR2_MAX_LEDS_PER_CAMERA];
+	uint8_t padding;
+} PSVR2_PACKED;
+
+struct ld_payload
+{
+	struct ld_header header;
+	// order is bottom left, bottom right, top left, top right, when facing same direction as HMD
+	struct ld_camera cameras[4];
+} PSVR2_PACKED;
+static_assert(sizeof(struct ld_payload) == 36944, "bad size");
+
 #pragma pack(push, 1)
 
 struct imu_usb_record
@@ -135,14 +231,16 @@ struct status_record_hdr
 
 struct slam_usb_record
 {
-	char SLAhdr[3];    //< "SLA"
-	uint8_t const1;    //< Constant 0x01?
-	__le32 pkt_size;   //< 0x0200 = 512 bytes;
-	__le32 vts_ts_us;  //< Timestamp
-	__le32 unknown1;   //< Unknown. Constant 3?
-	__lef32 pos[3];    //< 32-bit floats
-	__lef32 orient[4]; //< Orientation quaternion
-	uint8_t remainder[468];
+	char SLAhdr[3];        //< "SLA"
+	uint8_t const1;        //< Constant 0x01?
+	__le32 pkt_size;       //< 0x0200 = 512 bytes;
+	__le32 vts_ts_us;      //< Timestamp
+	__le32 unknown1;       //< Unknown. Constant 3?
+	__lef32 pos[3];        //< 32-bit floats
+	__lef32 orient[4];     //< Orientation quaternion
+	__lef32 cam0offset[3]; //< Offset of cam0, relative to the headset pose
+	__lef32 cam0orient[4]; //< orientation of cam0 relative to its own origin
+	uint8_t remainder[440];
 };
 
 struct sie_ctrl_pkt

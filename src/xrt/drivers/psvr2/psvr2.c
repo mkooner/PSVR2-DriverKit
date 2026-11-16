@@ -2,6 +2,7 @@
 // Copyright 2023, Jan Schmidt
 // Copyright 2024, Joel Valenciano
 // Copyright 2025, Beyley Cardellio
+// Copyright 2026, Conner Bondurant
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
@@ -12,12 +13,15 @@
  * @author Rylie Pavlik <rylie.pavlik@collabora.com>
  * @author Joel Valenciano <joelv1907@gmail.com>
  * @author Beyley Cardellio <ep1cm1n10n123@gmail.com>
+ * @author Conner Bondurant <conner.bondurant@triptych.me>
  * @ingroup drv_psvr2
  */
 
+#include "tracking/t_time_sync.h"
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_prober.h"
 #include "xrt/xrt_tracking.h"
+#include "xrt/xrt_defines.h"
 
 #include "os/os_threading.h"
 #include "os/os_time.h"
@@ -30,6 +34,7 @@
 #include "math/m_space.h"
 
 #include "tracking/t_dead_reckoning.h"
+#include "tracking/t_constellation.h"
 
 #include "util/u_misc.h"
 #include "util/u_debug.h"
@@ -43,12 +48,17 @@
 #include "util/u_var.h"
 #include "util/u_debug.h"
 
+#include "b_timing_source.h"
+
 #include <stdio.h>
 #include <assert.h>
 #include <inttypes.h>
 #include <libusb.h>
 
+#include "bcdec.h"
+
 #include "psvr2.h"
+#include "psvr2_constellation_tracking.h"
 
 
 /*
@@ -393,44 +403,47 @@ img_xfer_cb(struct libusb_transfer *xfer)
 		PSVR2_TRACE_HEX(hmd, xfer->buffer, MIN(256, xfer->actual_length));
 
 		if (xfer->actual_length == USB_CAM_MODE10_XFER_SIZE) {
-			for (int d = 0; d < 3; d++) {
-				if (u_sink_debug_is_active(&hmd->debug_sinks[d])) {
-					struct xrt_frame *xf = NULL;
+			struct xrt_frame *frames[2] = {0};
 
-					int w = 254, h = 508, stride = 256, offset, size_pp;
-					if (d == 0) {
-						offset = d;
-						size_pp = 2;
-						u_frame_create_one_off(XRT_FORMAT_L8, stride * 2, h, &xf);
-					} else if (d == 1 || d == 2) {
-						offset = (d == 1) ? 2 : 5;
-						size_pp = 3;
-						u_frame_create_one_off(XRT_FORMAT_R8G8B8, stride, h, &xf);
+			uint8_t *src = xfer->buffer + 256;
+
+			const size_t img_size =
+			    BCDEC_BC4_COMPRESSED_SIZE(USB_CAM_MODE10_PIXEL_STRIDE, USB_CAM_MODE10_HEIGHT);
+
+			int64_t now = os_monotonic_get_ns();
+			for (int i = 0; i < 2; i++) {
+				bool debug_active = u_sink_debug_is_active(&hmd->debug_sinks[i]);
+
+				if (debug_active) {
+					u_frame_create_one_off(XRT_FORMAT_BC4, USB_CAM_MODE10_WIDTH,
+					                       USB_CAM_MODE10_HEIGHT, &frames[i]);
+
+					struct xrt_frame *xf = frames[i];
+
+					// chop off the rightmost pixels, which are corrupt/control data[?]
+					uint8_t *copy_src = src;
+					uint8_t *copy_dst = xf->data;
+					for (uint32_t y = 0; y < USB_CAM_MODE10_HEIGHT; y += 4) {
+						const size_t src_stride =
+						    BCDEC_BC4_BLOCK_SIZE * (USB_CAM_MODE10_PIXEL_STRIDE / 4);
+						const size_t width = BCDEC_BC4_BLOCK_SIZE * (USB_CAM_MODE10_WIDTH / 4);
+						memcpy(copy_dst, copy_src, width);
+
+						copy_src += src_stride;
+						copy_dst += xf->stride;
 					}
 
-					uint8_t *src = xfer->buffer + 256;
-					uint8_t *dest = xf->data;
-					for (int y = 0; y < h; y++) {
-						int x;
+					xf->timestamp = now;
 
-						for (x = 0; x < w; x++) {
-							for (int i = 0; i < size_pp; i++) {
-								*dest++ = src[offset + i];
-							}
-							src += 8;
-						}
-						src += 16; /* Skip 16-bytes at the end of each line */
-						           /* Skip output padding pixels */
-						while (x++ < stride) {
-							for (int i = 0; i < size_pp; i++) {
-								*dest++ = 0;
-							}
-						}
-					}
-					xf->timestamp = os_monotonic_get_ns();
-					u_sink_debug_push_frame(&hmd->debug_sinks[d], xf);
+
+					u_sink_debug_push_frame(&hmd->debug_sinks[i], xf);
+
+
 					xrt_frame_reference(&xf, NULL);
 				}
+
+				// move them padding bytes outta here
+				src += img_size + (BCDEC_BC4_BLOCK_SIZE * (USB_CAM_MODE10_PIXEL_STRIDE / 4) * (24 / 4));
 			}
 		} else if (xfer->actual_length == USB_CAM_MODE1_XFER_SIZE) {
 			if (u_sink_debug_is_active(&hmd->debug_sinks[3])) {
@@ -445,6 +458,27 @@ img_xfer_cb(struct libusb_transfer *xfer)
 				u_sink_debug_push_frame(&hmd->debug_sinks[3], xf);
 				xrt_frame_reference(&xf, NULL);
 			}
+		} else if (xfer->actual_length == USB_CAM_MODE4_XFER_SIZE) {
+			bool debug_sink_active = u_sink_debug_is_active(&hmd->debug_sinks[2]);
+
+
+			if (debug_sink_active) {
+				struct xrt_frame *xf = NULL;
+				u_frame_create_one_off(XRT_FORMAT_L8, 512, 508 * 2, &xf);
+
+				uint8_t *src = xfer->buffer + 256;
+				uint8_t *dest = xf->data;
+
+				memcpy(dest, src, 512 * 508 * 2);
+				xf->timestamp = os_monotonic_get_ns();
+
+				u_sink_debug_push_frame(&hmd->debug_sinks[2], xf);
+
+				xrt_frame_reference(&xf, NULL);
+			}
+		} else {
+			// wa
+			PSVR2_ERROR(hmd, "WAA");
 		}
 	}
 
@@ -515,6 +549,25 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	        XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT),
 	};
 
+	struct xrt_space_relation cam0_relation = {
+	    .pose = {.orientation = {.x = __lef32_to_cpu(slam.cam0orient[0]),
+	                             .y = __lef32_to_cpu(slam.cam0orient[1]),
+	                             .z = __lef32_to_cpu(slam.cam0orient[2]),
+	                             .w = __lef32_to_cpu(slam.cam0orient[3])},
+	             .position =
+	                 {
+	                     .x = __lef32_to_cpu(slam.cam0offset[0]),
+	                     .y = __lef32_to_cpu(slam.cam0offset[1]),
+	                     .z = __lef32_to_cpu(slam.cam0offset[2]),
+	                 }},
+	    .relation_flags = (enum xrt_space_relation_flags)(
+	        XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT |
+	        XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT),
+	};
+
+	// Is this the right pose?
+	hmd->constellation_origin_source->current_pose = cam0_relation;
+
 	m_relation_history_push_with_motion_estimation(hmd->slam_relation_history, &relation, pose_sample.timestamp_ns);
 }
 
@@ -532,6 +585,218 @@ slam_xfer_cb(struct libusb_transfer *xfer)
 		process_slam_record(hmd, xfer->buffer, xfer->actual_length);
 	}
 
+	os_mutex_lock(&hmd->data_lock);
+	libusb_submit_transfer(xfer);
+	os_mutex_unlock(&hmd->data_lock);
+}
+
+
+static void LIBUSB_CALL
+led_xfer_cb(struct libusb_transfer *xfer)
+{
+	DRV_TRACE_MARKER();
+
+	if (!psvr2_usb_xfer_continue(xfer, "LED Detector")) {
+		return;
+	}
+
+	struct psvr2_hmd *hmd = xfer->user_data;
+
+	uint8_t *buffer = xfer->buffer;
+
+	if (xfer->actual_length == 0) {
+		goto led_xfer_end;
+	}
+
+	if (xfer->actual_length != 36944) {
+		PSVR2_WARN(hmd, "Got LD data of unexpected size %d", xfer->actual_length);
+		goto led_xfer_end;
+	}
+
+	if (buffer[0] != 'L' || buffer[1] != 'D') {
+		PSVR2_WARN(hmd, "Got LD data of unexpected header %d %d", buffer[0], buffer[1]);
+		goto led_xfer_end;
+	}
+
+	// PSVR2_INFO_HEX(hmd, xfer->buffer, xfer->actual_length);
+
+#if 0
+	FILE *out = fopen("LED_DETECTOR_DATA.bin", "wb");
+	size_t written = 0;
+	while (written < (size_t)xfer->actual_length) {
+		written += fwrite(buffer + written, 1, xfer->actual_length - written, out);
+	}
+	fflush(out);
+	fclose(out);
+#endif
+
+	// @todo this is invalid on some arches, pointer may not be aligned.
+	struct ld_payload *payload = (struct ld_payload *)buffer;
+
+	PSVR2_TRACE(hmd, "timestamp: %u, frame_counter: %u, unk3: %u", payload->header.timestamp,
+	            payload->header.frame_counter, payload->header.unk3);
+
+	/*
+	 * The LD timestamp is a 32-bit microsecond counter that appears to share the VTS clock of the IMU records
+	 * (same width and units; PSVR2Toolkit also maps camera timestamps through the IMU timestamp offset). Unwrap
+	 * it against the last IMU VTS sample and move it into host monotonic time.
+	 */
+	os_mutex_lock(&hmd->data_lock);
+	int32_t ld_vts_delta_us = (int32_t)(payload->header.timestamp - hmd->last_imu_vts_us);
+	timepoint_ns ld_timestamp_ns =
+	    hmd->last_imu_vts_ns + (timepoint_ns)ld_vts_delta_us * U_TIME_1US_IN_NS + hmd->hw2mono_vts;
+	bool clock_ready = hmd->timestamp_samples >= TIMESTAMP_SAMPLES;
+	os_mutex_unlock(&hmd->data_lock);
+
+	if (clock_ready) {
+		psvr2_blobwatch_push_ld_payload(hmd->blobwatch, payload, ld_timestamp_ns);
+	}
+
+	if (hmd->timing_source) {
+		struct t_timing_event event = {
+		    .type = T_TIMING_EVENT_TYPE_CAMERA_EXPOSURE_START,
+		    .camera_exposure_start =
+		        {
+		            .sequence_id = payload->header.frame_counter,
+		            .timestamp_ns = os_monotonic_get_ns(),
+		            .frame_period_ns =
+		                (time_duration_ns)((payload->header.timestamp - hmd->last_led_timestamp_us) * 1000),
+		            .exposure_time_ns = (time_duration_ns)(0),
+		        },
+		};
+		hmd->last_led_timestamp_us = payload->header.timestamp;
+
+		t_timing_event_sink_push_timing_event(hmd->timing_sink, &event);
+	}
+
+led_xfer_end:
+	os_mutex_lock(&hmd->data_lock);
+	libusb_submit_transfer(xfer);
+	os_mutex_unlock(&hmd->data_lock);
+}
+
+
+struct gen_data_hdr
+{
+	uint16_t magic;
+	uint16_t unk1;
+	uint32_t len;
+	uint16_t entries_unk;
+	uint8_t unk2[22];
+} PSVR2_PACKED;
+static_assert(sizeof(struct gen_data_hdr) == 0x20, "bad size");
+
+enum gen_data_entry_type
+{
+	// Position of camera 0 relative to hmd origin.
+	GEN_DATA_CAMERA_CALIB_VRTRACE_0 = 0x0a,
+	// seems to be debug calibration, zero'd out on my unit
+	GEN_DATA_CAMERA_CALIB_VRTRACE_1 = 0x0b,
+	GEN_DATA_IMU_CALIB = 0x0c,
+	GEN_DATA_IMU_SET_CALIB = 0x0d,
+	GEN_DATA_0F = 0x0f,
+	GEN_DATA_CALIBRATION_BLOCK = 0x11,
+	GEN_DATA_12 = 0x12,
+	GEN_DATA_13 = 0x13,
+	GEN_DATA_14 = 0x14,
+};
+
+struct gen_data_entry
+{
+	uint16_t type;
+	uint8_t unk[2];
+	uint32_t size;
+	uint32_t offset;
+};
+static_assert(sizeof(struct gen_data_entry) == 12, "bad data");
+
+static void LIBUSB_CALL
+vd_xfer_cb(struct libusb_transfer *xfer)
+{
+	DRV_TRACE_MARKER();
+
+	if (!psvr2_usb_xfer_continue(xfer, "GenData")) {
+		return;
+	}
+
+	struct psvr2_hmd *hmd = xfer->user_data;
+
+	if (xfer->actual_length == 0) {
+		goto vd_xfer_end;
+	}
+
+	PSVR2_TRACE(hmd, "Parsing VD xfer");
+
+	uint32_t data_len = (uint32_t)xfer->actual_length;
+	uint32_t to_go = data_len;
+	uint8_t *buf = xfer->buffer;
+	while (to_go >= 0x200) {
+		struct gen_data_hdr *data_hdr = (struct gen_data_hdr *)buf;
+
+		PSVR2_TRACE(hmd, "Parsing VD at %zu", (size_t)buf - (size_t)xfer->buffer);
+
+		if (buf[0] != 'V' || buf[1] != 'D' || to_go < data_hdr->len || data_hdr->unk1 != 0x200u) {
+			PSVR2_ERROR(hmd, "Error parsing gendata");
+			break;
+		}
+
+		struct gen_data_entry *entry = (struct gen_data_entry *)(buf + 0x20);
+		for (int i = 0; i < data_hdr->entries_unk; i++) {
+			if (data_len < (entry->size + entry->offset)) {
+				PSVR2_ERROR(hmd, "Invalid entry %d, %d", entry->offset, entry->size);
+			}
+
+			// PSVR2_DEBUG(hmd, "Entry with offset %u, size %u, type %u", entry->offset, entry->size,
+			// entry->type);
+
+			switch (entry->type) {
+			case GEN_DATA_CAMERA_CALIB_VRTRACE_0: {
+				PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
+				break;
+			}
+			case GEN_DATA_CAMERA_CALIB_VRTRACE_1: {
+				PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
+				break;
+			}
+			case GEN_DATA_IMU_CALIB: {
+				PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
+				break;
+			}
+			case GEN_DATA_IMU_SET_CALIB: {
+				PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
+				break;
+			}
+			case GEN_DATA_0F: {
+				break;
+			}
+			case GEN_DATA_CALIBRATION_BLOCK: {
+				psvr2_parse_gen_calibration_block(hmd, buf + entry->offset, entry->size);
+				// PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
+				break;
+			}
+			case GEN_DATA_12: {
+				break;
+			}
+			case GEN_DATA_13: {
+				break;
+			}
+			case GEN_DATA_14: {
+				break;
+			}
+			default:
+				PSVR2_WARN(hmd, "Unknown VD entry type of %d", entry->type);
+				// PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
+				break;
+			}
+
+			entry++;
+		}
+
+		to_go -= data_hdr->len;
+		buf += data_hdr->len;
+	}
+
+vd_xfer_end:
 	os_mutex_lock(&hmd->data_lock);
 	libusb_submit_transfer(xfer);
 	os_mutex_unlock(&hmd->data_lock);
@@ -692,7 +957,7 @@ send_psvr2_control(struct psvr2_hmd *hmd, uint16_t report_id, uint8_t subcmd, ui
 }
 
 bool
-set_camera_mode(struct psvr2_hmd *hmd, enum psvr2_camera_mode mode)
+psvr2_set_camera_mode(struct psvr2_hmd *hmd, enum psvr2_camera_mode mode)
 {
 	struct camera_cmd
 	{
@@ -717,9 +982,9 @@ toggle_camera_enable(struct psvr2_hmd *hmd)
 	         hmd->camera_enable ? "Disable camera streams" : "Enable camera streams");
 
 	if (hmd->camera_enable) {
-		set_camera_mode(hmd, hmd->camera_mode);
+		psvr2_set_camera_mode(hmd, hmd->camera_mode);
 	} else {
-		set_camera_mode(hmd, PSVR2_CAMERA_MODE_OFF);
+		psvr2_set_camera_mode(hmd, PSVR2_CAMERA_MODE_OFF);
 	}
 }
 
@@ -826,9 +1091,9 @@ cycle_camera_mode(struct psvr2_hmd *hmd)
 	}
 
 	if (hmd->camera_enable) {
-		set_camera_mode(hmd, hmd->camera_mode);
+		psvr2_set_camera_mode(hmd, hmd->camera_mode);
 	} else {
-		set_camera_mode(hmd, PSVR2_CAMERA_MODE_OFF);
+		psvr2_set_camera_mode(hmd, PSVR2_CAMERA_MODE_OFF);
 	}
 }
 
@@ -862,7 +1127,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 	/* Camera data */
 	hmd->camera_enable = true;
 	hmd->camera_mode = PSVR2_CAMERA_MODE_10;
-	set_camera_mode(hmd, hmd->camera_mode);
+	psvr2_set_camera_mode(hmd, hmd->camera_mode);
 
 	for (int i = 0; i < NUM_CAM_XFERS; i++) {
 		hmd->camera_xfers[i] = libusb_alloc_transfer(0);
@@ -911,7 +1176,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 	}
 	uint8_t *led_detector_buf = malloc(USB_LD_XFER_SIZE);
 	libusb_fill_bulk_transfer(hmd->led_detector_xfer, hmd->dev, LIBUSB_ENDPOINT_IN | PSVR2_LD_ENDPOINT,
-	                          led_detector_buf, USB_LD_XFER_SIZE, dump_xfer_cb, hmd, 0);
+	                          led_detector_buf, USB_LD_XFER_SIZE, led_xfer_cb, hmd, 0);
 	hmd->led_detector_xfer->flags |= LIBUSB_TRANSFER_FREE_BUFFER;
 
 	res = libusb_submit_transfer(hmd->led_detector_xfer);
@@ -947,7 +1212,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 	}
 	uint8_t *vd_buf = malloc(USB_VD_XFER_SIZE);
 	libusb_fill_bulk_transfer(hmd->vd_xfer, hmd->dev, LIBUSB_ENDPOINT_IN | PSVR2_VD_ENDPOINT, vd_buf,
-	                          USB_VD_XFER_SIZE, dump_xfer_cb, hmd, 0);
+	                          USB_VD_XFER_SIZE, vd_xfer_cb, hmd, 0);
 	hmd->vd_xfer->flags |= LIBUSB_TRANSFER_FREE_BUFFER;
 
 	res = libusb_submit_transfer(hmd->vd_xfer);
@@ -1135,6 +1400,17 @@ psvr2_end_feature(struct xrt_device *xdev, enum xrt_device_feature_type type)
 	return XRT_SUCCESS;
 }
 
+struct t_timing_event_source *
+psvr2_hmd_get_timing_event_source(struct psvr2_hmd *hmd)
+{
+	if (hmd->timing_source != NULL) {
+		return hmd->timing_source;
+	}
+
+	return NULL;
+}
+
+
 struct xrt_device *
 psvr2_hmd_create(struct xrt_prober_device *xpdev)
 {
@@ -1165,6 +1441,8 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	if (!psvr2_usb_open(hmd, xpdev)) {
 		goto cleanup;
 	}
+
+	psvr2_constellation_tracking_source_create(&hmd->constellation_origin_source);
 
 	// This list should be ordered, most preferred first.
 	size_t idx = 0;
@@ -1252,9 +1530,11 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	const struct xrt_pose slam_correction_pose = SLAM_POSE_CORRECTION;
 	hmd->slam_correction_pose = slam_correction_pose;
 
-	for (int i = 0; i < 4; i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(hmd->debug_sinks); i++) {
 		u_sink_debug_init(&hmd->debug_sinks[i]);
 	}
+
+	b_timing_source_create(&hmd->xfctx, &hmd->timing_sink, &hmd->timing_source);
 
 	u_var_add_root(hmd, "PS VR2 HMD", true);
 	u_var_add_pose(hmd, &hmd->pose, "pose");
@@ -1270,29 +1550,36 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		u_var_add_button(hmd, &hmd->slam_correction_reset_btn, "Reset");
 	}
 
+	/* DROPDOWN */
 	u_var_add_gui_header(hmd, NULL, "Last IMU data");
-	u_var_add_ro_u32(hmd, &hmd->last_imu_vts_us, "VTS Timestamp");
-	u_var_add_ro_i64_ns(hmd, &hmd->last_imu_vts_ns, "VTS Timestamp (ns)");
-	u_var_add_ro_i64_ns(hmd, &hmd->hw2mono_vts, "hw2mono_vts");
-	u_var_add_u16(hmd, &hmd->last_imu_ts, "Timestamp");
-	u_var_add_ro_vec3_f32(hmd, &hmd->last_accel, "accel");
-	u_var_add_ro_vec3_f32(hmd, &hmd->last_gyro, "gyro");
+	{
+		u_var_add_ro_u32(hmd, &hmd->last_imu_vts_us, "VTS Timestamp");
+		u_var_add_ro_i64_ns(hmd, &hmd->last_imu_vts_ns, "VTS Timestamp (ns)");
+		u_var_add_ro_i64_ns(hmd, &hmd->hw2mono_vts, "hw2mono_vts");
+		u_var_add_u16(hmd, &hmd->last_imu_ts, "Timestamp");
+		u_var_add_ro_vec3_f32(hmd, &hmd->last_accel, "accel");
+		u_var_add_ro_vec3_f32(hmd, &hmd->last_gyro, "gyro");
+	}
 
 	u_var_add_gui_header(hmd, NULL, "Last SLAM data");
-	u_var_add_ro_u32(hmd, &hmd->last_slam_vts_us, "VTS Timestamp");
-	u_var_add_ro_i64_ns(hmd, &hmd->last_slam_vts_ns, "VTS Timestamp (ns)");
-	u_var_add_pose(hmd, &hmd->last_slam_pose, "Pose");
+	{
+		u_var_add_ro_u32(hmd, &hmd->last_slam_vts_us, "VTS Timestamp");
+		u_var_add_ro_i64_ns(hmd, &hmd->last_slam_vts_ns, "VTS Timestamp (ns)");
+		u_var_add_pose(hmd, &hmd->last_slam_pose, "Pose");
+	}
 
 	u_var_add_gui_header(hmd, NULL, "Status");
-	u_var_add_u8(hmd, &hmd->dprx_status, "HMD Display Port RX status");
-	u_var_add_ro_i32(hmd, (int32_t *)&hmd->proximity_sensor, "HMD Proximity");
-	u_var_add_bool(hmd, &hmd->function_button, "HMD Function button");
-	u_var_add_u8(hmd, &hmd->ipd_mm, "HMD IPD (mm)");
+	{
+		u_var_add_u8(hmd, &hmd->dprx_status, "HMD Display Port RX status");
+		u_var_add_ro_i32(hmd, (int32_t *)&hmd->proximity_sensor, "HMD Proximity");
+		u_var_add_bool(hmd, &hmd->function_button, "HMD Function button");
+		u_var_add_u8(hmd, &hmd->ipd_mm, "HMD IPD (mm)");
 
-	u_var_add_f32(hmd, &hmd->brightness, "Brightness");
-	hmd->brightness_btn.cb = (void (*)(void *))update_brightness;
-	hmd->brightness_btn.ptr = hmd;
-	u_var_add_button(hmd, &hmd->brightness_btn, "Set Brightness");
+		u_var_add_f32(hmd, &hmd->brightness, "Brightness");
+		hmd->brightness_btn.cb = (void (*)(void *))update_brightness;
+		hmd->brightness_btn.ptr = hmd;
+		u_var_add_button(hmd, &hmd->brightness_btn, "Set Brightness");
+	}
 
 	u_var_add_gui_header(hmd, NULL, "Camera data");
 	{
@@ -1309,10 +1596,13 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		sprintf(name, "Substream %d", i);
 		u_var_add_sink_debug(hmd, &hmd->debug_sinks[i], name);
 	}
-	u_var_add_sink_debug(hmd, &hmd->debug_sinks[3], "Mode 1 stream");
+	u_var_add_sink_debug(hmd, &hmd->debug_sinks[3], "Mode 1/10 stream");
 
+	/* DROPDOWN */
 	u_var_add_gui_header(hmd, NULL, "Logging");
-	u_var_add_log_level(hmd, &hmd->log_level, "log_level");
+	{
+		u_var_add_log_level(hmd, &hmd->log_level, "log_level");
+	}
 
 	float initial_brightness = debug_get_float_option_psvr2_default_brightness();
 	if (!set_brightness(hmd, initial_brightness)) {

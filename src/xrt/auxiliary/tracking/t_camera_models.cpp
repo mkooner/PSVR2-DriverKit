@@ -110,6 +110,11 @@ t_camera_model_params_from_t_camera_calibration(const t_camera_calibration *cc, 
 		out_params->cv1.g3 = (float)cc->cv1.g3;
 		out_params->cv1.g4 = (float)cc->cv1.g4;
 	} break;
+	case T_DISTORTION_PSVR2: {
+		for (int i = 0; i < 20; i++) {
+			out_params->psvr2.params[i] = cc->psvr2.params[i];
+		}
+	} break;
 	case T_DISTORTION_PINHOLE: break; // no params
 	default:
 		U_LOG_E("t_camera_model_params_from_t_camera_calibration doesn't support camera model %s yet!",
@@ -131,6 +136,9 @@ t_camera_models_unproject(
 	}; break;
 	case T_DISTORTION_FISHEYE_KB4: {
 		return kb4_unproject(*dist, x, y, *out_x, *out_y, *out_z);
+	}; break;
+	case T_DISTORTION_PSVR2: {
+		return psvr2_unproject(*dist, x, y, *out_x, *out_y, *out_z);
 	}; break;
 	// Return false so we don't get warnings on Release builds.
 	default: assert(false); return false;
