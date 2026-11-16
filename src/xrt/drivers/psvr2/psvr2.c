@@ -889,6 +889,20 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 			// PSVR2_DEBUG(hmd, "Entry with offset %u, size %u, type %u", entry->offset, entry->size,
 			// entry->type);
 
+			/*
+			 * Record every gen-data entry raw, handled or not: some are still undecoded (camera-to-head
+			 * extrinsics, which PSVR2Toolkit reads from Sony's driver, aren't in any decoded entry).
+			 */
+			if (hmd->record_file != NULL && data_len >= (entry->size + entry->offset)) {
+				fprintf(hmd->record_file, "V,%" PRId64 ",%d,%u,", (int64_t)os_monotonic_get_ns(), entry->type,
+				        (unsigned)entry->size);
+				const uint8_t *p = buf + entry->offset;
+				for (uint32_t b = 0; b < entry->size; b++) {
+					fprintf(hmd->record_file, "%02x", p[b]);
+				}
+				fprintf(hmd->record_file, "\n");
+			}
+
 			switch (entry->type) {
 			case GEN_DATA_CAMERA_CALIB_VRTRACE_0: {
 				PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
@@ -933,15 +947,6 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 					PSVR2_WARN(hmd, "Unknown VD entry type %d, %u bytes (logged %u/3)", entry->type,
 					           (unsigned)entry->size, hmd->vd_unknown_seen[type_idx]);
 					PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
-				}
-				if (hmd->record_file != NULL && data_len >= (entry->size + entry->offset)) {
-					fprintf(hmd->record_file, "V,%" PRId64 ",%d,%u,", (int64_t)os_monotonic_get_ns(),
-					        entry->type, (unsigned)entry->size);
-					const uint8_t *p = buf + entry->offset;
-					for (uint32_t b = 0; b < entry->size; b++) {
-						fprintf(hmd->record_file, "%02x", p[b]);
-					}
-					fprintf(hmd->record_file, "\n");
 				}
 			} break;
 			}
