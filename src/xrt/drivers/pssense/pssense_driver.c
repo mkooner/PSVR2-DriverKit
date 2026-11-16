@@ -104,6 +104,9 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR
  * allowed report. 0 disables the cap.
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(pssense_imu_angle_deg, "PSSENSE_IMU_ANGLE_DEG", PSSENSE_IMU_ANGLE_DEG_DEFAULT)
+DEBUG_GET_ONCE_FLOAT_OPTION(pssense_imu_ref_correction_deg,
+                            "PSSENSE_IMU_REF_CORRECTION_DEG",
+                            PSSENSE_IMU_REF_CORRECTION_DEG_DEFAULT)
 DEBUG_GET_ONCE_NUM_OPTION(pssense_bt_min_send_interval_ms, "PSSENSE_BT_MIN_SEND_INTERVAL_MS", 33)
 //! How long to stop sending after a failed output report, to let the Bluetooth link drain.
 #define PSSENSE_SEND_FAIL_BACKOFF_NS (U_TIME_1MS_IN_NS * 100)
@@ -1963,7 +1966,11 @@ pssense_get_imu_orientation(struct t_constellation_tracker_device *device,
 		struct xrt_space_relation rel = {0};
 		m_relation_history_get(pssense->tracking.imu_relation_history, imu_ts, &rel);
 		if ((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) != 0) {
-			*out_orientation = rel.pose.orientation;
+			// Into the LED model's IMU frame, see PSSENSE_IMU_REF_CORRECTION_DEG_DEFAULT.
+			struct xrt_quat corr;
+			math_quat_from_angle_vector(DEG_TO_RAD(debug_get_float_option_pssense_imu_ref_correction_deg()),
+			                            &(struct xrt_vec3){1, 0, 0}, &corr);
+			math_quat_rotate(&rel.pose.orientation, &corr, out_orientation);
 			ok = true;
 		}
 	}

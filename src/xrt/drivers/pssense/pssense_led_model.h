@@ -24,16 +24,22 @@ static const struct t_constellation_tracker_led_model_match_parameters DEFAULT_M
 };
 
 /*!
- * Rotation on X axis from LED -> IMU, in degrees (the default for PSSENSE_IMU_ANGLE_DEG).
+ * Rotation on X axis from LED -> IMU, in degrees (the default for PSSENSE_IMU_ANGLE_DEG): upstream's value.
  *
- * Upstream used -50.2703. Fitted from 2621 hardware solves with the corrected camera chain (00:04 run,
- * psvr2-test/analysis): the optical orientation (the LED model already rotated by this angle) disagreed with the
- * controllers' own IMU tilt by 20.4 / 23.3 deg (left / right); a further pure X rotation of -30 / -29 deg (the same in
- * both halves of the run, -30/-31 and -28/-30) brings that to 5.7 / 11.7 deg, so the angle is -50.27 - 29.5. It
- * trades off against the camera mount pitch (both act about X); the data prefers Sony's -15 deg pitch with this angle
- * over ~0 deg pitch with the old one (9.8 / 14.2 deg). PSSENSE_IMU_ANGLE_DEG=-50.2703 restores upstream.
+ * A refit to -79.77 (matching the optical orientation to the driver's 3DoF IMU orientation) was wrong: on hardware
+ * (01:45 vs 01:47 runs) -50.27 sat better in the hand and tracked better (45/40 vs 32/31 solves/s, 33/34% vs 47/45%
+ * of the time position-held, 7 vs 17 fusion overrides). The 3DoF orientation itself is ~28 deg off the LED model's IMU
+ * frame about X; see PSSENSE_IMU_REF_CORRECTION_DEG.
  */
-#define PSSENSE_IMU_ANGLE_DEG_DEFAULT (-79.77f)
+#define PSSENSE_IMU_ANGLE_DEG_DEFAULT (-50.2703f)
+
+/*!
+ * Rotation about X applied to the driver's 3DoF IMU orientation before the tracker compares poses with it (gravity
+ * and gyro gates, in-search check), degrees (PSSENSE_IMU_REF_CORRECTION_DEG). With -50.27 the optical orientation
+ * disagreed with the uncorrected 3DoF orientation by 29.9 / 26.7 deg (left / right, 01:47 run), close to the 35 deg
+ * gravity gate; a pure X rotation of +30.0 / +26.5 deg brings that to 7.0 / 6.5 deg (96% / 84% within 20 deg).
+ */
+#define PSSENSE_IMU_REF_CORRECTION_DEG_DEFAULT (28.25f)
 
 //! The offset from the LED origin -> IMU origin, for the left controller
 static struct xrt_vec3 T_led_imu_left = {
