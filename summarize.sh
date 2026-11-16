@@ -45,7 +45,13 @@ done
 echo
 echo "== Controller Bluetooth sends (last per controller)"
 grep -E "Send stats" "$LOG" | tail -2 | sed -E 's/.*Send stats: /  /' | cut -c1-200
-grep -c "BT socket write error" "$LOG" 2>/dev/null | sed 's/^/  bluetoothd write errors in log: /'
+ts=$(basename "$LOG" | grep -oE '[0-9]{8}-[0-9]{6}' | head -1)
+if [ -n "$ts" ]; then
+	start="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:9:2}:${ts:11:2}:${ts:13:2}"
+	end=$(date -d "@$(stat -c %Y "$LOG")" '+%F %T')
+	n=$(journalctl --since "$start" --until "$end" 2>/dev/null | grep -c "BT socket write error")
+	echo "  bluetoothd write errors during the run: $n (should be 0)"
+fi
 
 echo
 echo "== LED sync BG phase (last summaries)"
