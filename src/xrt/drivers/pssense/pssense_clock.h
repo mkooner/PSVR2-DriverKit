@@ -34,8 +34,8 @@
 //! An offset this far below the estimate means the controller clock jumped (reports can't arrive early).
 #define PSSENSE_CLOCK_RESET_BELOW_NS (U_TIME_1MS_IN_NS * 20)
 #define PSSENSE_CLOCK_RESET_COUNT 20
-//! Output slew per report, far above real clock skew (a few us/s), far below Bluetooth delay noise.
-#define PSSENSE_CLOCK_SLEW_NS (U_TIME_1US_IN_NS * 2)
+//! Output slew per report (~133Hz, so ~650us/s), above real clock skew (~90ppm measured), below delay noise.
+#define PSSENSE_CLOCK_SLEW_NS (U_TIME_1US_IN_NS * 5)
 //! Reports before the estimate is used.
 #define PSSENSE_CLOCK_MIN_SAMPLES 20
 
@@ -53,9 +53,11 @@ struct pssense_clock
 	timepoint_ns cur_start_ns;
 	uint32_t samples;
 
-	//! Fitted lower envelope: offset(local) = a + b * (local - ref).
+	//! Fitted lower envelope: offset(local) = a + b * (local - ref), b in ns per second.
 	double a, b;
 	timepoint_ns ref_ns;
+	//! Recompute the slope, set when a bucket completes.
+	bool refit_slope;
 
 	//! What callers get, slew limited toward the fit.
 	bool have_output;
@@ -104,14 +106,56 @@ pssense_clock_fit(struct pssense_clock *c, timepoint_ns now_ns)
 		return;
 	}
 
-	double b = 0;
-	double denom = n * sxx - sx * sx;
-	// A slope needs a few seconds of buckets, and real skew is tiny (|b| of a few hundred ns/s at most).
-	if (n >= 8 && denom > 1e-9) {
-		b = (n * sxy - sx * sy) / denom;
-		if (b > 200000.0 || b < -200000.0) { // 200ppm, not a real crystal
-			b = 0;
+	(void)sxx;
+	(void)sxy;
+
+	/*
+	 * Skew by Theil-Sen (median of the pairwise slopes between bucket minima): a least squares fit was thrown
+	 * off by buckets that only held delayed reports (Bluetooth stalls of seconds on hardware), got clamped,
+	 * and left the skew at 0 while the controller ran ~90ppm off the host clock.
+	 */
+	double b = c->b;
+	if (n >= 8 && c->refit_slope) {
+		double slopes[PSSENSE_CLOCK_NUM_BUCKETS * PSSENSE_CLOCK_NUM_BUCKETS / 2];
+		int ns = 0;
+		for (int i = 0; i < PSSENSE_CLOCK_NUM_BUCKETS; i++) {
+			const struct pssense_clock_bucket *bi = &c->buckets[i];
+			if (!bi->used) {
+				continue;
+			}
+			for (int j = i + 1; j < PSSENSE_CLOCK_NUM_BUCKETS; j++) {
+				const struct pssense_clock_bucket *bj = &c->buckets[j];
+				if (!bj->used) {
+					continue;
+				}
+				double dx = (double)(bj->local_ns - bi->local_ns) / U_TIME_1S_IN_NS;
+				// Only pairs at least a second apart, closer ones are dominated by delay noise.
+				if (dx < 1.0 && dx > -1.0) {
+					continue;
+				}
+				slopes[ns++] = (double)(bj->min_offset - bi->min_offset) / dx;
+			}
 		}
+		if (ns >= 3) {
+			// Partial selection sort up to the median, ns is at most a few hundred.
+			int mid = ns / 2;
+			for (int i = 0; i <= mid; i++) {
+				int m = i;
+				for (int k = i + 1; k < ns; k++) {
+					if (slopes[k] < slopes[m]) {
+						m = k;
+					}
+				}
+				double t = slopes[i];
+				slopes[i] = slopes[m];
+				slopes[m] = t;
+			}
+			b = slopes[mid];
+			if (b > 1000000.0 || b < -1000000.0) { // 1000ppm, not a crystal
+				b = 0;
+			}
+		}
+		c->refit_slope = false;
 	}
 	double a = (sy - b * sx) / n;
 
@@ -157,6 +201,7 @@ pssense_clock_push(struct pssense_clock *c, timepoint_ns local_ns, timepoint_ns 
 	if (c->samples == 0 || local_ns - c->cur_start_ns >= PSSENSE_CLOCK_BUCKET_NS) {
 		if (c->samples != 0) {
 			c->cur = (c->cur + 1) % PSSENSE_CLOCK_NUM_BUCKETS;
+			c->refit_slope = true;
 		}
 		c->buckets[c->cur].used = false;
 		c->cur_start_ns = local_ns;

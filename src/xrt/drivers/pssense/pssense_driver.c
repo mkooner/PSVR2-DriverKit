@@ -1653,8 +1653,8 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 				const timepoint_ns host_ns = pssense->tracking.last_exposure_local_timestamp_ns;
 				time_duration_ns target_ns = next_blink_time - host_ns;
 				time_duration_ns dev_ns = target_ns - pssense->tracking.led_map_offset_ns;
-				// ~60ppm, more than crystal skew between the controller and the host.
-				const time_duration_ns max_slew_ns = U_TIME_1US_IN_NS;
+				// ~300ppm: the controller measured ~90ppm off the host clock, more than first assumed.
+				const time_duration_ns max_slew_ns = U_TIME_1US_IN_NS * 5;
 				if (!pssense->tracking.led_map_valid || dev_ns > U_TIME_1MS_IN_NS * 50 ||
 				    dev_ns < -U_TIME_1MS_IN_NS * 50) {
 					// First use, or a reconnect / clock reset.

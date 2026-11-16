@@ -234,10 +234,11 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 			cc->lower_ns = cc->offset_ns - fw;
 			cc->state = COUNT_CALIB_LEFT_EDGE;
 			count_calib_set_offset(refinement, (cc->lower_ns + cc->upper_ns) / 2);
-		} else if (cc->offset_ns + fw >= refinement->exposure_interval_ns) {
+		} else if (cc->offset_ns + fw / 2 >= refinement->exposure_interval_ns) {
 			count_calib_restart(refinement, "LEDs not seen at any offset, controller out of view?");
 		} else {
-			count_calib_set_offset(refinement, cc->offset_ns + fw);
+			// Half window steps overlap, so a little clock drift during the sweep can't skip the window.
+			count_calib_set_offset(refinement, cc->offset_ns + fw / 2);
 		}
 		break;
 
