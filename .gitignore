@@ -2,3 +2,5 @@ logs/
 pose-sim/pose_sim
 pose-sim/*.o
 __pycache__/
+analysis/harness/chain
+analysis/harness/chain.o
