@@ -740,6 +740,17 @@ t_led_sync_push_constellation_sample(struct t_led_sync_refinement *refinement,
 }
 
 bool
+t_led_sync_is_locked(struct t_led_sync_refinement *refinement)
+{
+	assert(refinement->initialized);
+
+	os_mutex_lock(&refinement->lock);
+	bool locked = refinement->phase == T_LED_SYNC_PHASE_COUNT_HOLD || refinement->phase == T_LED_SYNC_PHASE_STABLE;
+	os_mutex_unlock(&refinement->lock);
+	return locked;
+}
+
+bool
 t_led_sync_get_sample(struct t_led_sync_refinement *refinement, struct t_led_sync_sample *out_sample)
 {
 	assert(refinement->initialized);

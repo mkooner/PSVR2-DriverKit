@@ -72,6 +72,14 @@ enum count_calib_state
 //! Empty sweeps in a row before the LEDs-always-on visibility check.
 #define COUNT_CALIB_EMPTY_SWEEPS_DIAG 2
 
+/*!
+ * Pause after a sweep that saw no LEDs, before sweeping again. Was 3s: at startup the controller often isn't in view
+ * yet when the first sweep runs (02:54, 01:45: the first sweep saw nothing), and the wait then delayed the first
+ * controller's calibration by the whole 3s. A sweep takes ~2.7s, so retrying sooner costs nothing but some LED
+ * flashing while the controller is out of view.
+ */
+#define COUNT_CALIB_EMPTY_RETRY_NS (U_TIME_1S_IN_NS)
+
 
 //! The refinement currently calibrating, only one may at a time.
 static _Atomic(struct t_led_sync_refinement *) count_calib_owner = NULL;
@@ -447,8 +455,8 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 				count_calib_start_diag_on(refinement);
 				break;
 			}
-			// Out of view most likely: don't keep flashing across the headset's own exposures.
-			cc->retry_after_ns = os_monotonic_get_ns() + U_TIME_1S_IN_NS * 3;
+			// Out of view most likely: pause before sweeping again, see COUNT_CALIB_EMPTY_RETRY_NS.
+			cc->retry_after_ns = os_monotonic_get_ns() + COUNT_CALIB_EMPTY_RETRY_NS;
 			count_calib_restart(refinement, "LEDs not seen at any offset, controller out of view?");
 		} else {
 			// Half window steps overlap, so a little clock drift during the sweep can't skip the window.
@@ -579,7 +587,7 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 			         "Count calibration: LEDs not visible even always on (%.1f vs %.1f blobs), controller out "
 			         "of the cameras' view or covered",
 			         cc->on_mean, cc->baseline);
-			cc->retry_after_ns = os_monotonic_get_ns() + U_TIME_1S_IN_NS * 3;
+			cc->retry_after_ns = os_monotonic_get_ns() + COUNT_CALIB_EMPTY_RETRY_NS;
 			count_calib_restart(refinement, "controller not visible");
 		}
 		break;

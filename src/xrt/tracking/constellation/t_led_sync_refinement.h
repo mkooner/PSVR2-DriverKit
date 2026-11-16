@@ -578,6 +578,13 @@ t_led_sync_push_constellation_sample(struct t_led_sync_refinement *refinement,
 bool
 t_led_sync_get_sample(struct t_led_sync_refinement *refinement, struct t_led_sync_sample *out_sample);
 
+/*!
+ * True while the LED timing is locked (count hold, or STABLE in the other modes), false while it is being searched for,
+ * when the cameras only catch the LEDs now and then as the timing sweeps across the exposure.
+ */
+bool
+t_led_sync_is_locked(struct t_led_sync_refinement *refinement);
+
 void
 t_led_sync_mark_latest_sample_applied(struct t_led_sync_refinement *refinement, timepoint_ns apply_time_ns);
 

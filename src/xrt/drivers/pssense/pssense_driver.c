@@ -2190,11 +2190,22 @@ pssense_push_constellation_tracker_sample(struct t_constellation_tracker_device 
 	t_led_sync_push_constellation_sample(&pssense->tracking.led_sync_refinement, sample);
 
 	if (sample->has_world_pose) {
+		/*
+		 * Learn the display alignment only while the LED timing is locked. While it is being searched for, the
+		 * cameras only catch the LEDs now and then as the timing sweeps across the exposure: on hardware (02:54) the
+		 * alignment learned from those glimpses was relearned 32-35 deg off within seconds, and losing tracking
+		 * turned the controller 16-55 deg during the first 20s, against 2-15 deg after. Asked before taking the
+		 * controller lock, so the two locks never nest.
+		 */
+		bool sync_locked = t_led_sync_is_locked(&pssense->tracking.led_sync_refinement);
 		os_thread_helper_lock(&pssense->controller_thread);
 		if (sample->timestamp_ns > pssense->tracking.last_optical_fix_ns) {
 			pssense->tracking.last_optical_fix_ns = sample->timestamp_ns;
 			pssense->tracking.last_optical_fix_pose = sample->world_pose;
-			pssense_learn_alignment_locked(pssense, sample->timestamp_ns, &sample->world_pose.orientation);
+			if (sync_locked) {
+				pssense_learn_alignment_locked(pssense, sample->timestamp_ns,
+				                               &sample->world_pose.orientation);
+			}
 		}
 		os_thread_helper_unlock(&pssense->controller_thread);
 	}
