@@ -17,7 +17,7 @@ stage() { # name, pattern, hint-if-missing
 }
 
 echo "== Stages ($LOG)"
-stage "1 Headset opened"                "psvr2|PSVR2|PS VR2"                    "headset not probed: USB/udev, or another runtime holds it"
+stage "1 Headset opened (Monado)"       "PS VR2 HMD|psvr2_hmd|\[PSVR2\]|d/psvr2"                   "headset not probed: USB/udev, or another runtime holds it"
 stage "2 Calibration block parsed"      "Camera [0-9] calibration: resolution"  "no calibration block: controllers must be on when the service starts"
 stage "3 Camera poses computed"         "camera [0-9] pose position"            "tracker not created"
 stage "4 LD (LED) data arriving"        "LD stats:"                             "no LED payloads from the headset"

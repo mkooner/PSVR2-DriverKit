@@ -55,6 +55,18 @@ fi
 if pgrep -x monado-service >/dev/null; then
 	fail "monado-service is running; the SteamVR plugin runs Monado itself, stop it first"
 fi
+if pgrep -f 'ignition_server.exe' >/dev/null; then
+	# Left over from Sony's driver (Ignition route); it holds the headset, so our driver can't open it.
+	echo "  [!!] Ignition server (Sony driver helper) is running and holds the headset."
+	if [ -t 0 ]; then
+		read -r -p "       Stop it now? It restarts the next time you use Sony's driver. [y/N] " a
+		[ "${a,,}" = y ] || fail "stop it first: pkill -f ignition_server.exe"
+		pkill -f 'ignition_server.exe'
+		sleep 2
+	else
+		fail "stop it first: pkill -f ignition_server.exe"
+	fi
+fi
 missing=$(ldd "$PLUGIN/bin/linux64/driver_monado.so" | grep -c 'not found')
 [ "$missing" = 0 ] || fail "driver_monado.so has $missing unresolved libraries (ldd)"
 echo "  [ok] plugin: $PLUGIN"
@@ -88,6 +100,26 @@ print(f"  registered: {plugin}")
 EOF
 
 mkdir -p "$LOGDIR"
+
+# SteamVR blocks drivers after a crash ("safe mode"), e.g. after Sony's driver times out. A blocked monado driver
+# is silently skipped, so clear that flag for it (SteamVR is closed at this point, so the edit sticks).
+VRSETTINGS="$STEAM_ROOT/config/steamvr.vrsettings"
+if [ -f "$VRSETTINGS" ]; then
+	cp -f "$VRSETTINGS" "$LOGDIR/steamvr.vrsettings.backup-$STAMP"
+	python3 -I - "$VRSETTINGS" <<'EOF'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    cfg = json.load(f)
+drv = cfg.setdefault("driver_monado", {})
+if drv.get("blocked_by_safe_mode"):
+    print("  unblocked driver_monado (was blocked by a previous SteamVR safe mode event)")
+drv["blocked_by_safe_mode"] = False
+drv["enable"] = True
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=3)
+EOF
+fi
 
 export VALVE_SKIP_RUNTIME_SAFETY=1
 export XRT_LOG=debug
