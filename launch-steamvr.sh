@@ -145,6 +145,12 @@ export XRT_LOG=debug
 export PSVR2_LOG=debug
 export PSSENSE_LOG=debug
 export CONSTELLATION_TRACKER_LOG=debug
+# RECORD_DATASET=1 ./launch-steamvr.sh: record the constellation tracker's input (blobs, camera poses, IMU) for
+# offline replay of tracker changes (large files).
+if [ "${RECORD_DATASET:-0}" = "1" ]; then
+	export CONSTELLATION_TRACKER_DATA_RECORDER_OUTPUT="$LOGDIR/dataset-$(date +%Y%m%d-%H%M%S)"
+	echo "Recording the tracker dataset to $CONSTELLATION_TRACKER_DATA_RECORDER_OUTPUT"
+fi
 export T_LED_SYNC_REFINEMENT_LOG=debug
 export T_CONSTELLATION_SENSOR_FUSION_LOG=${FUSION_LOG:-debug}
 # Head pose: record raw IMU/SLAM for offline replay, and allow A/B against the old behaviour with
