@@ -657,6 +657,17 @@ led_xfer_cb(struct libusb_transfer *xfer)
 		psvr2_blobwatch_push_ld_payload(hmd->blobwatch, payload, payload->header.frame_counter, ld_timestamp_ns);
 	}
 
+	// Periodic summary for testing: is LD data arriving, and are LEDs being seen per camera?
+	if ((hmd->ld_stats_frames++ % 300) == 0) {
+		PSVR2_DEBUG(hmd,
+		            "LD stats: frame %u, clock %s, tracker %s, LEDs per camera [%u %u %u %u], "
+		            "ts host-now %+.2fms",
+		            payload->header.frame_counter, clock_ready ? "ready" : "waiting",
+		            hmd->blobwatch != NULL ? "running" : "not created", payload->cameras[0].num_leds,
+		            payload->cameras[1].num_leds, payload->cameras[2].num_leds, payload->cameras[3].num_leds,
+		            clock_ready ? (double)(ld_timestamp_ns - (timepoint_ns)os_monotonic_get_ns()) / 1e6 : 0.0);
+	}
+
 	uint32_t ld_frames_delta =
 	    hmd->have_last_led_frame ? (uint32_t)(payload->header.frame_counter - hmd->last_led_frame_counter) : 0;
 

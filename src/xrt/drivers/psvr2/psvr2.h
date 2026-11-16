@@ -269,6 +269,7 @@ struct psvr2_hmd
 	timepoint_ns last_led_timestamp_us;
 	uint32_t last_led_frame_counter;
 	bool have_last_led_frame;
+	uint64_t ld_stats_frames;
 	timepoint_ns system_zero_ns;
 	timepoint_ns last_imu_ns;
 
