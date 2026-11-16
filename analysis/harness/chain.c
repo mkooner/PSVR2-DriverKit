@@ -2,7 +2,7 @@
 // psvr2_parse_gen_calibration_block, psvr2_constellation_tracking.c @ 4d525e6bb) with Monado's own math library on a
 // recorded calibration block, and prints each camera's pose_in_origin. Variant flags change one convention at a time.
 //
-// usage: chain <block.bin> <mount_transpose 0/1> <relation_transpose 0/1> <invert_rule 0=from>to 1=never 2=always>
+// usage: chain <block.bin> <mount_transpose 0/1> <relation_transpose 0/1, 2 = F O^T F, F t> <invert_rule 0=from>to 1=never 2=always>
 //              <cv_flip 0=none 1=Rx180 2=Ry180>
 #include "math/m_api.h"
 #include "math/m_mathinclude.h"
@@ -58,6 +58,14 @@ main(int argc, char **argv)
 		memcpy(&translation, o + 40, 12);
 		if (rel_transpose) {
 			math_matrix_3x3_transpose(&orientation, &orientation);
+		}
+		if (rel_transpose == 2) { // the driver's convention since chain_unify.py: F O^T F, F t
+			orientation.v[1] = -orientation.v[1];
+			orientation.v[2] = -orientation.v[2];
+			orientation.v[3] = -orientation.v[3];
+			orientation.v[6] = -orientation.v[6];
+			translation.y = -translation.y;
+			translation.z = -translation.z;
 		}
 		math_matrix_4x4_isometry_from_rt(&orientation, &translation, &scratch);
 		int invert = invert_rule == 0 ? (from > to) : (invert_rule == 2);
