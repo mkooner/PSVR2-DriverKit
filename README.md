@@ -9,4 +9,9 @@ For the Monado branch `psvr2-headset-constellation` (worktree `../trial`, build 
 - `pose-sim/`: head pose simulator, old vs new pose pipeline. `./build.sh`, then
   `./pose_sim [slam_hz] [prediction_ms] [seconds]` or `./pose_sim --replay logs/record-*.csv`.
 
-A/B the head pose filter with `POSE_FILTER=0 ./launch-steamvr.sh`. Logs and raw IMU/SLAM recordings go to `logs/`.
+Options (environment, combine as needed):
+- `POSE_FILTER=0`: previous head pose behaviour, for A/B testing.
+- `PSVR2_FLOOR_HEIGHT=1.2`: head height above the floor when the headset starts (default 1.6 m, standing).
+- `OVRD_PLAY_AREA_SIZE=3`: size of the driver-provided play area in meters (default 2).
+- `ROOM_SETUP=1`: skip the driver-provided play area and run SteamVR's own room setup.
+ Logs and raw IMU/SLAM recordings go to `logs/`.

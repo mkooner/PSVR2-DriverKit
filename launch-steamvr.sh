@@ -121,6 +121,25 @@ with open(path, "w") as f:
 EOF
 fi
 
+# Sense controller render models: link Sony's from the PlayStation VR2 App install into our plugin's resources
+# (linked, not copied or committed, they're Sony's files). Without them, SteamVR's Oculus Touch models stand in.
+SONY_MODELS="$STEAM_ROOT/steamapps/common/PlayStation VR2 App/SteamVR_Plug-In/resources/rendermodels"
+[ -d "$SONY_MODELS" ] || SONY_MODELS="$HOME/.steam/steam/steamapps/common/PlayStation VR2 App/SteamVR_Plug-In/resources/rendermodels"
+if [ -d "$SONY_MODELS/playstation_vr2_sense_left" ] && [ -d "$SONY_MODELS/playstation_vr2_sense_right" ]; then
+	mkdir -p "$PLUGIN/resources/rendermodels"
+	for side in left right; do
+		ln -sfn "$SONY_MODELS/playstation_vr2_sense_$side" "$PLUGIN/resources/rendermodels/playstation_vr2_sense_$side"
+	done
+	export OVRD_PSSENSE_RENDER_MODELS=1
+	echo "  linked PS VR2 Sense render models from the PlayStation VR2 App"
+fi
+
+# ROOM_SETUP=1 ./launch-steamvr.sh runs SteamVR's own room setup instead of the driver-provided 2m play area.
+if [ "${ROOM_SETUP:-0}" = 1 ]; then
+	export OVRD_PLAY_AREA_SIZE=0
+	echo "  ROOM_SETUP=1: not providing a play area, SteamVR room setup will run"
+fi
+
 export VALVE_SKIP_RUNTIME_SAFETY=1
 export XRT_LOG=debug
 export PSVR2_LOG=debug
