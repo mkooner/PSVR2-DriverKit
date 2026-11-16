@@ -2410,7 +2410,10 @@ pssense_create(struct xrt_prober *xp,
 	    .min_blink_duration_ns = PERIOD_ID_TO_DURATION_NS(1),
 	    .max_blink_duration_ns = PERIOD_ID_TO_DURATION_NS(MAX_PERIOD_ID),
 	    .time_to_resync_ns = T_LED_SYNC_DEFAULT_RESYNC_TIME,
-	    .settle_frames = 7,
+	    // Frames after a sample is confirmed applied before measuring. 7 dated from when "applied" was marked
+	    // before the controller had the sample; now it's confirmed by the controller's echo (~10ms round trips),
+	    // and the count calibration's steps took ~0.35s each, giving the window time to drift.
+	    .settle_frames = 3,
 	    // 8ms latency cap, something a bit overboard for bluetooth but better than searching the whole range
 	    .latency_cap_ns = U_TIME_1MS_IN_NS * 8LL,
 	};

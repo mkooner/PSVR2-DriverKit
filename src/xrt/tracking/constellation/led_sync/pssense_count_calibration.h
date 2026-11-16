@@ -26,8 +26,8 @@
 #include <stdatomic.h>
 
 
-//! Frames of blob counts averaged per decision, once the LED change settled.
-#define COUNT_FRAMES_PER_STEP 3
+//! Frames of blob counts averaged per decision, once the LED change settled (counts are clean: 0 off, 15-30 on).
+#define COUNT_FRAMES_PER_STEP 2
 //! Frames of blob counts for the LEDs-off baseline.
 #define COUNT_BASELINE_FRAMES 10
 //! Blobs above the baseline that mean the LEDs are visible, PSVR2Toolkit uses 3.
