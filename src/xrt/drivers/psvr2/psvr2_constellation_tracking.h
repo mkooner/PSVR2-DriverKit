@@ -58,11 +58,25 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 struct psvr2_constellation_tracking_source
 {
 	struct t_constellation_tracker_tracking_source base;
+	struct psvr2_hmd *hmd;
+
+	//! Latest camera 0 pose, used if the history has nothing yet.
 	struct xrt_space_relation current_pose;
+
+	//! Camera 0 poses from the headset SLAM, in headset VTS time.
+	struct m_relation_history *history;
 };
 
 void
-psvr2_constellation_tracking_source_create(struct psvr2_constellation_tracking_source **out_src);
+psvr2_constellation_tracking_source_create(struct psvr2_hmd *hmd, struct psvr2_constellation_tracking_source **out_src);
+
+void
+psvr2_constellation_tracking_source_destroy(struct psvr2_constellation_tracking_source **src_ptr);
+
+void
+psvr2_constellation_tracking_source_push(struct psvr2_constellation_tracking_source *src,
+                                         const struct xrt_space_relation *cam0_relation,
+                                         timepoint_ns vts_ns);
 
 void
 psvr2_constellation_get_tracked_pose(struct t_constellation_tracker_tracking_source *,

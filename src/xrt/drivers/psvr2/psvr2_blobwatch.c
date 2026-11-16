@@ -27,14 +27,41 @@ psvr2_blobwatch_mark_blob_device(struct t_blobwatch *tbw,
 {
 	struct psvr2_blobwatch *bw = (struct psvr2_blobwatch *)tbw;
 
-	for (size_t j = 0; j < bw->swapbuffer[tbo->id].num_previous; j++) {
-		for (size_t i = 0; i < tbo->num_blobs; i++) {
-			if (tbo->blobs[i].blob_id == bw->swapbuffer[tbo->id].previous[j].blob_id) {
-				bw->swapbuffer[tbo->id].previous[j].matched_device_id = device_id;
+	if (tbo->id >= PSVR2_MOSAIC_COUNT) {
+		return;
+	}
+
+	os_mutex_lock(&bw->mutex);
+
+	struct psvr2_blobwatch_blob_swapbuffer *swb = &bw->swapbuffer[tbo->id];
+
+	// Like t_rift_blobwatch: replace this device's labels on the most recent frame with the ones the tracker just
+	// matched, carried over by blob ID. Labels for other devices are left alone.
+	for (size_t j = 0; j < swb->num_previous; j++) {
+		struct t_blob *prev = &swb->previous[j];
+		if (prev->matched_device_id == device_id) {
+			prev->matched_device_id = XRT_CONSTELLATION_INVALID_DEVICE_ID;
+			prev->matched_device_led_id = XRT_CONSTELLATION_INVALID_LED_ID;
+		}
+	}
+
+	for (uint32_t i = 0; i < tbo->num_blobs; i++) {
+		const struct t_blob *matched = &tbo->blobs[i];
+		if (matched->matched_device_id != device_id) {
+			continue;
+		}
+
+		for (size_t j = 0; j < swb->num_previous; j++) {
+			struct t_blob *prev = &swb->previous[j];
+			if (prev->blob_id == matched->blob_id) {
+				prev->matched_device_id = matched->matched_device_id;
+				prev->matched_device_led_id = matched->matched_device_led_id;
 				break;
 			}
 		}
 	}
+
+	os_mutex_unlock(&bw->mutex);
 }
 
 void
@@ -46,14 +73,14 @@ led_to_blob(struct ld_led *led, struct t_blob *out_blob)
 	out_blob->matched_device_id = XRT_CONSTELLATION_INVALID_DEVICE_ID;
 	out_blob->matched_device_led_id = XRT_CONSTELLATION_INVALID_LED_ID;
 	out_blob->center_distorted = (struct xrt_vec2){
-	    .x = (float)((left + right) / 2),
-	    .y = (float)((top + bottom) / 2),
+	    .x = (float)(left + right) * 0.5f + PSVR2_LD_X_BIAS_PX,
+	    .y = (float)(top + bottom) * 0.5f,
 	};
 	out_blob->motion_vector = (struct xrt_vec2){0}, // We don't have motion vector data, so set it to 0
 	    out_blob->bounding_box = (struct xrt_rect){
 	        .offset =
 	            {
-	                .w = left,
+	                .w = left + (int)PSVR2_LD_X_BIAS_PX,
 	                .h = top,
 	            },
 	        .extent =
@@ -104,7 +131,10 @@ rect_overlaps(struct xrt_rect a, struct xrt_rect b)
 
 
 void
-psvr2_blobwatch_push_ld_payload(struct psvr2_blobwatch *bw, struct ld_payload *payload, timepoint_ns timestamp_ns)
+psvr2_blobwatch_push_ld_payload(struct psvr2_blobwatch *bw,
+                                struct ld_payload *payload,
+                                uint64_t sequence_id,
+                                timepoint_ns timestamp_ns)
 {
 	if (bw == NULL) {
 		return;
@@ -120,6 +150,8 @@ psvr2_blobwatch_push_ld_payload(struct psvr2_blobwatch *bw, struct ld_payload *p
 			// dont even bother processing empty frames, that just causes issues with tracking continuity
 			continue;
 		}
+
+		os_mutex_lock(&bw->mutex);
 
 		// TODO: instead of just overwriting the LEDs each update
 		// Check if any LEDs look like an existing one, and just update it in place instead.
@@ -175,6 +207,8 @@ psvr2_blobwatch_push_ld_payload(struct psvr2_blobwatch *bw, struct ld_payload *p
 				destinationBlob->blob_id = bw->swapbuffer[i].previous[best_guess_index].blob_id;
 				destinationBlob->matched_device_id =
 				    bw->swapbuffer[i].previous[best_guess_index].matched_device_id;
+				destinationBlob->matched_device_led_id =
+				    bw->swapbuffer[i].previous[best_guess_index].matched_device_led_id;
 				destinationBlob->motion_vector =
 				    best_difference; // Not yet confirmed if I have this in the right direction
 			}
@@ -184,12 +218,21 @@ psvr2_blobwatch_push_ld_payload(struct psvr2_blobwatch *bw, struct ld_payload *p
 		    .source = &bw->base,
 		    .id = i, // For this implementation, observation ID correlates to which camera detected the LED.
 		    // Converted from the headset's VTS clock to host monotonic time by the caller.
+		    // Same as the exposure event's sequence_id, LED sync pairs frames with LED states by it.
+		    .sequence_id = sequence_id,
 		    .timestamp_ns = timestamp_ns,
 		    .blobs = bw->swapbuffer[i].scratch,
 		    .num_blobs = camera->num_leds,
 		};
-		bw->blob_sink[i]->push_blobs(bw->blob_sink[i], &xbo);
+		// The sink copies the blobs, so release the lock before pushing: the tracker may call back into
+		// mark_blob_device from the same thread.
+		struct t_blob blobs_copy[PSVR2_MAX_LEDS_PER_CAMERA];
+		memcpy(blobs_copy, bw->swapbuffer[i].scratch, sizeof(struct t_blob) * camera->num_leds);
+		xbo.blobs = blobs_copy;
 		psvr2_blobwatch_toggle_swapbuffer(&bw->swapbuffer[i], camera->num_leds);
+		os_mutex_unlock(&bw->mutex);
+
+		bw->blob_sink[i]->push_blobs(bw->blob_sink[i], &xbo);
 	}
 }
 
@@ -199,6 +242,8 @@ psvr2_blobwatch_push_ld_payload(struct psvr2_blobwatch *bw, struct ld_payload *p
 void
 psvr2_blobwatch_destroy(struct t_blobwatch *tbw)
 {
+	struct psvr2_blobwatch *bw = (struct psvr2_blobwatch *)tbw;
+	os_mutex_destroy(&bw->mutex);
 	free(tbw);
 }
 
@@ -231,6 +276,7 @@ psvr2_blobwatch_create(struct xrt_frame_context *xfctx,
 	for (size_t i = 0; i < PSVR2_MOSAIC_COUNT; i++) {
 		bw->camera_models[i] = camera_models[i];
 	}
+	os_mutex_init(&bw->mutex);
 
 	for (size_t i = 0; i < PSVR2_MOSAIC_COUNT; i++) {
 		memset(bw->swapbuffer[i].blobBuffA, 0, sizeof(bw->swapbuffer[i].blobBuffA));

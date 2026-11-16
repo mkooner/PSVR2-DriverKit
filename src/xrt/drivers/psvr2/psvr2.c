@@ -111,6 +111,11 @@ psvr2_hmd_destroy(struct xrt_device *xdev)
 
 	m_ff_vec3_f32_free(&hmd->ff_gyro);
 	m_relation_history_destroy(&hmd->slam_relation_history);
+	/*
+	 * @todo The LED tracker lives on hmd->xfctx, which is never torn down, and its worker thread can still call
+	 * mark_blob_device on the blobwatch. Until the tracker is destroyed here first, the blobwatch and origin
+	 * source are deliberately left alive with it rather than freed under it.
+	 */
 	os_mutex_destroy(&hmd->data_lock);
 	u_device_free(&hmd->base);
 }
@@ -565,8 +570,8 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	        XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT),
 	};
 
-	// Is this the right pose?
-	hmd->constellation_origin_source->current_pose = cam0_relation;
+	// Is this the right pose? (camera 0's pose from the headset SLAM; to verify on hardware)
+	psvr2_constellation_tracking_source_push(hmd->constellation_origin_source, &cam0_relation, vts_ns);
 
 	m_relation_history_push_with_motion_estimation(hmd->slam_relation_history, &relation, pose_sample.timestamp_ns);
 }
@@ -649,8 +654,11 @@ led_xfer_cb(struct libusb_transfer *xfer)
 	os_mutex_unlock(&hmd->data_lock);
 
 	if (clock_ready) {
-		psvr2_blobwatch_push_ld_payload(hmd->blobwatch, payload, ld_timestamp_ns);
+		psvr2_blobwatch_push_ld_payload(hmd->blobwatch, payload, payload->header.frame_counter, ld_timestamp_ns);
 	}
+
+	uint32_t ld_frames_delta =
+	    hmd->have_last_led_frame ? (uint32_t)(payload->header.frame_counter - hmd->last_led_frame_counter) : 0;
 
 	if (hmd->timing_source && clock_ready) {
 		// Use the headset's own frame timestamp rather than USB arrival time, which adds transfer latency and
@@ -662,12 +670,18 @@ led_xfer_cb(struct libusb_transfer *xfer)
 		        {
 		            .sequence_id = payload->header.frame_counter,
 		            .timestamp_ns = ld_timestamp_ns,
-		            .frame_period_ns =
-		                (time_duration_ns)((payload->header.timestamp - hmd->last_led_timestamp_us) * 1000),
+		            // Per frame, so a dropped LD payload doesn't report a doubled period. 0 lets pssense fall
+		            // back to its own estimate (first frame, or no frame counter progress).
+		            .frame_period_ns = ld_frames_delta > 0 ? (time_duration_ns)(payload->header.timestamp -
+		                                                                        hmd->last_led_timestamp_us) *
+		                                                         U_TIME_1US_IN_NS / ld_frames_delta
+		                                                   : 0,
 		            .exposure_time_ns = (time_duration_ns)(0),
 		        },
 		};
 		hmd->last_led_timestamp_us = payload->header.timestamp;
+		hmd->last_led_frame_counter = payload->header.frame_counter;
+		hmd->have_last_led_frame = true;
 
 		t_timing_event_sink_push_timing_event(hmd->timing_sink, &event);
 	}
@@ -1445,7 +1459,7 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		goto cleanup;
 	}
 
-	psvr2_constellation_tracking_source_create(&hmd->constellation_origin_source);
+	psvr2_constellation_tracking_source_create(hmd, &hmd->constellation_origin_source);
 
 	// This list should be ordered, most preferred first.
 	size_t idx = 0;

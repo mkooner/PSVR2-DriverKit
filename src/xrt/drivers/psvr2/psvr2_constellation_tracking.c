@@ -23,9 +23,6 @@
 #include "../pssense/pssense_interface.h"
 
 // Version of the camera relation data that is easier to work with for determining final orientation of all cameras
-//! Pixels the LD payload's x coordinates are off by, at the 1016x1016 calibration resolution.
-#define PSVR2_LD_X_BIAS_PX 8.0f
-
 struct camera_relation_internal
 {
 	uint8_t parent_id;
@@ -37,11 +34,34 @@ struct camera_relation_internal
 
 
 void
-psvr2_constellation_tracking_source_create(struct psvr2_constellation_tracking_source **out_src)
+psvr2_constellation_tracking_source_create(struct psvr2_hmd *hmd, struct psvr2_constellation_tracking_source **out_src)
 {
 	struct psvr2_constellation_tracking_source *src = U_TYPED_CALLOC(struct psvr2_constellation_tracking_source);
 	src->base.get_tracked_pose = psvr2_constellation_get_tracked_pose;
+	src->hmd = hmd;
+	m_relation_history_create(&src->history);
 	*out_src = src;
+}
+
+void
+psvr2_constellation_tracking_source_destroy(struct psvr2_constellation_tracking_source **src_ptr)
+{
+	struct psvr2_constellation_tracking_source *src = *src_ptr;
+	if (src == NULL) {
+		return;
+	}
+	m_relation_history_destroy(&src->history);
+	free(src);
+	*src_ptr = NULL;
+}
+
+void
+psvr2_constellation_tracking_source_push(struct psvr2_constellation_tracking_source *src,
+                                         const struct xrt_space_relation *cam0_relation,
+                                         timepoint_ns vts_ns)
+{
+	src->current_pose = *cam0_relation;
+	m_relation_history_push(src->history, cam0_relation, vts_ns);
 }
 
 void
@@ -51,7 +71,17 @@ psvr2_constellation_get_tracked_pose(struct t_constellation_tracker_tracking_sou
 {
 	struct psvr2_constellation_tracking_source *source = (struct psvr2_constellation_tracking_source *)src;
 
-	*out_relation = source->current_pose;
+	/*
+	 * The tracker asks in host monotonic time (blob timestamps are converted from the headset VTS clock), while
+	 * SLAM poses are stored in VTS time, so convert back with the same offset. An int64 read, so no lock needed
+	 * here (and taking data_lock could deadlock if the tracker calls in from a USB callback).
+	 */
+	timepoint_ns vts_ns = when_ns - source->hmd->hw2mono_vts;
+
+	enum m_relation_history_result res = m_relation_history_get(source->history, vts_ns, out_relation);
+	if (res == M_RELATION_HISTORY_RESULT_INVALID) {
+		*out_relation = source->current_pose;
+	}
 }
 
 
@@ -197,14 +227,8 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 
 	struct t_camera_model_params camera_models[PSVR2_MOSAIC_COUNT] = {0};
 	for (size_t i = 0; i < mosaic->num_cameras; i++) {
+		// Same model the tracker builds from this calibration; the LD x bias is applied to the blobs.
 		t_camera_model_params_from_t_camera_calibration(&mosaic->cameras[i].calibration, &camera_models[i]);
-
-		/*
-		 * The LD payload's x coordinates are 4px short at its binned 508x508 resolution, so 8px at the
-		 * 1016x1016 calibration resolution. Shift the principal point to compensate, as PSVR2Toolkit does
-		 * for Sony's tracker (driver_hooks/ir_tracker_hooks.cpp, IrTracker__ParseConfigHook).
-		 */
-		camera_models[i].cx -= PSVR2_LD_X_BIAS_PX;
 	}
 
 	psvr2_blobwatch_create(
