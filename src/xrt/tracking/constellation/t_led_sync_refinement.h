@@ -368,6 +368,8 @@ struct t_led_sync_refinement
 		time_duration_ns plausible_left_ns, plausible_right_ns;
 		//! The edges of this pass are plausible, a failed confirmation can accept them.
 		bool pass_plausible;
+		//! Largest on - off blob count difference read in this pass, for the quick acceptance.
+		float pass_max_delta;
 		//! This calibration follows a hold that lost the LEDs: finish on plausible edges without confirming.
 		bool quick;
 
@@ -382,6 +384,10 @@ struct t_led_sync_refinement
 		timepoint_ns hold_start_ns, hold_trim_last_ns;
 		double hold_corrections_sum_ns, hold_trim_integral_ns;
 		uint32_t hold_unseen_probes;
+		//! The hold has seen this controller since its calibration (the window is confirmed by the tracker).
+		bool hold_seen_since_calib;
+		//! When the current run of unseen probes started.
+		timepoint_ns hold_unseen_since_ns;
 		//! Adaptive probe interval: lengthened while the probes keep finding the blink centred.
 		time_duration_ns hold_interval_ns;
 		uint32_t hold_centred_streak;

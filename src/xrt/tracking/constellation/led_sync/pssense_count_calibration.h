@@ -80,6 +80,13 @@ enum count_calib_state
  */
 #define COUNT_CALIB_EMPTY_RETRY_NS (U_TIME_1S_IN_NS)
 
+/*!
+ * The quick recalibration (after a lost hold) skips the confirmation only with a strong signal: an on - off blob count
+ * difference of at least this much somewhere in the pass. On hardware (11:50) one was accepted on 4 vs 0.5 blobs, just
+ * over the 3 blob threshold, and lost again.
+ */
+#define COUNT_QUICK_MIN_DELTA 8.0f
+
 
 //! The refinement currently calibrating, only one may at a time.
 static _Atomic(struct t_led_sync_refinement *) count_calib_owner = NULL;
@@ -198,6 +205,7 @@ count_calib_research(struct t_led_sync_refinement *refinement, const char *why)
 	}
 	cc->state = COUNT_CALIB_FIND_ON;
 	cc->swept_ns = 0;
+	cc->pass_max_delta = 0;
 	count_calib_set_offset(refinement, start_ns);
 }
 
@@ -311,6 +319,7 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	cc->hold_corrections_sum_ns = 0;
 	cc->hold_trim_integral_ns = 0;
 	cc->hold_unseen_probes = 0;
+	cc->hold_seen_since_calib = false;
 	cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
 	cc->hold_centred_streak = 0;
 	count_calib_set_offset(refinement, centre_ns);
@@ -329,6 +338,7 @@ count_calib_start_sweep(struct t_led_sync_refinement *refinement)
 	cc->state = COUNT_CALIB_FIND_ON;
 	cc->swept_ns = 0;
 	cc->pass_plausible = false;
+	cc->pass_max_delta = 0;
 	count_calib_set_offset(refinement, start_ns);
 }
 
@@ -433,6 +443,9 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 	cc->baseline = mean;
 	cc->threshold = mean + COUNT_THRESHOLD_MARGIN;
 	bool on = cc->on_mean > cc->threshold;
+	if (cc->on_mean - mean > cc->pass_max_delta) {
+		cc->pass_max_delta = cc->on_mean - mean;
+	}
 
 	LOG_DEBUG(refinement,
 	          "Count calibration state %d offset %" PRId64 "us: %.1f blobs with LEDs, %.1f without -> %s", cc->state,
@@ -514,7 +527,7 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 				cc->plausible_left_ns = cc->left_ns;
 				cc->plausible_right_ns = cc->right_ns;
 			}
-			if (cc->quick && cc->pass_plausible) {
+			if (cc->quick && cc->pass_plausible && cc->pass_max_delta >= COUNT_QUICK_MIN_DELTA) {
 				/*
 				 * Recalibrating after a lost hold: the hold's edge probes centre the window within seconds, so
 				 * skip the four confirmation steps (and the re-searches a failed one starts).
@@ -620,8 +633,17 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 #define COUNT_HOLD_EDGE_MARGIN_NS (U_TIME_1US_IN_NS * 150)
 #define COUNT_HOLD_DRIFT_MIN_T_NS (U_TIME_1S_IN_NS * 10)
 #define COUNT_HOLD_DRIFT_MAX (50e-6)
-//! Probes in a row with this controller's LEDs not seen at the centre before calibrating again.
+//! Probes in a row with this controller's LEDs not seen at the centre before calibrating again (unconfirmed window).
 #define COUNT_HOLD_UNSEEN_PROBES 3
+/*!
+ * Once the hold has seen the controller since its calibration, how long it keeps the timing while the controller is
+ * unseen. Unseen almost always means out of view: the timing can only walk out of the window by drift, which at the
+ * <= 30ppm measured takes >= 40s to cross the 1280us loss point. Calibrating again after 3 probes (~5s) instead
+ * threw away a good window: on hardware (11:50) both controllers left every camera's view for ~17s, the windows found
+ * afterwards were within 550-650us of the held ones, and the recalibrations, with the controllers out of view or half
+ * visible, looped (calibrate, lose, calibrate) so tracking only fully returned ~15s after they were back in view.
+ */
+#define COUNT_HOLD_UNSEEN_KEEP_NS (U_TIME_1S_IN_NS * 20)
 
 static void
 count_hold_integrate_trim(struct t_led_sync_refinement *refinement, timepoint_ns now_ns)
@@ -662,7 +684,11 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 
 	if (in_view) {
 		cc->hold_unseen_probes = 0;
+		cc->hold_seen_since_calib = true;
 	} else {
+		if (cc->hold_unseen_probes == 0) {
+			cc->hold_unseen_since_ns = now_ns;
+		}
 		cc->hold_unseen_probes++;
 	}
 
@@ -695,9 +721,14 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 	cc->hold_last_apply_ns = now_ns;
 	cc->hold_sub = 0;
 
-	if (cc->hold_unseen_probes >= COUNT_HOLD_UNSEEN_PROBES) {
-		// This controller's own LEDs gone at the centre for several probes: find the window again.
-		LOG_INFO(refinement, "Count hold lost the LEDs for %u probes, calibrating again", cc->hold_unseen_probes);
+	bool lost = cc->hold_seen_since_calib
+	                ? (cc->hold_unseen_probes > 0 && now_ns - cc->hold_unseen_since_ns >= COUNT_HOLD_UNSEEN_KEEP_NS)
+	                : cc->hold_unseen_probes >= COUNT_HOLD_UNSEEN_PROBES;
+	if (lost) {
+		// This controller's own LEDs gone at the centre for too long: find the window again.
+		LOG_INFO(refinement, "Count hold lost the LEDs for %u probes (%.0fs, window %s), calibrating again",
+		         cc->hold_unseen_probes, (double)(now_ns - cc->hold_unseen_since_ns) / U_TIME_1S_IN_NS,
+		         cc->hold_seen_since_calib ? "confirmed" : "never confirmed");
 		set_phase_locked(refinement, T_LED_SYNC_PHASE_FIND_INITIAL_OFFSET);
 		cc->quick = true;
 		return;
