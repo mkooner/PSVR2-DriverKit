@@ -103,6 +103,7 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR
  * while earlier ones are still queued. Anything pending (LED sync sample, vibration, LED settings) goes out in the next
  * allowed report. 0 disables the cap.
  */
+DEBUG_GET_ONCE_FLOAT_OPTION(pssense_imu_angle_deg, "PSSENSE_IMU_ANGLE_DEG", PSSENSE_IMU_ANGLE_DEG_DEFAULT)
 DEBUG_GET_ONCE_NUM_OPTION(pssense_bt_min_send_interval_ms, "PSSENSE_BT_MIN_SEND_INTERVAL_MS", 33)
 //! How long to stop sending after a failed output report, to let the Bluetooth link drain.
 #define PSSENSE_SEND_FAIL_BACKOFF_NS (U_TIME_1MS_IN_NS * 100)
@@ -2375,7 +2376,9 @@ pssense_create(struct xrt_prober *xp,
 	pssense->hid = hid;
 
 	// Initialize the IMU orientation to be correct
-	struct xrt_quat imu_orientation_quat = quat_from_x_rot(pssense_imu_angle);
+	const float imu_angle_deg = debug_get_float_option_pssense_imu_angle_deg();
+	PSSENSE_DEBUG(pssense, "LED -> IMU rotation: %.2f deg about X", imu_angle_deg);
+	struct xrt_quat imu_orientation_quat = quat_from_x_rot(DEG_TO_RAD(imu_angle_deg));
 
 	const struct t_constellation_tracker_led *led_model = NULL;
 	if (xpdev->product_id == PSSENSE_PID_LEFT) {
