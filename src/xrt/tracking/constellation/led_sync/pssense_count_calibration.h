@@ -34,8 +34,19 @@
 #define COUNT_THRESHOLD_MARGIN 3.0f
 //! Edge search resolution, as in PSVR2Toolkit.
 #define COUNT_EDGE_RESOLUTION_NS (U_TIME_1US_IN_NS * 25)
-//! Edge confirmation distance, as in PSVR2Toolkit.
-#define COUNT_CONFIRM_NS (U_TIME_1US_IN_NS * 50)
+/*!
+ * Edge confirmation distance. PSVR2Toolkit uses 50us, but on hardware the window drifted more than that between the
+ * search and the confirmation (15-30us/s); the 1.5ms blink has ~500us of room in the ~2.5ms window anyway.
+ */
+#define COUNT_CONFIRM_NS (U_TIME_1US_IN_NS * 200)
+//! Hold: how often to probe both window edges, and sooner when the controller isn't seen.
+#define COUNT_HOLD_PROBE_NS (U_TIME_1S_IN_NS * 3)
+#define COUNT_HOLD_PROBE_UNSEEN_NS (U_TIME_1S_IN_NS * 1)
+//! Hold: how far inside each window edge the probes go, and the correction step.
+#define COUNT_HOLD_PROBE_MARGIN_NS (U_TIME_1US_IN_NS * 100)
+#define COUNT_HOLD_STEP_NS (U_TIME_1US_IN_NS * 100)
+//! Hold: how often the drift estimate moves the centre.
+#define COUNT_HOLD_APPLY_NS (U_TIME_1MS_IN_NS * 500)
 //! Exposure to assume when the source doesn't report one.
 #define COUNT_DEFAULT_EXPOSURE_NS (U_TIME_1US_IN_NS * 1000)
 
@@ -104,8 +115,37 @@ count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_n
 }
 
 static void
+count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_ns offset_ns);
+
+static void
+count_calib_restart(struct t_led_sync_refinement *refinement, const char *why);
+
+/*!
+ * A confirmation failed: the window was found moments ago, so search again just before it instead of sweeping the
+ * whole frame and handing over the token. Falls back to a full restart after a few tries.
+ */
+static void
+count_calib_research(struct t_led_sync_refinement *refinement, const char *why)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	if (++cc->local_retries > 3) {
+		count_calib_restart(refinement, why);
+		return;
+	}
+	LOG_DEBUG(refinement, "Count calibration searching again near the window (%s), retry %u", why,
+	          cc->local_retries);
+	time_duration_ns start_ns = cc->left_ns - cc->full_window_ns;
+	if (start_ns < 0) {
+		start_ns = 0;
+	}
+	cc->state = COUNT_CALIB_FIND_ON;
+	count_calib_set_offset(refinement, start_ns);
+}
+
+static void
 count_calib_restart(struct t_led_sync_refinement *refinement, const char *why)
 {
+	refinement->count_calib.local_retries = 0;
 	LOG_DEBUG(refinement, "Count calibration restarting (%s), attempt %u", why, refinement->count_calib.attempts);
 	refinement->count_calib.attempts++;
 	// Give the other controller a turn.
@@ -182,6 +222,14 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	         (int64_t)((window_ns - refinement->current_blink_duration_ns) / U_TIME_1US_IN_NS),
 	         (int64_t)(centre_ns / U_TIME_1US_IN_NS));
 
+	cc->local_retries = 0;
+	cc->hold_centre_ns = centre_ns;
+	cc->hold_window_ns = window_ns;
+	cc->hold_sub = 0;
+	cc->hold_last_probe_ns = os_monotonic_get_ns();
+	cc->hold_last_apply_ns = cc->hold_last_probe_ns;
+	cc->hold_drift_ns_per_s = 0;
+	cc->hold_corrections = 0;
 	count_calib_set_offset(refinement, centre_ns);
 	refinement->frames_since_last_visually_seen = 0;
 	set_phase_locked(refinement, T_LED_SYNC_PHASE_COUNT_HOLD);
@@ -274,7 +322,7 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 
 	case COUNT_CALIB_CONFIRM_LEFT_OUTER:
 		if (on) {
-			count_calib_restart(refinement, "left edge confirmation: on just before it");
+			count_calib_research(refinement, "left edge confirmation: on just before it");
 			break;
 		}
 		cc->state = COUNT_CALIB_CONFIRM_LEFT_INNER;
@@ -283,7 +331,7 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 
 	case COUNT_CALIB_CONFIRM_LEFT_INNER:
 		if (!on) {
-			count_calib_restart(refinement, "left edge confirmation: off just after it");
+			count_calib_research(refinement, "left edge confirmation: off just after it");
 			break;
 		}
 		cc->state = COUNT_CALIB_CONFIRM_RIGHT_OUTER;
@@ -292,7 +340,7 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 
 	case COUNT_CALIB_CONFIRM_RIGHT_OUTER:
 		if (on) {
-			count_calib_restart(refinement, "right edge confirmation: on just after it");
+			count_calib_research(refinement, "right edge confirmation: on just after it");
 			break;
 		}
 		cc->state = COUNT_CALIB_CONFIRM_RIGHT_INNER;
@@ -301,7 +349,7 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 
 	case COUNT_CALIB_CONFIRM_RIGHT_INNER:
 		if (!on) {
-			count_calib_restart(refinement, "right edge confirmation: off just before it");
+			count_calib_research(refinement, "right edge confirmation: off just before it");
 			break;
 		}
 		count_calib_finish(refinement);
@@ -311,7 +359,84 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 	}
 }
 
-//! The blink stays centred: in PRESCAN the driver re-anchors it to every exposure through its clock tracking.
+/*!
+ * Keeps the blink centred in the window. Nothing measured the drift before (15-30us/s on hardware, from the
+ * controller clock estimate's rate error), so the lock would slide out within a minute. Every few seconds the blink
+ * is moved just inside each window edge for a few frames, the LEDs stay visible if it's still centred, and if one
+ * side goes dark the centre is moved away from it; the corrections also build a drift rate that moves the centre
+ * between probes.
+ */
 static void
 handle_count_hold(struct t_led_sync_refinement *refinement)
-{}
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	timepoint_ns now_ns = os_monotonic_get_ns();
+
+	time_duration_ns probe_ns = (cc->hold_window_ns - refinement->current_blink_duration_ns) / 2 -
+	                            COUNT_HOLD_PROBE_MARGIN_NS;
+	if (probe_ns < COUNT_HOLD_PROBE_MARGIN_NS) {
+		probe_ns = COUNT_HOLD_PROBE_MARGIN_NS;
+	}
+
+	if (cc->hold_sub == 0) {
+		time_duration_ns since_apply_ns = now_ns - cc->hold_last_apply_ns;
+		if (since_apply_ns >= COUNT_HOLD_APPLY_NS) {
+			cc->hold_centre_ns += (time_duration_ns)(cc->hold_drift_ns_per_s * (double)since_apply_ns /
+			                                         (double)U_TIME_1S_IN_NS);
+			cc->hold_last_apply_ns = now_ns;
+			count_calib_set_offset(refinement, cc->hold_centre_ns);
+			return;
+		}
+
+		bool unseen = refinement->frames_since_last_visually_seen > 60;
+		time_duration_ns since_probe_ns = now_ns - cc->hold_last_probe_ns;
+		if (since_probe_ns >= COUNT_HOLD_PROBE_NS || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS)) {
+			cc->hold_sub = 1;
+			count_calib_set_offset(refinement, cc->hold_centre_ns - probe_ns);
+		}
+		return;
+	}
+
+	float mean = 0;
+	if (!count_calib_accumulate(refinement, COUNT_FRAMES_PER_STEP, &mean)) {
+		return;
+	}
+
+	if (cc->hold_sub == 1) {
+		cc->hold_left_mean = mean;
+		cc->hold_sub = 2;
+		count_calib_set_offset(refinement, cc->hold_centre_ns + probe_ns);
+		return;
+	}
+
+	bool left_on = cc->hold_left_mean > cc->threshold;
+	bool right_on = mean > cc->threshold;
+	double dt_s = (double)(now_ns - cc->hold_last_probe_ns) / U_TIME_1S_IN_NS;
+	int e = 0;
+	if (!left_on && right_on) {
+		e = 1; // The window moved later.
+	} else if (left_on && !right_on) {
+		e = -1; // The window moved earlier.
+	}
+	if (e != 0) {
+		cc->hold_centre_ns += e * COUNT_HOLD_STEP_NS;
+		cc->hold_corrections++;
+		if (dt_s > 0.5) {
+			cc->hold_drift_ns_per_s += 0.3 * e * (double)COUNT_HOLD_STEP_NS / dt_s;
+			const double max_drift = (double)U_TIME_1US_IN_NS * 500;
+			cc->hold_drift_ns_per_s = CLAMP(cc->hold_drift_ns_per_s, -max_drift, max_drift);
+		}
+	}
+	LOG_DEBUG(refinement,
+	          "Count hold probe: left %.1f right %.1f blobs (threshold %.1f) -> %s, centre %" PRId64
+	          "us, drift %+.1fus/s, %u corrections",
+	          cc->hold_left_mean, mean, cc->threshold,
+	          e > 0 ? "moved later" : (e < 0 ? "moved earlier" : (left_on ? "centred" : "not in view")),
+	          (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), cc->hold_drift_ns_per_s / 1000.0,
+	          cc->hold_corrections);
+
+	cc->hold_last_probe_ns = now_ns;
+	cc->hold_last_apply_ns = now_ns;
+	cc->hold_sub = 0;
+	count_calib_set_offset(refinement, cc->hold_centre_ns);
+}

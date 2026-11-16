@@ -258,6 +258,8 @@ struct pssense_device
 		bool increment_sequence_num;
 		//! Count calibration in use: PRESCAN positions are re-anchored to every exposure, as in basic sync.
 		bool count_calibration;
+		//! Set by pssense_handle_read when it got a report, so the thread can drain the queue.
+		bool read_had_data;
 		//! Last PRESCAN re-anchor (new sequence number) in count calibration mode.
 		timepoint_ns last_reanchor_ns;
 		uint8_t led_sequence_num;
@@ -800,6 +802,7 @@ pssense_handle_read(struct pssense_device *pssense)
 		PSSENSE_ERROR(pssense, "Error reading from device: %d", ret);
 		return ret;
 	}
+	pssense->tracking.read_had_data = true;
 
 	switch (buf[0]) {
 	case INPUT_REPORT_ID_USB: {
@@ -1042,7 +1045,17 @@ pssense_run_thread(void *ptr)
 	while (os_thread_helper_is_running_locked(&pssense->controller_thread) && result >= 0) {
 		os_thread_helper_unlock(&pssense->controller_thread);
 
-		result = pssense_handle_read(pssense);
+		/*
+		 * Drain what's queued rather than one report per loop: the loop sleeps up to 1ms between passes and
+		 * reports arriving in a burst after a Bluetooth stall waited behind each other, adding latency.
+		 */
+		for (int reads = 0; reads < 16; reads++) {
+			pssense->tracking.read_had_data = false;
+			result = pssense_handle_read(pssense);
+			if (result < 0 || !pssense->tracking.read_had_data) {
+				break;
+			}
+		}
 
 		if (result >= 0) {
 			timepoint_ns now = os_monotonic_get_ns();

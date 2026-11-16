@@ -320,6 +320,16 @@ struct t_led_sync_refinement
 		//! Each step measures the LEDs at the offset, then off, and compares the two.
 		bool off_phase;
 		float on_mean;
+		//! Local re-searches since the last full restart.
+		uint32_t local_retries;
+
+		//! Hold: the centre, measured window, probing state and drift correction.
+		time_duration_ns hold_centre_ns, hold_window_ns;
+		int hold_sub;
+		float hold_left_mean;
+		timepoint_ns hold_last_probe_ns, hold_last_apply_ns;
+		double hold_drift_ns_per_s;
+		uint32_t hold_corrections;
 		time_duration_ns full_window_ns, offset_ns, lower_ns, upper_ns, left_ns, right_ns;
 		uint32_t attempts;
 	} count_calib;
