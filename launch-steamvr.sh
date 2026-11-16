@@ -49,7 +49,7 @@ fail() { echo "  [!!] $*"; exit 1; }
 [ -x "$STEAMVR/bin/vrstartup.sh" ] || fail "SteamVR not found at $STEAMVR (set STEAMVR_DIR)"
 [ -f "$VRPATH" ] || fail "no OpenVR config at $VRPATH: run SteamVR once normally first"
 command -v python3 >/dev/null || fail "python3 is needed to edit the OpenVR config"
-if pgrep -x vrserver >/dev/null || pgrep -f vrmonitor >/dev/null; then
+if pgrep -x vrserver >/dev/null || pgrep -x vrmonitor >/dev/null; then
 	fail "SteamVR is already running, close it first"
 fi
 if pgrep -x monado-service >/dev/null; then
