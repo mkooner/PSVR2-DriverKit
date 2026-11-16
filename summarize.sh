@@ -54,6 +54,11 @@ if [ -n "$ts" ]; then
 fi
 
 echo
+echo "== LED timing jitter (exposure timestamps; re-anchor moves should be small)"
+grep -E "Exposure timestamp jitter" "$LOG" | tail -2 | sed -E 's/.*Exposure timestamp jitter: /  /' | cut -c1-160
+grep -o "Clock model drifted -\?[0-9]*ns" "$LOG" | grep -o -- "-\?[0-9]*" | awk '{a=$1<0?-$1:$1; s+=a; n++; if(a>m)m=a} END{if(n) printf "  re-anchor moves: %d, mean %.0fus, max %.0fus (was mean 174us, max 1463us)\n", n, s/n/1000, m/1000}'
+grep -E "Transitioning from search phase (4 -> 5|5 -> 6|. -> 6)" "$LOG" | sed -E 's/.*Transitioning/  reached:/' | sort | uniq -c
+echo
 echo "== LED sync BG phase (last summaries)"
 grep -E "BG stats" "$LOG" | tail -4 | sed -E 's/.*BG stats/  BG/' | cut -c1-200
 
