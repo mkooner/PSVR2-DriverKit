@@ -325,6 +325,21 @@ struct t_led_sync_refinement
 		//! Gave the token to the other controller's hold probe mid calibration, resume this step after.
 		bool paused;
 
+		/*!
+		 * Free-running LED cycle: the blink is placed once with an absolute (clock tracking based) position,
+		 * then only moved by relative deltas, so the Bluetooth clock estimate no longer moves the LEDs. Its
+		 * drift against the camera is measured optically and trimmed out of the cycle period.
+		 */
+		bool anchored;
+		//! The offset the controller's cycle currently has, relative to the anchor.
+		time_duration_ns applied_ns;
+		//! Cycle period trim (fraction), kept across recalibrations.
+		double skew;
+		//! The previous left edge found, for measuring the drift between searches.
+		bool have_prev_left;
+		time_duration_ns prev_left_ns;
+		timepoint_ns prev_left_time_ns;
+
 		//! Hold: the centre, measured window, probing state and drift correction.
 		time_duration_ns hold_centre_ns, hold_window_ns;
 		int hold_sub;

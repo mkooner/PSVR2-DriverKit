@@ -96,7 +96,15 @@ count_calib_release_token(struct t_led_sync_refinement *refinement)
 	refinement->count_calib.owns_token = false;
 }
 
-//! All LEDs off, for the baseline and while waiting for the token.
+//! The controller's cycle period carries the measured drift trim (see @ref count_calib.skew).
+static void
+count_calib_apply_trim(struct t_led_sync_refinement *refinement)
+{
+	refinement->delta_sync.base_period_ns = frame_period_ns(refinement);
+	refinement->delta_sync.skew = refinement->count_calib.skew;
+}
+
+//! All LEDs off, for the baseline and while waiting for the token. A delta of 0, so the cycle keeps its place.
 static void
 count_calib_set_leds_off(struct t_led_sync_refinement *refinement)
 {
@@ -104,20 +112,69 @@ count_calib_set_leds_off(struct t_led_sync_refinement *refinement)
 	    .base_time_offset_ns = 0,
 	    .leds = {0xFF, 0xFF, 0xFF, 0xFF},
 	};
+	if (refinement->count_calib.anchored) {
+		count_calib_apply_trim(refinement);
+	}
 	set_offset_duration_pssense(refinement, 0, refinement->current_blink_fudge_ns,
 	                            refinement->current_blink_duration_ns, T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_OFF,
 	                            data);
 }
 
-//! All LEDs blinking every frame, @p offset_ns after the exposure start (on top of the driver's clock tracking).
+/*!
+ * All LEDs blinking every frame, @p offset_ns after the exposure start. The first call places the cycle with an
+ * absolute position (PRESCAN, through the driver's clock tracking); every later one moves it by the difference from
+ * where it is (STABLE, a relative delta), so it no longer depends on the clock tracking.
+ */
 static void
 count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_ns offset_ns)
 {
-	refinement->count_calib.offset_ns = offset_ns;
-	refinement->count_calib.frames = 0;
-	refinement->count_calib.sum = 0;
-	refinement->count_calib.off_phase = false;
-	set_offset_duration(refinement, 0, offset_ns, refinement->current_blink_duration_ns);
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	cc->offset_ns = offset_ns;
+	cc->frames = 0;
+	cc->sum = 0;
+	cc->off_phase = false;
+
+	count_calib_apply_trim(refinement);
+
+	if (!cc->anchored) {
+		cc->anchored = true;
+		cc->applied_ns = offset_ns;
+		set_offset_duration(refinement, 0, offset_ns, refinement->current_blink_duration_ns);
+		return;
+	}
+
+	struct t_led_sync_sample_pssense_data data = {
+	    .base_time_offset_ns = (int32_t)(offset_ns - cc->applied_ns),
+	    .leds = {0xFF, 0xFF, 0xFF, 0xFF},
+	};
+	cc->applied_ns = offset_ns;
+	set_offset_duration_pssense(refinement, 0, offset_ns, refinement->current_blink_duration_ns,
+	                            T_LED_SYNC_SAMPLE_PSSENSE_MODE_STABLE, data);
+}
+
+/*!
+ * The window moved @p moved_ns in @p dt_ns since the last measurement: fold that into the cycle period trim. The
+ * position is in the anchored cycle's coordinates, so the remaining motion is what the trim hasn't cancelled yet.
+ */
+static void
+count_calib_learn_drift(struct t_led_sync_refinement *refinement,
+                        time_duration_ns moved_ns,
+                        time_duration_ns dt_ns,
+                        double gain,
+                        const char *what)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	if (dt_ns < U_TIME_1S_IN_NS / 2) {
+		return;
+	}
+	double rate = (double)moved_ns / (double)dt_ns; // fraction, ns per ns
+	cc->skew += gain * rate;
+	const double max_skew = 500e-6; // 500ppm
+	cc->skew = CLAMP(cc->skew, -max_skew, max_skew);
+	LOG_DEBUG(refinement, "Count drift from %s: moved %+" PRId64 "us in %.1fs (%+.1fppm), cycle trim now %+.1fppm",
+	          what, (int64_t)(moved_ns / U_TIME_1US_IN_NS), (double)dt_ns / U_TIME_1S_IN_NS, rate * 1e6,
+	          cc->skew * 1e6);
+	count_calib_apply_trim(refinement);
 }
 
 static void
@@ -155,8 +212,10 @@ count_calib_restart(struct t_led_sync_refinement *refinement, const char *why)
 	refinement->count_calib.paused = false;
 	LOG_DEBUG(refinement, "Count calibration restarting (%s), attempt %u", why, refinement->count_calib.attempts);
 	refinement->count_calib.attempts++;
-	// Give the other controller a turn.
+	// Give the other controller a turn, and place the cycle afresh next time.
 	count_calib_release_token(refinement);
+	refinement->count_calib.anchored = false;
+	refinement->count_calib.have_prev_left = false;
 	refinement->count_calib.state = COUNT_CALIB_WAIT_TOKEN;
 	refinement->count_calib.frames = 0;
 	refinement->count_calib.sum = 0;
@@ -172,6 +231,8 @@ count_calib_enter(struct t_led_sync_refinement *refinement)
 	refinement->count_calib.full_window_ns = refinement->current_blink_duration_ns + exposure_ns;
 	refinement->count_calib.state = COUNT_CALIB_WAIT_TOKEN;
 	refinement->count_calib.paused = false;
+	refinement->count_calib.anchored = false;
+	refinement->count_calib.have_prev_left = false;
 	refinement->count_calib.frames = 0;
 	refinement->count_calib.sum = 0;
 	count_calib_set_leds_off(refinement);
@@ -325,6 +386,14 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 		}
 		if (cc->upper_ns - cc->lower_ns < COUNT_EDGE_RESOLUTION_NS) {
 			cc->left_ns = cc->upper_ns;
+			timepoint_ns now_left_ns = os_monotonic_get_ns();
+			if (cc->have_prev_left && now_left_ns - cc->prev_left_time_ns < U_TIME_1S_IN_NS * 30) {
+				count_calib_learn_drift(refinement, cc->left_ns - cc->prev_left_ns,
+				                        now_left_ns - cc->prev_left_time_ns, 1.0, "re-search");
+			}
+			cc->have_prev_left = true;
+			cc->prev_left_ns = cc->left_ns;
+			cc->prev_left_time_ns = now_left_ns;
 			cc->lower_ns = cc->left_ns + (fw * 9) / 10;
 			cc->upper_ns = cc->left_ns + (fw * 11) / 10;
 			cc->state = COUNT_CALIB_RIGHT_EDGE;
@@ -411,17 +480,7 @@ handle_count_hold(struct t_led_sync_refinement *refinement)
 	}
 
 	if (cc->hold_sub == 0) {
-		time_duration_ns since_apply_ns = now_ns - cc->hold_last_apply_ns;
-		if (since_apply_ns >= COUNT_HOLD_APPLY_NS) {
-			if (cc->hold_in_view) {
-				cc->hold_centre_ns += (time_duration_ns)(cc->hold_drift_ns_per_s *
-				                                         (double)since_apply_ns / (double)U_TIME_1S_IN_NS);
-			}
-			cc->hold_last_apply_ns = now_ns;
-			count_calib_set_offset(refinement, cc->hold_centre_ns);
-			return;
-		}
-
+		// The drift is trimmed out of the free-running cycle's period, the centre only moves on corrections.
 		bool unseen = refinement->frames_since_last_visually_seen > 60;
 		time_duration_ns since_probe_ns = now_ns - cc->hold_last_probe_ns;
 		if (since_probe_ns >= COUNT_HOLD_PROBE_NS || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS)) {
@@ -474,20 +533,20 @@ handle_count_hold(struct t_led_sync_refinement *refinement)
 		cc->hold_centre_ns += e * COUNT_HOLD_STEP_NS;
 		cc->hold_corrections++;
 		if (dt_s > 1.0) {
-			cc->hold_drift_ns_per_s += 0.1 * e * (double)COUNT_HOLD_STEP_NS / dt_s;
-			// Measured skew is ~10ppm (10us/s); anything far beyond is a misreading.
-			const double max_drift = (double)U_TIME_1US_IN_NS * 30;
-			cc->hold_drift_ns_per_s = CLAMP(cc->hold_drift_ns_per_s, -max_drift, max_drift);
+			// Each correction is drift the trim didn't cancel; fold part of it in.
+			count_calib_learn_drift(refinement, e * COUNT_HOLD_STEP_NS,
+			                        (time_duration_ns)(dt_s * U_TIME_1S_IN_NS), 0.5, "hold probe");
 		}
+		cc->hold_drift_ns_per_s = cc->skew * 1e9;
 	}
 	cc->hold_in_view = in_view;
 	LOG_DEBUG(refinement,
 	          "Count hold probe: centre %.1f left %.1f right %.1f blobs -> %s, centre %" PRId64
-	          "us, drift %+.1fus/s, %u corrections",
+	          "us, cycle trim %+.1fppm, %u corrections",
 	          c, cc->hold_left_mean, mean,
 	          !in_view ? "not in view"
 	                   : (e > 0 ? "moved later" : (e < 0 ? "moved earlier" : "centred")),
-	          (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), cc->hold_drift_ns_per_s / 1000.0,
+	          (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), cc->skew * 1e6,
 	          cc->hold_corrections);
 
 	count_calib_release_token(refinement);
