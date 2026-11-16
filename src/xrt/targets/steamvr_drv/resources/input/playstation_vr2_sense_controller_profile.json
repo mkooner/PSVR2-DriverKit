@@ -4,6 +4,7 @@
   "device_class": "TrackedDeviceClass_Controller",
   "resource_root": "monado",
   "driver_name": "monado",
+  "legacy_binding": "{monado}/input/legacy_binding_playstation_vr2_sense_controller.json",
   "remapping": "{monado}/input/playstation_vr2_sense_controller_remapping.json",
   "input_bindingui_mode": "controller_handed",
   "should_show_binding_errors": true,

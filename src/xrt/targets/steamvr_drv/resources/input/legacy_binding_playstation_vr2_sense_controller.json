@@ -1,0 +1,191 @@
+{
+  "bindings": {
+    "/actions/legacy": {
+      "sources": [
+        {
+          "path": "/user/hand/left/input/l2",
+          "mode": "trigger",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_axis1_press"
+            },
+            "pull": {
+              "output": "/actions/legacy/in/left_axis1_value"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_axis1_touch"
+            }
+          },
+          "parameters": {
+            "haptic_amplitude": "0"
+          }
+        },
+        {
+          "path": "/user/hand/left/input/left_stick",
+          "mode": "joystick",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_axis0_press"
+            },
+            "position": {
+              "output": "/actions/legacy/in/left_axis0_value"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_axis0_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/l1",
+          "mode": "trigger",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_axis2_press"
+            },
+            "pull": {
+              "output": "/actions/legacy/in/left_axis2_value1"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_axis2_touch"
+            }
+          },
+          "parameters": {
+            "haptic_amplitude": "0"
+          }
+        },
+        {
+          "path": "/user/hand/left/input/l1",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_grip_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_grip_touch"
+            }
+          },
+          "parameters": {
+            "haptic_amplitude": "0"
+          }
+        },
+        {
+          "path": "/user/hand/left/input/square",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_a_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_a_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/triangle",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_applicationmenu_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_applicationmenu_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/r2",
+          "mode": "trigger",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_axis1_press"
+            },
+            "pull": {
+              "output": "/actions/legacy/in/right_axis1_value"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_axis1_touch"
+            }
+          },
+          "parameters": {
+            "haptic_amplitude": "0"
+          }
+        },
+        {
+          "path": "/user/hand/right/input/right_stick",
+          "mode": "joystick",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_axis0_press"
+            },
+            "position": {
+              "output": "/actions/legacy/in/right_axis0_value"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_axis0_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/r1",
+          "mode": "trigger",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_axis2_press"
+            },
+            "pull": {
+              "output": "/actions/legacy/in/right_axis2_value1"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_axis2_touch"
+            }
+          },
+          "parameters": {
+            "haptic_amplitude": "0"
+          }
+        },
+        {
+          "path": "/user/hand/right/input/r1",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_grip_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_grip_touch"
+            }
+          },
+          "parameters": {
+            "haptic_amplitude": "0"
+          }
+        },
+        {
+          "path": "/user/hand/right/input/cross",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_a_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_a_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/circle",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_applicationmenu_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_applicationmenu_touch"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "controller_type": "playstation_vr2_sense",
+  "description": "Legacy (pre-SteamVR Input) apps on the PS VR2 Sense: trigger L2/R2, stick, grip L1/R1, square/cross as A, triangle/circle as the menu button (as SteamVR's Touch legacy binding)",
+  "name": "PS VR2 Sense legacy bindings (Monado)"
+}
