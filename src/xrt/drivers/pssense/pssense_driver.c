@@ -216,6 +216,9 @@ struct pssense_device
 		//! Last optically tracked position, held while the constellation tracker has no lock.
 		bool have_last_optical_position;
 		struct xrt_vec3 last_optical_position;
+
+		//! Rate limit for the "OUT" debug log of what clients are given.
+		timepoint_ns last_out_log_ns;
 		struct t_constellation_tracker *constellation_tracker;
 		t_constellation_device_id_t constellation_device_id;
 		struct xrt_imu_sink *constellation_imu_sink;
@@ -1007,6 +1010,16 @@ pssense_get_constellation_pose(struct pssense_device *pssense,
 	                                             pssense->tracking.constellation_device_id, at_timestamp_ns,
 	                                             out_relation) < 0) {
 		(*out_relation) = XRT_C11_COMPOUND(struct xrt_space_relation) XRT_SPACE_RELATION_ZERO;
+	}
+
+	// What the tracker gives clients (fusion + IMU prediction), ~30Hz, to compare against the optical solves.
+	if (pssense->log_level <= U_LOGGING_DEBUG && at_timestamp_ns - pssense->tracking.last_out_log_ns > 33000000) {
+		pssense->tracking.last_out_log_ns = at_timestamp_ns;
+		const struct xrt_space_relation *r = out_relation;
+		PSSENSE_DEBUG(pssense, "OUT %" PRId64 " %d flags %x pos %.4f %.4f %.4f vel %.3f %.3f %.3f", at_timestamp_ns,
+		              pssense->hand == XRT_HAND_LEFT ? 0 : 1, r->relation_flags, r->pose.position.x,
+		              r->pose.position.y, r->pose.position.z, r->linear_velocity.x, r->linear_velocity.y,
+		              r->linear_velocity.z);
 	}
 
 	if ((out_relation->relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0 &&
