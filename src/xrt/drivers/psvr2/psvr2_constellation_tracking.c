@@ -308,6 +308,30 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 		}
 	}
 
+	/*
+	 * Each camera's translation from its parent is in the other camera's axes: rotate it back by the camera's
+	 * rotation relative to the parent (p' = Q^T p). As built, cameras 0 and 1 placed the same controller in the same
+	 * frame 3.9-4.2cm apart (p90 only +0.2cm) in all three recorded datasets (01:35, 01:45, 02:03), always by the same
+	 * vector, with their orientations agreeing to 0.5-0.9 deg. The camera 1 position that makes them agree, fitted
+	 * from the datasets, is Q^T p to 0.27cm (Q p: 7.95cm, -p: 15.3cm), and with it camera 0's controller poses land on
+	 * camera 1's blobs 30.3% within 3px instead of 3.3% (median 3.4px instead of 13.0px). Done on the relative pose
+	 * so it holds whichever direction the relation was stored in. Cameras 2 and 3 are off by far more (their
+	 * predicted LEDs land hundreds of pixels from their blobs, with any 90 deg roll too) and never solve; this
+	 * doesn't change that.
+	 */
+	for (int i = 1; i < 4; i++) {
+		struct xrt_pose rel_pose;
+		math_pose_from_isometry(&camera_relative_poses[i], &rel_pose);
+		struct xrt_quat q_inv;
+		math_quat_invert(&rel_pose.orientation, &q_inv);
+		struct xrt_vec3 p;
+		math_quat_rotate_vec3(&q_inv, &rel_pose.position, &p);
+		struct xrt_matrix_3x3 r3;
+		math_matrix_3x3_from_quat(&rel_pose.orientation, &r3);
+		math_matrix_4x4_isometry_from_rt(&r3, &p, &camera_relative_poses[i]);
+		PSVR2_DEBUG(hmd, "camera %d parent %d", i, parent_ids[i]);
+	}
+
 	// Write final poses
 	for (size_t i = 0; i < mosaic->num_cameras; i++) {
 		struct xrt_matrix_4x4 result;
