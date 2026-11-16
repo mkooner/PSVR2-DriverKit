@@ -72,10 +72,21 @@ led_to_blob(struct ld_led *led, struct t_blob *out_blob)
 
 	out_blob->matched_device_id = XRT_CONSTELLATION_INVALID_DEVICE_ID;
 	out_blob->matched_device_led_id = XRT_CONSTELLATION_INVALID_LED_ID;
-	out_blob->center_distorted = (struct xrt_vec2){
-	    .x = (float)(left + right) * 0.5f + PSVR2_LD_X_BIAS_PX,
-	    .y = (float)(top + bottom) * 0.5f,
-	};
+	// Intensity-weighted centroid from the LD moments: sub-pixel, unlike the 2px-step bounding box centre.
+	uint32_t m00 = __le32_to_cpu(led->m00);
+	if (m00 > 0) {
+		float cx = (float)__le32_to_cpu(led->m10) / (float)m00;
+		float cy = (float)__le32_to_cpu(led->m01) / (float)m00;
+		out_blob->center_distorted = (struct xrt_vec2){
+		    .x = ((float)led->leftmost + cx) * 2.0f + PSVR2_LD_X_BIAS_PX,
+		    .y = ((float)led->topmost + cy) * 2.0f,
+		};
+	} else {
+		out_blob->center_distorted = (struct xrt_vec2){
+		    .x = (float)(left + right) * 0.5f + PSVR2_LD_X_BIAS_PX,
+		    .y = (float)(top + bottom) * 0.5f,
+		};
+	}
 	out_blob->motion_vector = (struct xrt_vec2){0}, // We don't have motion vector data, so set it to 0
 	    out_blob->bounding_box = (struct xrt_rect){
 	        .offset =
@@ -93,15 +104,14 @@ led_to_blob(struct ld_led *led, struct t_blob *out_blob)
 	    .x = (float)(right - left),
 	    .y = (float)(bottom - top),
 	};
-	out_blob->brightness = 1.0;
-
 	/*
-	 * LED sync decodes the Sense controllers' gray codes and BG brightness curve from each blob's greysum, and
-	 * treats 0 as "not seen". The LD payload has no decoded brightness (one of its unknown fields is probably
-	 * it), and greysum was left 0, so no gray code could ever be read. A brighter LED lights more pixels, so use
-	 * the bounding box area as a stand-in until the real brightness field is identified.
+	 * LED sync decodes the Sense gray codes and BG brightness curve from greysum and treats 0 as "not seen"; it was
+	 * left at 0, so no gray code could ever be read. m00 is the blob's total intensity in binned pixels (each
+	 * 2x2 full-resolution pixels), so in full-scale full-resolution pixels it is m00 * 4 / 255.
 	 */
-	out_blob->greysum = (float)(right - left + 2) * (float)(bottom - top + 2);
+	uint32_t box_px = (uint32_t)(led->rightmost - led->leftmost + 1) * (uint32_t)(led->bottommost - led->topmost + 1);
+	out_blob->greysum = (float)m00 * 4.0f / 255.0f;
+	out_blob->brightness = box_px > 0 ? fminf(1.0f, (float)m00 / ((float)box_px * 255.0f)) : 1.0f;
 }
 
 //! Fills the undistorted and homogenized centres the constellation tracker matches against.

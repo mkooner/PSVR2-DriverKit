@@ -164,12 +164,16 @@ struct ld_led
 	uint16_t rightmost;
 	uint16_t topmost;
 	uint16_t bottommost;
-	uint32_t depth_or_size_unk;
-	uint32_t depth_or_size_unk2;
-	uint32_t depth_or_size_unk3;
-	uint32_t depth_or_size_unk4;
-	uint32_t confidence_unk; // i SWEAR i saw this drop to zero *right* as the LED stopped being sent, this seems to
-	                         // be confidence?
+	/*
+	 * Image moments of the blob's pixel intensities, relative to (leftmost, topmost), in the binned 508x508 space.
+	 * Identified from a recorded session (75k records): m10/m00 and m01/m00 fall inside the bounding box 99.8% of
+	 * the time, m20/m00 and m02/m00 track the box size squared, and m00 averages ~60 per box pixel.
+	 */
+	uint32_t m00; //!< Total intensity (greysum)
+	uint32_t m10; //!< Intensity-weighted x, relative to leftmost
+	uint32_t m01; //!< Intensity-weighted y, relative to topmost
+	uint32_t m20; //!< Second moment in x (likely)
+	uint32_t m02; //!< Second moment in y (likely); drops to zero as an LED stops being sent
 	uint8_t unk2;
 	uint16_t depth_or_size_unk5;
 } PSVR2_PACKED;
