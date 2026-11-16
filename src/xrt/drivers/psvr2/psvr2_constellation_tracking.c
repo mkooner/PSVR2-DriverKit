@@ -20,6 +20,17 @@
 #include "xrt/xrt_defines.h"
 #include <string.h>
 #include "psvr2_constellation_tracking.h"
+#include "util/u_debug.h"
+
+#include <stdio.h>
+
+/*
+ * Camera 0 (bottom left) mount on the headset, relative to the head/SLAM body frame (x right, y up, -z forward):
+ * "pitch yaw roll" in degrees, applied after converting the OpenCV camera axes (x right, y down, +z forward).
+ * Negative pitch tilts the camera down, positive yaw turns it left (outward for the left camera).
+ * Not in the headset's calibration blocks, so it is configurable while it is being verified on hardware.
+ */
+DEBUG_GET_ONCE_OPTION(psvr2_cam0_mount, "PSVR2_CAM0_MOUNT", "-20 15 0")
 #include "../pssense/pssense_interface.h"
 
 // Version of the camera relation data that is easier to work with for determining final orientation of all cameras
@@ -174,11 +185,26 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 	int parent_ids[4] = {0};
 	parent_ids[0] = -1;
 
-	// root is sitting at origin, with a slight hard coded rotation
-	struct xrt_quat scratch_quat;
+	// Camera 0 relative to the head pose the origin source reports, see PSVR2_CAM0_MOUNT.
+	float pitch_deg = -20.0f, yaw_deg = 15.0f, roll_deg = 0.0f;
+	const char *mount = debug_get_option_psvr2_cam0_mount();
+	if (mount == NULL || sscanf(mount, "%f %f %f", &pitch_deg, &yaw_deg, &roll_deg) < 2) {
+		PSVR2_WARN(hmd, "Could not parse PSVR2_CAM0_MOUNT '%s', using defaults", mount ? mount : "");
+	}
+	struct xrt_quat q_yaw, q_pitch, q_roll, q_cv_to_head, q_mount;
+	math_quat_from_angle_vector(DEG_TO_RAD(yaw_deg), &(struct xrt_vec3){0, 1, 0}, &q_yaw);
+	math_quat_from_angle_vector(DEG_TO_RAD(pitch_deg), &(struct xrt_vec3){1, 0, 0}, &q_pitch);
+	math_quat_from_angle_vector(DEG_TO_RAD(roll_deg), &(struct xrt_vec3){0, 0, 1}, &q_roll);
+	// OpenCV camera axes (x right, y down, z forward) into head axes (x right, y up, -z forward).
+	math_quat_from_angle_vector((float)M_PI, &(struct xrt_vec3){1, 0, 0}, &q_cv_to_head);
+	math_quat_rotate(&q_yaw, &q_pitch, &q_mount);
+	math_quat_rotate(&q_mount, &q_roll, &q_mount);
+	math_quat_rotate(&q_mount, &q_cv_to_head, &q_mount);
+	PSVR2_INFO(hmd, "Camera 0 mount: pitch %.1f yaw %.1f roll %.1f deg (PSVR2_CAM0_MOUNT)", pitch_deg, yaw_deg,
+	           roll_deg);
+
 	struct xrt_matrix_3x3 scratch_3x3;
-	math_quat_from_euler_angles(&(struct xrt_vec3){15, 145, 0}, &scratch_quat);
-	math_matrix_3x3_from_quat(&scratch_quat, &scratch_3x3);
+	math_matrix_3x3_from_quat(&q_mount, &scratch_3x3);
 	math_matrix_4x4_isometry_from_rt(&scratch_3x3, &(struct xrt_vec3){0, 0, 0}, &camera_relative_poses[0]);
 
 	struct xrt_matrix_4x4 scratch;

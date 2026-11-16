@@ -617,6 +617,9 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 		math_pose_transform(&hmd->recenter_pose, &hmd->pose, &hmd->pose);
 	}
 
+	// Copied under the lock for the constellation tracker's camera placement below.
+	const struct xrt_pose head_pose_for_tracker = hmd->pose;
+
 	struct psvr2_pose_filter_update filter_update;
 	psvr2_pose_filter_push_slam(&hmd->pose_filter, vts_ns, &hmd->pose, &filter_update);
 	psvr2_pose_stats_update_locked(hmd, vts_ns, &filter_update);
@@ -660,8 +663,17 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	        XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT),
 	};
 
-	// Is this the right pose? (camera 0's pose from the headset SLAM; to verify on hardware)
-	psvr2_constellation_tracking_source_push(hmd->constellation_origin_source, &cam0_relation, vts_ns);
+	/*
+	 * The constellation tracker's cameras are placed relative to this origin. The record's cam0 fields are always
+	 * identity on hardware (recorded over a whole session), which made the tracker treat the cameras as fixed in
+	 * the room: controllers swung away or flew off whenever the head moved. Use the tracked head pose (same space
+	 * as the head pose we report, so controllers and head agree); the camera mount is applied per camera.
+	 */
+	struct xrt_space_relation head_relation_for_tracker = {
+	    .pose = head_pose_for_tracker,
+	    .relation_flags = cam0_relation.relation_flags,
+	};
+	psvr2_constellation_tracking_source_push(hmd->constellation_origin_source, &head_relation_for_tracker, vts_ns);
 
 	if (hmd->record_file != NULL) {
 		// Raw camera 0 fields next to the head pose, to work out which frame they are in (offline).
