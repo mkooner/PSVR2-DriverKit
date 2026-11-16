@@ -226,6 +226,14 @@ struct pssense_device
 		uint64_t device_ticks_total;
 
 		uint32_t last_sent_host_timestamp_us;
+		//! When the report carrying the last LED sync sample went out, for the round trip stats.
+		timepoint_ns last_led_sample_send_ns;
+		struct
+		{
+			uint32_t count;
+			time_duration_ns sum_ns, max_ns;
+			timepoint_ns last_log_ns;
+		} led_rtt;
 	} timing;
 
 	struct
@@ -246,6 +254,8 @@ struct pssense_device
 		bool increment_sequence_num;
 		//! Count calibration in use: PRESCAN positions are re-anchored to every exposure, as in basic sync.
 		bool count_calibration;
+		//! Last PRESCAN re-anchor (new sequence number) in count calibration mode.
+		timepoint_ns last_reanchor_ns;
 		uint8_t led_sequence_num;
 
 		//! A debug value for testing sync issues.
@@ -722,10 +732,33 @@ pssense_handle_packet(struct pssense_device *pssense,
 
 	// Mark the LED sync refinement sample as applied
 	uint32_t latest_host_send_time = __le32_to_cpu(data->host_timestamp);
-	if (latest_host_send_time != pssense->timing.last_sent_host_timestamp_us &&
-	    pssense->tracking.led_sync_sample_needs_marking) {
+	/*
+	 * The controller echoes the host timestamp of the newest output report it received. The sample is applied
+	 * once that is the report carrying it or a later one. This used to accept any other value, including echoes
+	 * of reports sent *before* the sample, so samples were marked applied right away, before the controller had
+	 * them; with Bluetooth round trips of 100ms+ LED sync then measured the previous LED state (on hardware the
+	 * count calibration saw more blobs with the LEDs off than on).
+	 */
+	if (pssense->tracking.led_sync_sample_needs_marking &&
+	    (int32_t)(latest_host_send_time - pssense->timing.last_sent_host_timestamp_us) >= 0) {
 		t_led_sync_mark_latest_sample_applied(&pssense->tracking.led_sync_refinement, recv_time_ns);
 		pssense->tracking.led_sync_sample_needs_marking = false;
+
+		time_duration_ns rtt_ns = recv_time_ns - pssense->timing.last_led_sample_send_ns;
+		pssense->timing.led_rtt.count++;
+		pssense->timing.led_rtt.sum_ns += rtt_ns;
+		pssense->timing.led_rtt.max_ns = MAX(pssense->timing.led_rtt.max_ns, rtt_ns);
+		if (recv_time_ns - pssense->timing.led_rtt.last_log_ns >= U_TIME_1S_IN_NS * 5) {
+			PSSENSE_DEBUG(pssense, "LED command round trip: mean %" PRId64 "ms, max %" PRId64 "ms over %u",
+			              (int64_t)(pssense->timing.led_rtt.sum_ns / pssense->timing.led_rtt.count /
+			                        U_TIME_1MS_IN_NS),
+			              (int64_t)(pssense->timing.led_rtt.max_ns / U_TIME_1MS_IN_NS),
+			              pssense->timing.led_rtt.count);
+			pssense->timing.led_rtt.count = 0;
+			pssense->timing.led_rtt.sum_ns = 0;
+			pssense->timing.led_rtt.max_ns = 0;
+			pssense->timing.led_rtt.last_log_ns = recv_time_ns;
+		}
 	}
 
 	// Update the clock offset
@@ -862,6 +895,7 @@ pssense_set_output_report_settings_locked(struct pssense_device *pssense,
 
 	if (pssense->tracking.led_sync_sample_needs_sending) {
 		pssense->timing.last_sent_host_timestamp_us = host_send_ts;
+		pssense->timing.last_led_sample_send_ns = os_monotonic_get_ns();
 		pssense->tracking.led_sync_sample_needs_sending = false;
 		pssense->tracking.led_sync_sample_needs_marking = true;
 	}
@@ -1017,6 +1051,15 @@ pssense_run_thread(void *ptr)
 				bool led_changed = memcmp(&pssense->output.last_sent_led_settings,
 				                          &pssense->tracking.led_settings,
 				                          sizeof(pssense->tracking.led_settings)) != 0;
+				if (led_changed && pssense->tracking.count_calibration) {
+					// The PRESCAN position is rebuilt every frame, but without a new sequence number
+					// the controller ignores it, so that alone isn't worth a report.
+					struct pssense_led_settings a = pssense->output.last_sent_led_settings;
+					struct pssense_led_settings b = pssense->tracking.led_settings;
+					a.cycle_position_absolute = 0;
+					b.cycle_position_absolute = 0;
+					led_changed = memcmp(&a, &b, sizeof(a)) != 0;
+				}
 				bool needed = pssense->usb || now < pssense->output.pcm_active_until_ns ||
 				              pssense->output.send_vibration || pssense->output.send_trigger_feedback ||
 				              carried_led_sample || pssense->tracking.led_sync_sample_needs_marking ||
@@ -1709,10 +1752,18 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 
 		/*
 		 * The count calibration and its hold blink in PRESCAN, whose absolute position is rebuilt from every
-		 * exposure; a new sequence number makes the controller take it, so it follows the clock tracking.
+		 * exposure; a new sequence number makes the controller take it, so it follows the clock tracking. Every
+		 * 500ms is plenty now that the clock skew is tracked: doing it every frame kept both controllers sending
+		 * at the Bluetooth rate cap.
 		 */
-		if (pssense->tracking.increment_sequence_num ||
-		    (pssense->tracking.count_calibration && pssense->tracking.sync_phase == LED_SYNC_PHASE_PRESCAN)) {
+		timepoint_ns reanchor_now_ns = os_monotonic_get_ns();
+		bool count_reanchor = pssense->tracking.count_calibration &&
+		                      pssense->tracking.sync_phase == LED_SYNC_PHASE_PRESCAN &&
+		                      reanchor_now_ns - pssense->tracking.last_reanchor_ns >= U_TIME_1MS_IN_NS * 500;
+		if (count_reanchor) {
+			pssense->tracking.last_reanchor_ns = reanchor_now_ns;
+		}
+		if (pssense->tracking.increment_sequence_num || count_reanchor) {
 			pssense->tracking.led_sequence_num += 1;
 #if 0
 			PSSENSE_DEBUG(pssense, "%lu\t%lu",
