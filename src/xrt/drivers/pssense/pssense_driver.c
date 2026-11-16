@@ -884,6 +884,11 @@ pssense_run_thread(void *ptr)
 	timepoint_ns next_output_ns = os_monotonic_get_ns();
 
 	int result = 0;
+	// Consecutive failed output reports. A dropped Bluetooth write is transient (both controllers were seen failing
+	// at the same instant on a shared adapter), so it must not end the thread: that stops LED updates for good,
+	// freezing LED sync. Only give up when sending keeps failing, which means the controller is gone.
+	uint32_t failed_sends = 0;
+	const uint32_t max_failed_sends = 200; // ~2s at the output rate
 	while (os_thread_helper_is_running_locked(&pssense->controller_thread) && result >= 0) {
 		os_thread_helper_unlock(&pssense->controller_thread);
 
@@ -894,8 +899,29 @@ pssense_run_thread(void *ptr)
 
 			if (now >= next_output_ns) {
 				os_thread_helper_lock(&pssense->controller_thread);
-				result = pssense_send_output_report_locked(pssense);
+				bool carried_led_sample = pssense->tracking.led_sync_sample_needs_sending;
+				int send_result = pssense_send_output_report_locked(pssense);
+				if (send_result < 0 && carried_led_sample) {
+					// The LED sync sample in this report never reached the controller, send it again
+					// rather than letting it be marked as applied.
+					pssense->tracking.led_sync_sample_needs_marking = false;
+					pssense->tracking.led_sync_sample_needs_sending = true;
+				}
 				os_thread_helper_unlock(&pssense->controller_thread);
+
+				if (send_result < 0) {
+					if (++failed_sends >= max_failed_sends) {
+						PSSENSE_ERROR(pssense, "Output reports failed %u times in a row, stopping",
+						              failed_sends);
+						result = send_result;
+					}
+				} else {
+					if (failed_sends > 0) {
+						PSSENSE_DEBUG(pssense, "Output reports recovered after %u failures",
+						              failed_sends);
+					}
+					failed_sends = 0;
+				}
 
 				next_output_ns = next_output_ns + pcm_haptics_period_ns;
 			}

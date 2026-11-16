@@ -299,6 +299,9 @@ struct psvr2_hmd
 	//! Raw IMU/SLAM recording for offline replay (PSVR2_RECORD_FILE), NULL when off.
 	FILE *record_file;
 
+	//! How many of each undecoded VD entry type have been logged.
+	uint32_t vd_unknown_seen[32];
+
 	/* Eye State */
 	bool eye_feature_enabled;
 	bool face_feature_enabled;

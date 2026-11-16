@@ -882,10 +882,27 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 			case GEN_DATA_14: {
 				break;
 			}
-			default:
-				PSVR2_WARN(hmd, "Unknown VD entry type of %d", entry->type);
-				// PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
-				break;
+			default: {
+				/*
+				 * Undecoded data from the headset, possibly its stored play area / floor. Log the first few
+				 * of each type in full and record every one, so it can be identified from a real session.
+				 */
+				uint32_t type_idx = entry->type % ARRAY_SIZE(hmd->vd_unknown_seen);
+				if (hmd->vd_unknown_seen[type_idx]++ < 3) {
+					PSVR2_WARN(hmd, "Unknown VD entry type %d, %u bytes (logged %u/3)", entry->type,
+					           (unsigned)entry->size, hmd->vd_unknown_seen[type_idx]);
+					PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
+				}
+				if (hmd->record_file != NULL && data_len >= (entry->size + entry->offset)) {
+					fprintf(hmd->record_file, "V,%" PRId64 ",%d,%u,", (int64_t)os_monotonic_get_ns(),
+					        entry->type, (unsigned)entry->size);
+					const uint8_t *p = buf + entry->offset;
+					for (uint32_t b = 0; b < entry->size; b++) {
+						fprintf(hmd->record_file, "%02x", p[b]);
+					}
+					fprintf(hmd->record_file, "\n");
+				}
+			} break;
 			}
 
 			entry++;
