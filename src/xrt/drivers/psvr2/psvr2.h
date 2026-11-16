@@ -299,6 +299,10 @@ struct psvr2_hmd
 	 */
 	bool ld_offset_valid;
 	time_duration_ns ld_offset_ns;
+	//! When the offset first became valid, and since when it has stayed close to the tracker (host monotonic).
+	timepoint_ns ld_offset_valid_since_ns, ld_offset_steady_since_ns;
+	//! The offset has settled once after startup; camera frames reach the tracker and LED sync only after that.
+	bool ld_clock_settled;
 
 	/* Tracking state */
 	struct m_relation_history *slam_relation_history;

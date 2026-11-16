@@ -791,15 +791,47 @@ led_xfer_cb(struct libusb_transfer *xfer)
 		time_duration_ns target_offset_ns = ld_tracked_ns - ld_vts_ns;
 		const time_duration_ns max_slew_ns = U_TIME_1US_IN_NS * 10;
 		time_duration_ns d = target_offset_ns - hmd->ld_offset_ns;
-		if (!hmd->ld_offset_valid || d > U_TIME_1MS_IN_NS * 2 || d < -U_TIME_1MS_IN_NS * 2) {
+		timepoint_ns now_ns = (timepoint_ns)os_monotonic_get_ns();
+		/*
+		 * Re-latch above 0.3ms (was 2ms). At startup the offset was 1.5-3.5ms off its target (02:54) and slewed
+		 * there at the 10us/frame limit, ~600us/s for 3-6s; LED calibration started meanwhile and chased a window
+		 * moving ~550us/s (left edge 5557 -> 7312 -> 8793us in successive passes), so the first controller took
+		 * 13s. Settled, the timestamps stay within +-70us of the camera's steady cadence (02:03, 02:54), well
+		 * inside 0.3ms, so the slew still carries the cadence and the real skew.
+		 */
+		if (!hmd->ld_offset_valid || d > U_TIME_1US_IN_NS * 300 || d < -U_TIME_1US_IN_NS * 300) {
 			hmd->ld_offset_ns = target_offset_ns;
+			if (!hmd->ld_offset_valid) {
+				hmd->ld_offset_valid_since_ns = now_ns;
+			}
 			hmd->ld_offset_valid = true;
+			hmd->ld_offset_steady_since_ns = now_ns;
 		} else {
 			hmd->ld_offset_ns += CLAMP(d, -max_slew_ns, max_slew_ns);
+			if (d > U_TIME_1US_IN_NS * 100 || d < -U_TIME_1US_IN_NS * 100) {
+				hmd->ld_offset_steady_since_ns = now_ns;
+			}
+		}
+		/*
+		 * Camera frames go to the tracker and LED sync only once the offset has stayed within 0.1ms of the tracker
+		 * for 1s: the tracker's own estimate also moves while it fills (02:03: 31ms off at start, 11.5ms at 2s, 3ms
+		 * at 6s). Once only, so a later hiccup can't stop tracking; at most 8s after the offset became valid, in
+		 * case the tracker is noisier than seen.
+		 */
+		if (!hmd->ld_clock_settled && hmd->ld_offset_valid &&
+		    (now_ns - hmd->ld_offset_steady_since_ns >= (timepoint_ns)U_TIME_1S_IN_NS ||
+		     now_ns - hmd->ld_offset_valid_since_ns >= (timepoint_ns)U_TIME_1S_IN_NS * 8)) {
+			hmd->ld_clock_settled = true;
+			PSVR2_INFO(hmd, "Camera clock settled %.1fs after it became valid%s",
+			           (double)(now_ns - hmd->ld_offset_valid_since_ns) / 1e9,
+			           now_ns - hmd->ld_offset_steady_since_ns >= (timepoint_ns)U_TIME_1S_IN_NS
+			               ? ""
+			               : " (time limit, still moving)");
 		}
 	}
 	timepoint_ns ld_timestamp_ns = ld_vts_ns + hmd->ld_offset_ns;
-	bool clock_ready = hmd->timestamp_samples >= TIMESTAMP_SAMPLES && hmd->ld_offset_valid;
+	bool clock_ready =
+	    hmd->timestamp_samples >= TIMESTAMP_SAMPLES && hmd->ld_offset_valid && hmd->ld_clock_settled;
 	os_mutex_unlock(&hmd->data_lock);
 
 	if (clock_ready) {
