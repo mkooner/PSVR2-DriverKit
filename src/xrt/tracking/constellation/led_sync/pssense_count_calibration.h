@@ -112,18 +112,19 @@ count_calib_set_leds_off(struct t_led_sync_refinement *refinement)
 	    .base_time_offset_ns = 0,
 	    .leds = {0xFF, 0xFF, 0xFF, 0xFF},
 	};
-	if (refinement->count_calib.anchored) {
-		count_calib_apply_trim(refinement);
-	}
+	count_calib_apply_trim(refinement);
 	set_offset_duration_pssense(refinement, 0, refinement->current_blink_fudge_ns,
 	                            refinement->current_blink_duration_ns, T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_OFF,
 	                            data);
+	// Keep the driver's mapping advancing at the measured drift while the LEDs are off.
+	refinement->sample_for_driver.clock_skew = refinement->count_calib.skew;
 }
 
 /*!
- * All LEDs blinking every frame, @p offset_ns after the exposure start. The first call places the cycle with an
- * absolute position (PRESCAN, through the driver's clock tracking); every later one moves it by the difference from
- * where it is (STABLE, a relative delta), so it no longer depends on the clock tracking.
+ * All LEDs blinking every frame, @p offset_ns after the exposure start, as an absolute (PRESCAN) position. The driver
+ * maps it with a host -> controller offset that is latched once and only advanced by the drift rate measured here
+ * (clock_skew), so the Bluetooth clock estimate doesn't move the LEDs. (Placing once and moving by relative deltas in
+ * STABLE mode was tried: the cameras then never saw the LEDs.)
  */
 static void
 count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_ns offset_ns)
@@ -135,21 +136,8 @@ count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_n
 	cc->off_phase = false;
 
 	count_calib_apply_trim(refinement);
-
-	if (!cc->anchored) {
-		cc->anchored = true;
-		cc->applied_ns = offset_ns;
-		set_offset_duration(refinement, 0, offset_ns, refinement->current_blink_duration_ns);
-		return;
-	}
-
-	struct t_led_sync_sample_pssense_data data = {
-	    .base_time_offset_ns = (int32_t)(offset_ns - cc->applied_ns),
-	    .leds = {0xFF, 0xFF, 0xFF, 0xFF},
-	};
-	cc->applied_ns = offset_ns;
-	set_offset_duration_pssense(refinement, 0, offset_ns, refinement->current_blink_duration_ns,
-	                            T_LED_SYNC_SAMPLE_PSSENSE_MODE_STABLE, data);
+	set_offset_duration(refinement, 0, offset_ns, refinement->current_blink_duration_ns);
+	refinement->sample_for_driver.clock_skew = cc->skew;
 }
 
 /*!

@@ -276,6 +276,8 @@ struct pssense_device
 		 */
 		bool led_map_valid;
 		time_duration_ns led_map_offset_ns;
+		//! Host time the offset was last advanced by the optical drift trim.
+		timepoint_ns led_map_last_host_ns;
 		//! Largest |tracking - latched| seen since the last log, and when that was.
 		time_duration_ns led_map_max_dev_ns;
 		timepoint_ns led_map_last_log_ns;
@@ -1751,18 +1753,25 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 				const timepoint_ns host_ns = pssense->tracking.last_exposure_local_timestamp_ns;
 				time_duration_ns target_ns = next_blink_time - host_ns;
 				time_duration_ns dev_ns = target_ns - pssense->tracking.led_map_offset_ns;
-				// ~300ppm: 60ppm couldn't follow a controller whose offset moved ~330us/s on hardware.
-				const time_duration_ns max_slew_ns = U_TIME_1US_IN_NS * 5;
+				/*
+				 * The mapping is latched once and then only advanced by the drift rate LED sync measures
+				 * optically (the sample's clock_skew), never pulled toward the Bluetooth clock estimate,
+				 * whose errors (0-330us/s drift or ~0.5ms steps, depending on controller and run) used to
+				 * move the LEDs out of the window. Only a jump over 50ms (reconnect) re-latches it.
+				 */
 				if (!pssense->tracking.led_map_valid || dev_ns > U_TIME_1MS_IN_NS * 50 ||
 				    dev_ns < -U_TIME_1MS_IN_NS * 50) {
 					// First use, or a reconnect / clock reset.
 					pssense->tracking.led_map_offset_ns = target_ns;
 					pssense->tracking.led_map_valid = true;
 				} else {
-					pssense->tracking.led_map_offset_ns += CLAMP(dev_ns, -max_slew_ns, max_slew_ns);
+					double skew = pssense->tracking.latest_led_sync_sample.clock_skew;
+					pssense->tracking.led_map_offset_ns += (time_duration_ns)(
+					    skew * (double)(host_ns - pssense->tracking.led_map_last_host_ns));
 					time_duration_ns abs_dev = dev_ns < 0 ? -dev_ns : dev_ns;
 					pssense->tracking.led_map_max_dev_ns = MAX(pssense->tracking.led_map_max_dev_ns, abs_dev);
 				}
+				pssense->tracking.led_map_last_host_ns = host_ns;
 				if (host_ns - pssense->tracking.led_map_last_log_ns > U_TIME_1S_IN_NS * 5) {
 					PSSENSE_DEBUG(pssense,
 					              "LED clock map: Bluetooth tracking wandered up to %" PRId64
