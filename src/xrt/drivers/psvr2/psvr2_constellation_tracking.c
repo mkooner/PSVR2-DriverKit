@@ -293,9 +293,29 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 	struct xrt_matrix_4x4 scratch;
 	for (int i = 0; i < block->camera_relation_count; i++) {
 		struct calibration_camera_relation *relation = &relations[i];
-		// Used as stored, see the mount above (the transpose here was half of the 43.9cm camera disagreement).
-		struct xrt_matrix_3x3 orientation = __le_matrix_3x3_to_cpu(relation->orientation);
+		/*
+		 * A relation is the "to" camera's pose in the "from" camera, in OpenCV camera axes, with the rotation stored
+		 * in the other matrix order (as the mount above): in the OpenXR axes the chain uses that is F O^T F, F t
+		 * (F = diag(1, -1, -1)). Used as stored (O, t), cameras 2 and 3 never solved: with camera 0's controller
+		 * poses, their predicted LEDs landed hundreds of pixels from their blobs, and cameras 0 and 1 disagreed by a
+		 * fixed 3.9-4.2cm. Fitting each camera's pose from the recorded datasets (psvr2-test/analysis/fit_camera2.py,
+		 * which recovers camera 1 from random starts to 0.25cm) and searching conventions over all cameras at once
+		 * (chain_unify.py), this one explains them all, with the storage directions the block actually has (1->0 and
+		 * 3->2 reversed, 0->2 not): camera 0's LEDs within 3px of each camera's blobs, camera 1 94.7% (was 3.3%),
+		 * camera 2 within 0.9 deg / 0.2cm of its fitted pose (was 72 deg / 12cm), camera 3 61.4% (was 0%). For
+		 * camera 1's pure yaw F O^T F is O, which is why its rotation looked right used as stored.
+		 */
+		struct xrt_matrix_3x3 stored = __le_matrix_3x3_to_cpu(relation->orientation);
 		struct xrt_vec3 translation = __levec3_to_cpu(relation->translation);
+		struct xrt_matrix_3x3 orientation;
+		math_matrix_3x3_transpose(&stored, &orientation);
+		orientation.v[1] = -orientation.v[1];
+		orientation.v[2] = -orientation.v[2];
+		orientation.v[3] = -orientation.v[3];
+		orientation.v[6] = -orientation.v[6];
+		translation.y = -translation.y;
+		translation.z = -translation.z;
+		PSVR2_DEBUG(hmd, "camera relation %d: to %d from %d", i, relation->to_camera_id, relation->from_camera_id);
 		math_matrix_4x4_isometry_from_rt(&orientation, &translation, &scratch);
 
 		// write the inverse of the pose if pointing in the wrong direction.
@@ -308,27 +328,7 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 		}
 	}
 
-	/*
-	 * Each camera's translation from its parent is in the other camera's axes: rotate it back by the camera's
-	 * rotation relative to the parent (p' = Q^T p). As built, cameras 0 and 1 placed the same controller in the same
-	 * frame 3.9-4.2cm apart (p90 only +0.2cm) in all three recorded datasets (01:35, 01:45, 02:03), always by the same
-	 * vector, with their orientations agreeing to 0.5-0.9 deg. The camera 1 position that makes them agree, fitted
-	 * from the datasets, is Q^T p to 0.27cm (Q p: 7.95cm, -p: 15.3cm), and with it camera 0's controller poses land on
-	 * camera 1's blobs 30.3% within 3px instead of 3.3% (median 3.4px instead of 13.0px). Done on the relative pose
-	 * so it holds whichever direction the relation was stored in. Cameras 2 and 3 are off by far more (their
-	 * predicted LEDs land hundreds of pixels from their blobs, with any 90 deg roll too) and never solve; this
-	 * doesn't change that.
-	 */
 	for (int i = 1; i < 4; i++) {
-		struct xrt_pose rel_pose;
-		math_pose_from_isometry(&camera_relative_poses[i], &rel_pose);
-		struct xrt_quat q_inv;
-		math_quat_invert(&rel_pose.orientation, &q_inv);
-		struct xrt_vec3 p;
-		math_quat_rotate_vec3(&q_inv, &rel_pose.position, &p);
-		struct xrt_matrix_3x3 r3;
-		math_matrix_3x3_from_quat(&rel_pose.orientation, &r3);
-		math_matrix_4x4_isometry_from_rt(&r3, &p, &camera_relative_poses[i]);
 		PSVR2_DEBUG(hmd, "camera %d parent %d", i, parent_ids[i]);
 	}
 
