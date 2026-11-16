@@ -776,21 +776,30 @@ led_xfer_cb(struct libusb_transfer *xfer)
 	os_mutex_lock(&hmd->data_lock);
 	int32_t ld_vts_delta_us = (int32_t)(payload->header.timestamp - hmd->last_imu_vts_us);
 	timepoint_ns ld_vts_ns = hmd->last_imu_vts_ns + (timepoint_ns)ld_vts_delta_us * U_TIME_1US_IN_NS;
-	time_duration_ns target_offset_ns = hmd->hw2mono_vts;
+	/*
+	 * The offset follows the minimum-delay tracker, slew limited so the camera's hardware cadence passes through.
+	 * It used to be latched from hw2mono_vts on the first frame (often tens of ms off before the tracker was ready)
+	 * and slewed at 2us/frame, which is just the headset's real VTS -> host skew (~120ppm, 16683.4us VTS vs 16681.4us
+	 * host frames), so it never caught up: camera timestamps sat 23-80ms in the future and drifted ~120us/s, which
+	 * moved the controller LED window and misaligned the optical poses with the IMUs. Now LD frames wait for the
+	 * tracker, a far-off offset re-latches at once, and the slew (10us/frame) covers the skew with room to spare.
+	 */
 	timepoint_ns ld_tracked_ns;
-	if (hmd->ld_clock != NULL && m_clock_windowed_skew_tracker_to_local(hmd->ld_clock, ld_vts_ns, &ld_tracked_ns)) {
-		target_offset_ns = ld_tracked_ns - ld_vts_ns;
-	}
-	// 2us per frame (~120ppm) covers any real clock skew, and is far below LED sync's resolution.
-	const time_duration_ns max_slew_ns = U_TIME_1US_IN_NS * 2;
-	if (!hmd->ld_offset_valid) {
-		hmd->ld_offset_ns = target_offset_ns;
-		hmd->ld_offset_valid = true;
-	} else {
-		hmd->ld_offset_ns += CLAMP(target_offset_ns - hmd->ld_offset_ns, -max_slew_ns, max_slew_ns);
+	bool have_tracked = hmd->ld_clock != NULL &&
+	                    m_clock_windowed_skew_tracker_to_local(hmd->ld_clock, ld_vts_ns, &ld_tracked_ns);
+	if (have_tracked) {
+		time_duration_ns target_offset_ns = ld_tracked_ns - ld_vts_ns;
+		const time_duration_ns max_slew_ns = U_TIME_1US_IN_NS * 10;
+		time_duration_ns d = target_offset_ns - hmd->ld_offset_ns;
+		if (!hmd->ld_offset_valid || d > U_TIME_1MS_IN_NS * 2 || d < -U_TIME_1MS_IN_NS * 2) {
+			hmd->ld_offset_ns = target_offset_ns;
+			hmd->ld_offset_valid = true;
+		} else {
+			hmd->ld_offset_ns += CLAMP(d, -max_slew_ns, max_slew_ns);
+		}
 	}
 	timepoint_ns ld_timestamp_ns = ld_vts_ns + hmd->ld_offset_ns;
-	bool clock_ready = hmd->timestamp_samples >= TIMESTAMP_SAMPLES;
+	bool clock_ready = hmd->timestamp_samples >= TIMESTAMP_SAMPLES && hmd->ld_offset_valid;
 	os_mutex_unlock(&hmd->data_lock);
 
 	if (clock_ready) {
