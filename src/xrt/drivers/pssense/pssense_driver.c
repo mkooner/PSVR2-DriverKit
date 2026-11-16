@@ -61,7 +61,14 @@
 
 DEBUG_GET_ONCE_LOG_OPTION(pssense_log, "PSSENSE_LOG", U_LOGGING_INFO)
 DEBUG_GET_ONCE_BOOL_OPTION(pssense_pc_polling_rate, "PSSENSE_SET_PC_POLLING_RATE", true)
-DEBUG_GET_ONCE_BOOL_OPTION(pssense_advanced_led_sync, "PSSENSE_ADVANCED_LED_SYNC", true)
+/*
+ * Advanced LED sync (gray codes + BG brightness curve, LED sync owning the clock offset). Off by default: on PS VR2
+ * headset cameras BG never completed a measurement (the LEDs left the exposure during its sweep and were lost). The
+ * basic mode instead binary searches the LED visibility edges and locks to their centre on top of the driver's
+ * Bluetooth clock tracking, the approach PSVR2Toolkit's custom-controller-sync latency calibration takes on the same
+ * hardware.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(pssense_advanced_led_sync, "PSSENSE_ADVANCED_LED_SYNC", false)
 
 /*!
  * Longest time the constellation tracker's prediction may run without a fresh optical fix before its position is

@@ -247,6 +247,20 @@ set_phase_locked(struct t_led_sync_refinement *refinement, enum t_led_sync_phase
 		assert(refinement->found_right_edge_ns > -1);
 		assert(refinement->found_left_edge_ns > -1);
 
+		/*
+		 * The left edge is where the blink's end meets the exposure start, the right edge where its start meets
+		 * the exposure end, so without a reported exposure time (PS VR2) the edges measure it. Centring the blink
+		 * on exposure/2 needs it.
+		 */
+		time_duration_ns measured_exposure_ns = refinement->found_right_edge_ns - refinement->found_left_edge_ns;
+		if (!refinement->has_exposure_time && measured_exposure_ns > 0 &&
+		    measured_exposure_ns < refinement->exposure_interval_ns) {
+			refinement->has_exposure_time = true;
+			refinement->exposure_time_ns = measured_exposure_ns;
+			LOG_INFO(refinement, "Measured camera exposure from the LED visibility edges: %" PRId64 "us",
+			         (int64_t)(measured_exposure_ns / U_TIME_1US_IN_NS));
+		}
+
 		set_centered_duration_from_binary_search(refinement, refinement->current_blink_duration_ns);
 		break;
 	}
