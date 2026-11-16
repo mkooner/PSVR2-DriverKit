@@ -512,6 +512,10 @@ handle_constellation_sample_locked(struct t_led_sync_refinement *refinement,
 	}
 
 	switch (refinement->phase) {
+	case T_LED_SYNC_PHASE_COUNT_HOLD: {
+		count_hold_push_sample(refinement, sample);
+		break;
+	}
 	case T_LED_SYNC_PHASE_DECODE_GRAY: {
 		handle_decode_gray_constellation_sample(refinement, sample);
 		break;

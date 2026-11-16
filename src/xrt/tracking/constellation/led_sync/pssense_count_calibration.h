@@ -563,8 +563,82 @@ count_hold_integrate_trim(struct t_led_sync_refinement *refinement, timepoint_ns
 	cc->hold_trim_last_ns = now_ns;
 }
 
+//! The result of a hold probe, whichever kind: correction, drift estimate, probe interval, loss.
 static void
-handle_count_hold(struct t_led_sync_refinement *refinement)
+count_hold_apply(struct t_led_sync_refinement *refinement,
+                 timepoint_ns now_ns,
+                 bool in_view,
+                 int e,
+                 const char *verdict,
+                 const char *detail)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+
+	count_hold_integrate_trim(refinement, now_ns);
+	if (e != 0) {
+		cc->hold_centre_ns += e * COUNT_HOLD_STEP_NS;
+		cc->hold_corrections_sum_ns += e * (double)COUNT_HOLD_STEP_NS;
+		cc->hold_corrections++;
+	}
+
+	time_duration_ns t_ns = now_ns - cc->hold_start_ns;
+	if (in_view && t_ns >= COUNT_HOLD_DRIFT_MIN_T_NS) {
+		double rate = (cc->hold_corrections_sum_ns + cc->hold_trim_integral_ns) / (double)t_ns;
+		if (rate >= -COUNT_HOLD_DRIFT_MAX && rate <= COUNT_HOLD_DRIFT_MAX) {
+			cc->skew = rate;
+		} else {
+			LOG_DEBUG(refinement, "Count hold drift estimate %+.1fppm is implausible, trim left at %+.1fppm",
+			          rate * 1e6, cc->skew * 1e6);
+		}
+	}
+
+	if (in_view) {
+		cc->hold_unseen_probes = 0;
+	} else {
+		cc->hold_unseen_probes++;
+	}
+
+	/*
+	 * Each probe dims and briefly turns off this controller's LEDs, and on hardware (01:28 run) 12 of the 22
+	 * outages over 0.3s had a probe in them: the tracker needs 0.4-1.2s to find the controller again. While the
+	 * probes keep finding the blink centred, double the interval up to 30s; any correction or loss goes back to 3s.
+	 * Simulated with the measured numbers (analysis/hold_sim.py): 19.8 -> 3.8-6.2 probes/min, never lost at +-47ppm
+	 * drift or after a sudden 300/600us shift, max error 255-457us against the 1280us loss point.
+	 */
+	if (in_view && e == 0) {
+		if (++cc->hold_centred_streak >= 3) {
+			cc->hold_interval_ns = MIN(cc->hold_interval_ns * 2, COUNT_HOLD_PROBE_MAX_NS);
+		}
+	} else {
+		cc->hold_centred_streak = 0;
+		cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
+	}
+	cc->hold_in_view = in_view;
+
+	LOG_DEBUG(refinement,
+	          "Count hold probe: %s -> %s, centre %" PRId64
+	          "us, cycle trim %+.1fppm, %u corrections in %.0fs, next in %.0fs",
+	          detail, verdict, (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), cc->skew * 1e6,
+	          cc->hold_corrections, (double)t_ns / U_TIME_1S_IN_NS,
+	          (double)cc->hold_interval_ns / U_TIME_1S_IN_NS);
+
+	count_calib_release_token(refinement);
+	cc->hold_last_probe_ns = now_ns;
+	cc->hold_last_apply_ns = now_ns;
+	cc->hold_sub = 0;
+
+	if (cc->hold_unseen_probes >= COUNT_HOLD_UNSEEN_PROBES) {
+		// This controller's own LEDs gone at the centre for several probes: find the window again.
+		LOG_INFO(refinement, "Count hold lost the LEDs for %u probes, calibrating again", cc->hold_unseen_probes);
+		set_phase_locked(refinement, T_LED_SYNC_PHASE_FIND_INITIAL_OFFSET);
+		cc->quick = true;
+		return;
+	}
+	count_calib_set_offset(refinement, cc->hold_centre_ns);
+}
+
+static void
+handle_count_hold_edges(struct t_led_sync_refinement *refinement)
 {
 	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
 	timepoint_ns now_ns = os_monotonic_get_ns();
@@ -645,65 +719,113 @@ handle_count_hold(struct t_led_sync_refinement *refinement)
 		}
 	}
 
-	count_hold_integrate_trim(refinement, now_ns);
-	if (e != 0) {
-		cc->hold_centre_ns += e * COUNT_HOLD_STEP_NS;
-		cc->hold_corrections_sum_ns += e * (double)COUNT_HOLD_STEP_NS;
-		cc->hold_corrections++;
-	}
+	char detail[128];
+	snprintf(detail, sizeof(detail), "centre %+.1f left %+.1f right %+.1f blobs over %.1f off", c, l, r, off);
+	count_hold_apply(refinement, now_ns, in_view, e, verdict, detail);
+}
 
-	time_duration_ns t_ns = now_ns - cc->hold_start_ns;
-	if (in_view && t_ns >= COUNT_HOLD_DRIFT_MIN_T_NS) {
-		double rate = (cc->hold_corrections_sum_ns + cc->hold_trim_integral_ns) / (double)t_ns;
-		if (rate >= -COUNT_HOLD_DRIFT_MAX && rate <= COUNT_HOLD_DRIFT_MAX) {
-			cc->skew = rate;
-		} else {
-			LOG_DEBUG(refinement, "Count hold drift estimate %+.1fppm is implausible, trim left at %+.1fppm",
-			          rate * 1e6, cc->skew * 1e6);
-		}
-	}
+/*!
+ * Nudge check: move the blink +-COUNT_HOLD_NUDGE_NS around the centre, one latch each, and compare the brightness of
+ * this controller's matched LEDs (from the tracker's samples) at the two sides. While centred, the exposure stays
+ * fully or mostly lit (83% at +-300us), so the tracker keeps the controller; once the blink sits off centre, the side
+ * it moved toward dims. Uses only this device's LEDs, so no LEDs-off reference and no token.
+ *
+ * Simulated (analysis/dither_sim.py: brightness with 15% per-frame noise and slow +-30% changes from motion, +-47ppm
+ * drift, +-400us starting offsets, 120 runs): never lost, worst error 666us of the 1280us loss point; checks leaving the
+ * LEDs < 50% exposed 1.1% (the edge check: all of them, plus the LEDs-off frames); 7.7% of corrections in the wrong
+ * direction, one 100us step, undone at the next check.
+ */
+#define COUNT_HOLD_NUDGE_NS (U_TIME_1US_IN_NS * 300)
+//! One side is dimmer if under this fraction of the other.
+#define COUNT_HOLD_NUDGE_RATIO 0.80f
+//! Samples per side, or how long to collect them (about one latch).
+#define COUNT_HOLD_NUDGE_SAMPLES 6
+#define COUNT_HOLD_NUDGE_WINDOW_NS (U_TIME_1MS_IN_NS * 250)
 
-	if (in_view) {
-		cc->hold_unseen_probes = 0;
-	} else {
-		cc->hold_unseen_probes++;
-	}
-
-	/*
-	 * Each probe dims and briefly turns off this controller's LEDs, and on hardware (01:28 run) 12 of the 22
-	 * outages over 0.3s had a probe in them: the tracker needs 0.4-1.2s to find the controller again. While the
-	 * probes keep finding the blink centred, double the interval up to 30s; any correction or loss goes back to 3s.
-	 * Simulated with the measured numbers (analysis/hold_sim.py): 19.8 -> 3.8-6.2 probes/min, never lost at +-47ppm
-	 * drift or after a sudden 300/600us shift, max error 255-457us against the 1280us loss point.
-	 */
-	if (in_view && e == 0) {
-		if (++cc->hold_centred_streak >= 3) {
-			cc->hold_interval_ns = MIN(cc->hold_interval_ns * 2, COUNT_HOLD_PROBE_MAX_NS);
-		}
-	} else {
-		cc->hold_centred_streak = 0;
-		cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
-	}
-	cc->hold_in_view = in_view;
-
-	LOG_DEBUG(refinement,
-	          "Count hold probe: centre %+.1f left %+.1f right %+.1f blobs over %.1f off -> %s, centre %" PRId64
-	          "us, cycle trim %+.1fppm, %u corrections in %.0fs, next in %.0fs",
-	          c, l, r, off, verdict, (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), cc->skew * 1e6,
-	          cc->hold_corrections, (double)t_ns / U_TIME_1S_IN_NS,
-	          (double)cc->hold_interval_ns / U_TIME_1S_IN_NS);
-
-	count_calib_release_token(refinement);
-	cc->hold_last_probe_ns = now_ns;
-	cc->hold_last_apply_ns = now_ns;
-	cc->hold_sub = 0;
-
-	if (cc->hold_unseen_probes >= COUNT_HOLD_UNSEEN_PROBES) {
-		// This controller's own LEDs gone at the centre for several probes: find the window again.
-		LOG_INFO(refinement, "Count hold lost the LEDs for %u probes, calibrating again", cc->hold_unseen_probes);
-		set_phase_locked(refinement, T_LED_SYNC_PHASE_FIND_INITIAL_OFFSET);
-		cc->quick = true;
+static void
+count_hold_push_sample(struct t_led_sync_refinement *refinement, const struct t_constellation_tracker_sample *sample)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	if (!cc->hold_measuring || sample->sequence_id < cc->hold_meas_from_seq) {
 		return;
 	}
-	count_calib_set_offset(refinement, cc->hold_centre_ns);
+	cc->hold_bright_sum += sample->average_brightness;
+	cc->hold_bright_n++;
+}
+
+static void
+handle_count_hold_nudge(struct t_led_sync_refinement *refinement)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	timepoint_ns now_ns = os_monotonic_get_ns();
+
+	if (cc->hold_sub == 0) {
+		bool unseen = refinement->frames_since_last_visually_seen > 60;
+		time_duration_ns since_probe_ns = now_ns - cc->hold_last_probe_ns;
+		if (since_probe_ns >= cc->hold_interval_ns || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS)) {
+			cc->hold_sub = 1;
+			cc->hold_measuring = false;
+			count_calib_set_offset(refinement, cc->hold_centre_ns - COUNT_HOLD_NUDGE_NS);
+		}
+		return;
+	}
+
+	// The tick runs once the nudge applied and settled: start collecting from this frame.
+	if (!cc->hold_measuring) {
+		cc->hold_measuring = true;
+		cc->hold_meas_from_seq = refinement->last_exposure_sequence_id;
+		cc->hold_meas_start_ns = now_ns;
+		cc->hold_bright_sum = 0;
+		cc->hold_bright_n = 0;
+		return;
+	}
+	if (cc->hold_bright_n < COUNT_HOLD_NUDGE_SAMPLES && now_ns - cc->hold_meas_start_ns < COUNT_HOLD_NUDGE_WINDOW_NS) {
+		return;
+	}
+	float mean = cc->hold_bright_n > 0 ? (float)(cc->hold_bright_sum / cc->hold_bright_n) : 0.0f;
+	uint32_t n = cc->hold_bright_n;
+	cc->hold_measuring = false;
+
+	if (cc->hold_sub == 1) {
+		cc->hold_minus_mean = mean;
+		cc->hold_minus_n = n;
+		cc->hold_sub = 2;
+		count_calib_set_offset(refinement, cc->hold_centre_ns + COUNT_HOLD_NUDGE_NS);
+		return;
+	}
+
+	const float bm = cc->hold_minus_n >= 2 ? cc->hold_minus_mean : 0.0f;
+	const float bp = n >= 2 ? mean : 0.0f;
+	const bool in_view = bm > 0.0f || bp > 0.0f;
+	int e = 0;
+	const char *verdict = "not in view";
+	if (in_view) {
+		verdict = "centred";
+		if (bm < COUNT_HOLD_NUDGE_RATIO * bp) {
+			e = 1; // The early side is dimmer: the blink sits early, move it later.
+			verdict = "moved later";
+		} else if (bp < COUNT_HOLD_NUDGE_RATIO * bm) {
+			e = -1;
+			verdict = "moved earlier";
+		}
+	}
+	char detail[128];
+	snprintf(detail, sizeof(detail), "brightness -%dus %.3f (%u) +%dus %.3f (%u)",
+	         (int)(COUNT_HOLD_NUDGE_NS / U_TIME_1US_IN_NS), bm, cc->hold_minus_n,
+	         (int)(COUNT_HOLD_NUDGE_NS / U_TIME_1US_IN_NS), bp, n);
+	count_hold_apply(refinement, now_ns, in_view, e, verdict, detail);
+}
+
+DEBUG_GET_ONCE_OPTION(pssense_hold_check, "PSSENSE_HOLD_CHECK", "nudge")
+
+//! PSSENSE_HOLD_CHECK=edges selects the previous edge-and-LEDs-off check.
+static void
+handle_count_hold(struct t_led_sync_refinement *refinement)
+{
+	const char *mode = debug_get_option_pssense_hold_check();
+	if (mode != NULL && strcmp(mode, "edges") == 0) {
+		handle_count_hold_edges(refinement);
+	} else {
+		handle_count_hold_nudge(refinement);
+	}
 }

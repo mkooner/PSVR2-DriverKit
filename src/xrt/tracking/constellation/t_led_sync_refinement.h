@@ -381,6 +381,14 @@ struct t_led_sync_refinement
 		//! Adaptive probe interval: lengthened while the probes keep finding the blink centred.
 		time_duration_ns hold_interval_ns;
 		uint32_t hold_centred_streak;
+		//! Nudge check: brightness of this device's matched LEDs from the tracker, per side.
+		bool hold_measuring;
+		uint64_t hold_meas_from_seq;
+		timepoint_ns hold_meas_start_ns;
+		double hold_bright_sum;
+		uint32_t hold_bright_n;
+		float hold_minus_mean;
+		uint32_t hold_minus_n;
 		//! The last probe saw the controller, drift is only applied then.
 		bool hold_in_view;
 		timepoint_ns hold_last_probe_ns, hold_last_apply_ns;
