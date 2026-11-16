@@ -65,6 +65,12 @@ enum t_led_sync_refinement_flags
 	 * extra Gray code (BROAD) and brightness curve integral (BG) syncing modes.
 	 */
 	T_LED_SYNC_REFINEMENT_FLAGS_PS_SENSE = 1 << 3,
+	/*!
+	 * PS Sense: find the offset by counting the blobs the cameras see (LEDs all off for a baseline, then binary
+	 * search the visibility edges), like PSVR2Toolkit's custom-controller-sync calibration, instead of needing a
+	 * solved pose for every step. Needs timing events with a blob count.
+	 */
+	T_LED_SYNC_REFINEMENT_FLAGS_COUNT_CALIBRATION = 1 << 4,
 };
 
 //! Options for the LED sync refinement.
@@ -115,6 +121,8 @@ enum t_led_sync_sample_pssense_mode
 	T_LED_SYNC_SAMPLE_PSSENSE_MODE_BG,
 	//! "STABLE", all LEDs blink narrowly on the trimmed cycle, holding sync with nothing measured.
 	T_LED_SYNC_SAMPLE_PSSENSE_MODE_STABLE,
+	//! All LEDs off, for the blob count baseline of the count calibration.
+	T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_OFF,
 };
 
 struct t_led_sync_sample_pssense_data
@@ -176,6 +184,10 @@ enum t_led_sync_phase
 	T_LED_SYNC_PHASE_MAINTAIN_OFFSET,
 	//! PS Sense only, BG has converged so the LEDs hold sync on the trimmed cycle until BG checks them again.
 	T_LED_SYNC_PHASE_STABLE,
+	//! PS Sense count calibration, see @ref T_LED_SYNC_REFINEMENT_FLAGS_COUNT_CALIBRATION.
+	T_LED_SYNC_PHASE_COUNT_CALIBRATE,
+	//! The count calibration found the visibility window, the LEDs blink centred in it every frame.
+	T_LED_SYNC_PHASE_COUNT_HOLD,
 };
 
 struct t_led_sync_seen_led
@@ -291,6 +303,23 @@ struct t_led_sync_refinement
 		uint32_t residual_count, resets;
 		timepoint_ns last_log_ns;
 	} exposure_timeline;
+
+	//! Count calibration state, see @ref T_LED_SYNC_REFINEMENT_FLAGS_COUNT_CALIBRATION.
+	struct
+	{
+		int state;
+		bool owns_token;
+		//! Latest blob count from a timing event, and its frame.
+		bool has_count;
+		uint32_t last_count;
+		uint64_t count_sequence_id;
+		//! Counts accumulated since the last LED change settled.
+		uint32_t frames, sum;
+		uint64_t last_counted_sequence_id;
+		float baseline, threshold;
+		time_duration_ns full_window_ns, offset_ns, lower_ns, upper_ns, left_ns, right_ns;
+		uint32_t attempts;
+	} count_calib;
 
 	/*
 	 * Driver Sample

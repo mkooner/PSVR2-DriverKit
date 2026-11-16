@@ -43,6 +43,9 @@ struct t_timing_event_camera_exposure_start
 	uint64_t frame_period_ns;
 	//! Estimated exposure time of the frame. May be 0 if unknown.
 	uint64_t exposure_time_ns;
+	//! Total bright blobs the source detected in this frame across all its cameras, if @ref has_blob_count.
+	uint32_t blob_count;
+	bool has_blob_count;
 };
 
 struct t_timing_event

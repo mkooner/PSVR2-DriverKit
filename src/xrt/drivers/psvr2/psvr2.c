@@ -852,6 +852,10 @@ led_xfer_cb(struct libusb_transfer *xfer)
 		                                                   : 0,
 		            .exposure_time_ns =
 		                (time_duration_ns)debug_get_num_option_psvr2_camera_exposure_us() * U_TIME_1US_IN_NS,
+		            // All blobs the headset detected this frame, for the PS Sense count calibration.
+		            .blob_count = (uint32_t)payload->cameras[0].num_leds + payload->cameras[1].num_leds +
+		                          payload->cameras[2].num_leds + payload->cameras[3].num_leds,
+		            .has_blob_count = true,
 		        },
 		};
 		hmd->last_led_timestamp_us = payload->header.timestamp;

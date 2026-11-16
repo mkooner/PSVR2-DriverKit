@@ -222,11 +222,27 @@ advance_clock_offset_pssense_locked(struct t_led_sync_refinement *refinement, ti
 	return true;
 }
 
+// From pssense_count_calibration.h
+static void
+count_calib_enter(struct t_led_sync_refinement *refinement);
+static void
+count_calib_release_token(struct t_led_sync_refinement *refinement);
+
 static void
 set_phase_locked(struct t_led_sync_refinement *refinement, enum t_led_sync_phase new_phase)
 {
+	// With count calibration, every (re)search starts with it instead of the pose driven initial offset search.
+	if (new_phase == T_LED_SYNC_PHASE_FIND_INITIAL_OFFSET &&
+	    (refinement->options.flags & T_LED_SYNC_REFINEMENT_FLAGS_COUNT_CALIBRATION) != 0) {
+		new_phase = T_LED_SYNC_PHASE_COUNT_CALIBRATE;
+	}
+
 	enum t_led_sync_phase old_phase = refinement->phase;
 	refinement->phase = new_phase;
+
+	if (old_phase == T_LED_SYNC_PHASE_COUNT_CALIBRATE && new_phase != T_LED_SYNC_PHASE_COUNT_CALIBRATE) {
+		count_calib_release_token(refinement);
+	}
 
 	LOG_INFO(refinement, "Transitioning from search phase %d -> %d", old_phase, new_phase);
 
@@ -273,6 +289,15 @@ set_phase_locked(struct t_led_sync_refinement *refinement, enum t_led_sync_phase
 	}
 
 	switch (new_phase) {
+	case T_LED_SYNC_PHASE_COUNT_CALIBRATE: {
+		refinement->found_left_edge_ns = -1;
+		refinement->found_right_edge_ns = -1;
+		refinement->current_blink_duration_ns = refinement->options.initial_blink_duration_ns;
+		refinement->optical_driven_offset.has_saved_offset = false;
+		memset(&refinement->delta_sync, 0, sizeof(refinement->delta_sync));
+		count_calib_enter(refinement);
+		break;
+	}
 	case T_LED_SYNC_PHASE_FIND_INITIAL_OFFSET: {
 		refinement->found_left_edge_ns = -1;
 		refinement->found_right_edge_ns = -1;

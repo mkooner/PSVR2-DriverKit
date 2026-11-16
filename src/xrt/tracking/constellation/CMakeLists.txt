@@ -37,6 +37,7 @@ add_library(
 	lambdatwist/vec.h
 	led_sync/t_led_sync_refinement.c
 	led_sync/pssense_gray_code.h
+	led_sync/pssense_count_calibration.h
 	led_sync/led_sync_internal.h
 	optimizer/imu_preintegration.hpp
 	optimizer/internal_math.cpp

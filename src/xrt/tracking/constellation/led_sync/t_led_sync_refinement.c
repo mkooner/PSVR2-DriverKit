@@ -24,6 +24,7 @@
 
 #include "led_sync_internal.h"
 #include "pssense_gray_code.h"
+#include "pssense_count_calibration.h"
 
 
 DEBUG_GET_ONCE_LOG_OPTION(led_sync_refinement_log, "T_LED_SYNC_REFINEMENT_LOG", U_LOGGING_INFO)
@@ -410,6 +411,7 @@ handle_timing_event_locked(struct t_led_sync_refinement *refinement,
 	refinement->last_exposure_sequence_id = event->sequence_id;
 	refinement->last_exposure_ns = smooth_exposure_timestamp(refinement, event);
 	refinement->frames_since_last_visually_seen++;
+	count_calib_push_count(refinement, event);
 
 	// We have an exposure interval now, start searching!
 	if (refinement->phase == T_LED_SYNC_PHASE_INIT) {
@@ -429,12 +431,16 @@ handle_timing_event_locked(struct t_led_sync_refinement *refinement,
 	}
 
 	// STABLE keeps its lock without being seen, so it rides out longer dropouts like Sony does.
-	time_duration_ns resync_time_ns = refinement->phase == T_LED_SYNC_PHASE_STABLE
-	                                      ? STABLE_NOT_SEEN_TIMEOUT_NS
-	                                      : refinement->options.time_to_resync_ns;
+	// So does the count hold, whose lock doesn't come from solved poses in the first place.
+	time_duration_ns resync_time_ns =
+	    (refinement->phase == T_LED_SYNC_PHASE_STABLE || refinement->phase == T_LED_SYNC_PHASE_COUNT_HOLD)
+	        ? STABLE_NOT_SEEN_TIMEOUT_NS
+	        : refinement->options.time_to_resync_ns;
+	// The count calibration doesn't need the controller to be seen, it restarts itself.
 	bool trigger_resync =
 	    refinement->frames_since_last_visually_seen > (resync_time_ns / refinement->exposure_interval_ns) &&
-	    refinement->phase > T_LED_SYNC_PHASE_FIND_INITIAL_OFFSET;
+	    refinement->phase > T_LED_SYNC_PHASE_FIND_INITIAL_OFFSET &&
+	    refinement->phase != T_LED_SYNC_PHASE_COUNT_CALIBRATE;
 	// If we're past the initial find and we haven't seen the controller in some amount of
 	// time, start searching for an offset again.
 	if (trigger_resync) {
@@ -471,6 +477,14 @@ handle_timing_event_locked(struct t_led_sync_refinement *refinement,
 	}
 	case T_LED_SYNC_PHASE_MAINTAIN_OFFSET: {
 		handle_maintain_offset(refinement);
+		break;
+	}
+	case T_LED_SYNC_PHASE_COUNT_CALIBRATE: {
+		handle_count_calibrate(refinement);
+		break;
+	}
+	case T_LED_SYNC_PHASE_COUNT_HOLD: {
+		handle_count_hold(refinement);
 		break;
 	}
 	case T_LED_SYNC_PHASE_STABLE: {
@@ -686,6 +700,8 @@ t_led_sync_refinement_destroy(struct t_led_sync_refinement *refinement)
 	}
 
 	u_var_remove_root(refinement);
+
+	count_calib_release_token(refinement);
 
 	os_mutex_destroy(&refinement->lock);
 }

@@ -1,0 +1,309 @@
+// Copyright 2026, Collabora, Ltd.
+// SPDX-License-Identifier: BSL-1.0
+/*!
+ * @file
+ * @brief PS Sense LED sync calibration by counting the blobs the cameras see.
+ *
+ * Follows PSVR2Toolkit's custom-controller-sync latency calibration (libpad_hooks.cpp, MIT): measure the blob count
+ * with the controller's LEDs all off, then blink all LEDs every frame and binary search, by whether the count rises
+ * above that baseline, the earliest and latest blink offsets that the exposure still sees, confirm both edges, and
+ * centre the blink between them. Unlike the edge searches, no step needs a solved pose, which on PS VR2 is often
+ * missing even with the LEDs in view.
+ *
+ * Only one controller calibrates at a time, the others keep their LEDs off until their turn, so the counts are of
+ * one controller.
+ *
+ * @ingroup aux_tracking
+ */
+
+#pragma once
+
+#include "led_sync_internal.h"
+
+#include <stdatomic.h>
+
+
+//! Frames of blob counts averaged per decision, once the LED change settled.
+#define COUNT_FRAMES_PER_STEP 3
+//! Frames of blob counts for the LEDs-off baseline.
+#define COUNT_BASELINE_FRAMES 10
+//! Blobs above the baseline that mean the LEDs are visible, PSVR2Toolkit uses 3.
+#define COUNT_THRESHOLD_MARGIN 3.0f
+//! Edge search resolution, as in PSVR2Toolkit.
+#define COUNT_EDGE_RESOLUTION_NS (U_TIME_1US_IN_NS * 25)
+//! Edge confirmation distance, as in PSVR2Toolkit.
+#define COUNT_CONFIRM_NS (U_TIME_1US_IN_NS * 50)
+//! Exposure to assume when the source doesn't report one.
+#define COUNT_DEFAULT_EXPOSURE_NS (U_TIME_1US_IN_NS * 1000)
+
+enum count_calib_state
+{
+	COUNT_CALIB_WAIT_TOKEN = 0,
+	COUNT_CALIB_BASELINE,
+	COUNT_CALIB_FIND_ON,
+	COUNT_CALIB_LEFT_EDGE,
+	COUNT_CALIB_RIGHT_EDGE,
+	COUNT_CALIB_CONFIRM_LEFT_OUTER,
+	COUNT_CALIB_CONFIRM_LEFT_INNER,
+	COUNT_CALIB_CONFIRM_RIGHT_OUTER,
+	COUNT_CALIB_CONFIRM_RIGHT_INNER,
+};
+
+//! The refinement currently calibrating, only one may at a time.
+static _Atomic(struct t_led_sync_refinement *) count_calib_owner = NULL;
+
+static bool
+count_calib_take_token(struct t_led_sync_refinement *refinement)
+{
+	if (refinement->count_calib.owns_token) {
+		return true;
+	}
+	struct t_led_sync_refinement *expected = NULL;
+	if (atomic_compare_exchange_strong(&count_calib_owner, &expected, refinement)) {
+		refinement->count_calib.owns_token = true;
+	}
+	return refinement->count_calib.owns_token;
+}
+
+static void
+count_calib_release_token(struct t_led_sync_refinement *refinement)
+{
+	if (!refinement->count_calib.owns_token) {
+		return;
+	}
+	struct t_led_sync_refinement *expected = refinement;
+	atomic_compare_exchange_strong(&count_calib_owner, &expected, NULL);
+	refinement->count_calib.owns_token = false;
+}
+
+//! All LEDs off, for the baseline and while waiting for the token.
+static void
+count_calib_set_leds_off(struct t_led_sync_refinement *refinement)
+{
+	struct t_led_sync_sample_pssense_data data = {
+	    .base_time_offset_ns = 0,
+	    .leds = {0xFF, 0xFF, 0xFF, 0xFF},
+	};
+	set_offset_duration_pssense(refinement, 0, refinement->current_blink_fudge_ns,
+	                            refinement->current_blink_duration_ns, T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_OFF,
+	                            data);
+}
+
+//! All LEDs blinking every frame, @p offset_ns after the exposure start (on top of the driver's clock tracking).
+static void
+count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_ns offset_ns)
+{
+	refinement->count_calib.offset_ns = offset_ns;
+	refinement->count_calib.frames = 0;
+	refinement->count_calib.sum = 0;
+	set_offset_duration(refinement, 0, offset_ns, refinement->current_blink_duration_ns);
+}
+
+static void
+count_calib_restart(struct t_led_sync_refinement *refinement, const char *why)
+{
+	LOG_DEBUG(refinement, "Count calibration restarting (%s), attempt %u", why, refinement->count_calib.attempts);
+	refinement->count_calib.attempts++;
+	// Give the other controller a turn.
+	count_calib_release_token(refinement);
+	refinement->count_calib.state = COUNT_CALIB_WAIT_TOKEN;
+	refinement->count_calib.frames = 0;
+	refinement->count_calib.sum = 0;
+	count_calib_set_leds_off(refinement);
+}
+
+//! Called when entering @ref T_LED_SYNC_PHASE_COUNT_CALIBRATE.
+static void
+count_calib_enter(struct t_led_sync_refinement *refinement)
+{
+	time_duration_ns exposure_ns =
+	    refinement->has_exposure_time ? refinement->exposure_time_ns : COUNT_DEFAULT_EXPOSURE_NS;
+	refinement->count_calib.full_window_ns = refinement->current_blink_duration_ns + exposure_ns;
+	refinement->count_calib.state = COUNT_CALIB_WAIT_TOKEN;
+	refinement->count_calib.frames = 0;
+	refinement->count_calib.sum = 0;
+	count_calib_set_leds_off(refinement);
+}
+
+//! Called with every timing event, before the settle checks, so counts are always recorded.
+static void
+count_calib_push_count(struct t_led_sync_refinement *refinement,
+                       const struct t_timing_event_camera_exposure_start *event)
+{
+	if (!event->has_blob_count) {
+		return;
+	}
+	refinement->count_calib.has_count = true;
+	refinement->count_calib.last_count = event->blob_count;
+	refinement->count_calib.count_sequence_id = event->sequence_id;
+}
+
+/*!
+ * Adds this frame's count, true once @p needed frames were added since the last LED change settled. Only called
+ * from the tick, which runs once the change applied and settled.
+ */
+static bool
+count_calib_accumulate(struct t_led_sync_refinement *refinement, uint32_t needed, float *out_mean)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+
+	if (!cc->has_count || cc->count_sequence_id != refinement->last_exposure_sequence_id ||
+	    cc->count_sequence_id == cc->last_counted_sequence_id) {
+		return false;
+	}
+	cc->last_counted_sequence_id = cc->count_sequence_id;
+	cc->sum += cc->last_count;
+	cc->frames++;
+
+	if (cc->frames < needed) {
+		return false;
+	}
+	*out_mean = (float)cc->sum / (float)cc->frames;
+	return true;
+}
+
+static void
+count_calib_finish(struct t_led_sync_refinement *refinement)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+
+	time_duration_ns centre_ns = cc->left_ns + (cc->right_ns - cc->left_ns) / 2;
+	time_duration_ns window_ns = cc->right_ns - cc->left_ns;
+	LOG_INFO(refinement,
+	         "Count calibration done: visible from %" PRId64 "us to %" PRId64 "us (window %" PRId64
+	         "us, blink %" PRId64 "us, so exposure ~%" PRId64 "us), holding at %" PRId64 "us",
+	         (int64_t)(cc->left_ns / U_TIME_1US_IN_NS), (int64_t)(cc->right_ns / U_TIME_1US_IN_NS),
+	         (int64_t)(window_ns / U_TIME_1US_IN_NS),
+	         (int64_t)(refinement->current_blink_duration_ns / U_TIME_1US_IN_NS),
+	         (int64_t)((window_ns - refinement->current_blink_duration_ns) / U_TIME_1US_IN_NS),
+	         (int64_t)(centre_ns / U_TIME_1US_IN_NS));
+
+	count_calib_set_offset(refinement, centre_ns);
+	refinement->frames_since_last_visually_seen = 0;
+	set_phase_locked(refinement, T_LED_SYNC_PHASE_COUNT_HOLD);
+}
+
+static void
+handle_count_calibrate(struct t_led_sync_refinement *refinement)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	const time_duration_ns fw = cc->full_window_ns;
+
+	if (cc->state == COUNT_CALIB_WAIT_TOKEN) {
+		if (!count_calib_take_token(refinement)) {
+			return;
+		}
+		LOG_DEBUG(refinement, "Count calibration starting, measuring the LEDs-off baseline");
+		cc->state = COUNT_CALIB_BASELINE;
+		cc->frames = 0;
+		cc->sum = 0;
+		// The LEDs are already off from entering or restarting, and that change settled.
+		return;
+	}
+
+	float mean = 0;
+	if (!count_calib_accumulate(refinement, cc->state == COUNT_CALIB_BASELINE ? COUNT_BASELINE_FRAMES
+	                                                                            : COUNT_FRAMES_PER_STEP,
+	                            &mean)) {
+		return;
+	}
+	bool on = mean > cc->threshold;
+
+	LOG_DEBUG(refinement, "Count calibration state %d offset %" PRId64 "us: %.1f blobs (threshold %.1f) -> %s",
+	          cc->state, (int64_t)(cc->offset_ns / U_TIME_1US_IN_NS), mean, cc->threshold,
+	          cc->state == COUNT_CALIB_BASELINE ? "baseline" : (on ? "on" : "off"));
+
+	switch (cc->state) {
+	case COUNT_CALIB_BASELINE:
+		cc->baseline = mean;
+		cc->threshold = mean + COUNT_THRESHOLD_MARGIN;
+		cc->state = COUNT_CALIB_FIND_ON;
+		count_calib_set_offset(refinement, 0);
+		break;
+
+	case COUNT_CALIB_FIND_ON:
+		if (on) {
+			cc->upper_ns = cc->offset_ns;
+			cc->lower_ns = cc->offset_ns - fw;
+			cc->state = COUNT_CALIB_LEFT_EDGE;
+			count_calib_set_offset(refinement, (cc->lower_ns + cc->upper_ns) / 2);
+		} else if (cc->offset_ns + fw >= refinement->exposure_interval_ns) {
+			count_calib_restart(refinement, "LEDs not seen at any offset, controller out of view?");
+		} else {
+			count_calib_set_offset(refinement, cc->offset_ns + fw);
+		}
+		break;
+
+	case COUNT_CALIB_LEFT_EDGE:
+		if (on) {
+			cc->upper_ns = cc->offset_ns;
+		} else {
+			cc->lower_ns = cc->offset_ns;
+		}
+		if (cc->upper_ns - cc->lower_ns < COUNT_EDGE_RESOLUTION_NS) {
+			cc->left_ns = cc->upper_ns;
+			cc->lower_ns = cc->left_ns + (fw * 9) / 10;
+			cc->upper_ns = cc->left_ns + (fw * 11) / 10;
+			cc->state = COUNT_CALIB_RIGHT_EDGE;
+		}
+		count_calib_set_offset(refinement, (cc->lower_ns + cc->upper_ns) / 2);
+		break;
+
+	case COUNT_CALIB_RIGHT_EDGE:
+		if (on) {
+			cc->lower_ns = cc->offset_ns;
+		} else {
+			cc->upper_ns = cc->offset_ns;
+		}
+		if (cc->upper_ns - cc->lower_ns < COUNT_EDGE_RESOLUTION_NS) {
+			cc->right_ns = cc->lower_ns;
+			cc->state = COUNT_CALIB_CONFIRM_LEFT_OUTER;
+			count_calib_set_offset(refinement, cc->left_ns - COUNT_CONFIRM_NS);
+		} else {
+			count_calib_set_offset(refinement, (cc->lower_ns + cc->upper_ns) / 2);
+		}
+		break;
+
+	case COUNT_CALIB_CONFIRM_LEFT_OUTER:
+		if (on) {
+			count_calib_restart(refinement, "left edge confirmation: on just before it");
+			break;
+		}
+		cc->state = COUNT_CALIB_CONFIRM_LEFT_INNER;
+		count_calib_set_offset(refinement, cc->left_ns + COUNT_CONFIRM_NS);
+		break;
+
+	case COUNT_CALIB_CONFIRM_LEFT_INNER:
+		if (!on) {
+			count_calib_restart(refinement, "left edge confirmation: off just after it");
+			break;
+		}
+		cc->state = COUNT_CALIB_CONFIRM_RIGHT_OUTER;
+		count_calib_set_offset(refinement, cc->right_ns + COUNT_CONFIRM_NS);
+		break;
+
+	case COUNT_CALIB_CONFIRM_RIGHT_OUTER:
+		if (on) {
+			count_calib_restart(refinement, "right edge confirmation: on just after it");
+			break;
+		}
+		cc->state = COUNT_CALIB_CONFIRM_RIGHT_INNER;
+		count_calib_set_offset(refinement, cc->right_ns - COUNT_CONFIRM_NS);
+		break;
+
+	case COUNT_CALIB_CONFIRM_RIGHT_INNER:
+		if (!on) {
+			count_calib_restart(refinement, "right edge confirmation: off just before it");
+			break;
+		}
+		count_calib_finish(refinement);
+		break;
+
+	default: count_calib_restart(refinement, "bad state"); break;
+	}
+}
+
+//! The blink stays centred: in PRESCAN the driver re-anchors it to every exposure through its clock tracking.
+static void
+handle_count_hold(struct t_led_sync_refinement *refinement)
+{}

@@ -67,6 +67,11 @@ DEBUG_GET_ONCE_BOOL_OPTION(pssense_pc_polling_rate, "PSSENSE_SET_PC_POLLING_RATE
  * clock tracking (like PSVR2Toolkit's custom-controller-sync); on hardware it found the edges but lost the lock.
  */
 DEBUG_GET_ONCE_BOOL_OPTION(pssense_advanced_led_sync, "PSSENSE_ADVANCED_LED_SYNC", true)
+/*
+ * With advanced LED sync, find the LED offset by counting the blobs the headset sees instead of needing solved poses
+ * (PSVR2Toolkit's custom-controller-sync calibration), then hold it. Set to false for the gray code + BG path.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(pssense_count_calibration, "PSSENSE_COUNT_CALIBRATION", true)
 
 /*!
  * Longest time the constellation tracker's prediction may run without a fresh optical fix before its position is
@@ -237,6 +242,8 @@ struct pssense_device
 		 * be set to true during BROAD/BG/STABLE.
 		 */
 		bool increment_sequence_num;
+		//! Count calibration in use: PRESCAN positions are re-anchored to every exposure, as in basic sync.
+		bool count_calibration;
 		uint8_t led_sequence_num;
 
 		//! A debug value for testing sync issues.
@@ -1521,6 +1528,9 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 			case T_LED_SYNC_SAMPLE_PSSENSE_MODE_STABLE:
 				pssense->tracking.sync_phase = LED_SYNC_PHASE_STABLE;
 				break;
+			case T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_OFF:
+				pssense->tracking.sync_phase = LED_SYNC_PHASE_LED_ALL_OFF;
+				break;
 			}
 		}
 
@@ -1610,7 +1620,12 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 		                  sizeof(pssense->tracking.latest_led_sync_sample.pssense.leds),
 		              "Size of the sync LEDs doesn't equal wire LEDs.");
 
-		if (pssense->tracking.increment_sequence_num) {
+		/*
+		 * The count calibration and its hold blink in PRESCAN, whose absolute position is rebuilt from every
+		 * exposure; a new sequence number makes the controller take it, so it follows the clock tracking.
+		 */
+		if (pssense->tracking.increment_sequence_num ||
+		    (pssense->tracking.count_calibration && pssense->tracking.sync_phase == LED_SYNC_PHASE_PRESCAN)) {
 			pssense->tracking.led_sequence_num += 1;
 #if 0
 			PSSENSE_DEBUG(pssense, "%lu\t%lu",
@@ -2190,6 +2205,9 @@ pssense_create(struct xrt_prober *xp,
 
 		// Automatically increment the sequence number if we're not doing advanced LED sync.
 		pssense->tracking.increment_sequence_num = true;
+	} else if (debug_get_bool_option_pssense_count_calibration()) {
+		sync_refinement_flags |= T_LED_SYNC_REFINEMENT_FLAGS_COUNT_CALIBRATION;
+		pssense->tracking.count_calibration = true;
 	}
 
 	// @note We don't do blink duration refinement right now because that needs to eventually adjust the latency
