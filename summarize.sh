@@ -59,6 +59,14 @@ grep -E "Exposure timestamp jitter" "$LOG" | tail -2 | sed -E 's/.*Exposure time
 grep -o "Clock model drifted -\?[0-9]*ns" "$LOG" | grep -o -- "-\?[0-9]*" | awk '{a=$1<0?-$1:$1; s+=a; n++; if(a>m)m=a} END{if(n) printf "  re-anchor moves: %d, mean %.0fus, max %.0fus (was mean 174us, max 1463us)\n", n, s/n/1000, m/1000}'
 grep -E "Transitioning from search phase (4 -> 5|5 -> 6|. -> 6)" "$LOG" | sed -E 's/.*Transitioning/  reached:/' | sort | uniq -c
 echo
+echo "== Count calibration (LED sync by blob counts)"
+for pat in "Count calibration starting" "Count calibration restarting" "Count calibration done" "Transitioning from search phase 10 -> 9"; do
+	printf '  %-42s %s\n' "$pat" "$(grep -c -E "$pat" "$LOG" 2>/dev/null || true)"
+done
+grep -E "Count calibration (done|restarting)" "$LOG" | tail -4 | sed -E 's/.*Count calibration/  /' | cut -c1-200
+grep -E "Count calibration state 1 " "$LOG" | tail -2 | sed -E 's/.*offset/  baseline: offset/' | cut -c1-120
+
+echo
 echo "== LED sync BG phase (last summaries)"
 grep -E "BG stats" "$LOG" | tail -4 | sed -E 's/.*BG stats/  BG/' | cut -c1-200
 
