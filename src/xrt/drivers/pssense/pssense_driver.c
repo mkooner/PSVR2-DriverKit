@@ -1938,12 +1938,14 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
  */
 
 /*!
- * The controller's IMU-only up direction in the IMU frame (which the LED model is moved into for the tracker), at a
- * host time, for the tracker's gravity gate. Looked up exactly in the IMU history, without the latest-sample clamp used
- * for display, since the camera exposure is usually 10-30ms older than the newest IMU sample.
+ * The controller's IMU-only orientation (IMU frame, which the LED model is moved into for the tracker) at a host
+ * time, for the tracker's gravity and gyro gates. Looked up exactly in the IMU history, without the latest-sample
+ * clamp used for display, since the camera exposure is usually 10-30ms older than the newest IMU sample.
  */
 static bool
-pssense_get_imu_up(struct t_constellation_tracker_device *device, int64_t timestamp_ns, struct xrt_vec3 *out_up)
+pssense_get_imu_orientation(struct t_constellation_tracker_device *device,
+                            int64_t timestamp_ns,
+                            struct xrt_quat *out_orientation)
 {
 	struct pssense_device *pssense = from_constellation_device(device);
 	bool ok = false;
@@ -1953,10 +1955,7 @@ pssense_get_imu_up(struct t_constellation_tracker_device *device, int64_t timest
 		struct xrt_space_relation rel = {0};
 		m_relation_history_get(pssense->tracking.imu_relation_history, imu_ts, &rel);
 		if ((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) != 0) {
-			struct xrt_quat q_imu_world;
-			math_quat_invert(&rel.pose.orientation, &q_imu_world);
-			struct xrt_vec3 up = XRT_VEC3_UNIT_Y;
-			math_quat_rotate_vec3(&q_imu_world, &up, out_up);
+			*out_orientation = rel.pose.orientation;
 			ok = true;
 		}
 	}
@@ -2364,7 +2363,7 @@ pssense_create(struct xrt_prober *xp,
 	pssense->timing_event_sink.push_timing_event = pssense_timing_event_sink_push;
 
 	pssense->constellation_device.push_constellation_tracker_sample = pssense_push_constellation_tracker_sample;
-	pssense->constellation_device.get_imu_up = pssense_get_imu_up;
+	pssense->constellation_device.get_imu_orientation = pssense_get_imu_orientation;
 
 	pssense->base.name = XRT_DEVICE_PSSENSE;
 	snprintf(pssense->base.str, XRT_DEVICE_NAME_LEN, "%s", product_name);

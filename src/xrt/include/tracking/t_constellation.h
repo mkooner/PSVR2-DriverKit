@@ -430,16 +430,17 @@ struct t_constellation_tracker_device
 	                                          struct t_constellation_tracker_sample *sample);
 
 	/*!
-	 * Optional (may be NULL): the device's own, IMU-only estimate of which way is up, in the device (LED model)
-	 * frame, at @p timestamp_ns. When set, the tracker rejects solved poses whose up direction disagrees with it by
-	 * more than T_CONSTELLATION_GRAVITY_GATE_DEG, which catches LED correspondences off by a step of a symmetric LED
-	 * pattern.
+	 * Optional (may be NULL): the device's own, IMU-only orientation of the device (LED model) frame at
+	 * @p timestamp_ns, in a gravity aligned frame whose yaw is arbitrary. When set, the tracker rejects solved poses
+	 * whose up direction disagrees with it by more than T_CONSTELLATION_GRAVITY_GATE_DEG, and whose rotation since the
+	 * last accepted pose disagrees with the IMU's by more than T_CONSTELLATION_GYRO_GATE_DEG: both catch LED
+	 * correspondences off by a step of a symmetric LED pattern.
 	 *
 	 * @return false if the device has no estimate for that time.
 	 */
-	bool (*get_imu_up)(struct t_constellation_tracker_device *connection,
-	                   int64_t timestamp_ns,
-	                   struct xrt_vec3 *out_up_in_device);
+	bool (*get_imu_orientation)(struct t_constellation_tracker_device *connection,
+	                            int64_t timestamp_ns,
+	                            struct xrt_quat *out_orientation);
 };
 
 /*!

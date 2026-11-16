@@ -38,6 +38,8 @@ namespace xrt::tracking::constellation {
 DEBUG_GET_ONCE_LOG_OPTION(constellation_tracker_log, "CONSTELLATION_TRACKER_LOG", U_LOGGING_WARN)
 // See the gravity gate in Camera::pushPose; 0 turns it off.
 DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_gravity_gate_deg, "T_CONSTELLATION_GRAVITY_GATE_DEG", 35.0f)
+// See the gyro gate in Camera::pushPose; 0 turns it off.
+DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_gyro_gate_deg, "T_CONSTELLATION_GYRO_GATE_DEG", 15.0f)
 DEBUG_GET_ONCE_OPTION(constellation_tracker_data_recorder_output, "CONSTELLATION_TRACKER_DATA_RECORDER_OUTPUT", "")
 
 // Unconditionally present to allow warning that the feature is not enabled.
@@ -1141,17 +1143,19 @@ Camera::pushPose(CameraSample &camera_sample,
 	 * and 50. The IMU up is independent of the optical solution, so reject such a pose before it reaches the fusion
 	 * and the next frame's prior. Replayed on that run with a 35 deg gate: > 10cm consecutive jumps 53.6% -> 0.3%.
 	 */
-	if (Txr_world_device.has_value() && tracker->gravity_gate_deg > 0.0f && device->device->get_imu_up != NULL) {
-		xrt_vec3 imu_up;
-		if (device->device->get_imu_up(device->device, camera_sample.timestamp_ns, &imu_up)) {
-			xrt_quat q_device_world;
-			math_quat_invert(&Txr_world_device.value().orientation, &q_device_world);
-			xrt_vec3 optical_up;
-			xrt_vec3 world_up = XRT_VEC3_UNIT_Y;
-			math_quat_rotate_vec3(&q_device_world, &world_up, &optical_up);
-			float len = m_vec3_len(imu_up);
-			float cos_angle = len > 0.0f ? m_vec3_dot(optical_up, imu_up) / len : 1.0f;
-			float angle_deg = RAD_TO_DEG(acosf(CLAMP(cos_angle, -1.0f, 1.0f)));
+	xrt_quat q_imu;
+	if (Txr_world_device.has_value() && device->device->get_imu_orientation != NULL &&
+	    device->device->get_imu_orientation(device->device, camera_sample.timestamp_ns, &q_imu)) {
+		const xrt_quat &q_opt = Txr_world_device.value().orientation;
+
+		if (tracker->gravity_gate_deg > 0.0f) {
+			xrt_vec3 world_up = XRT_VEC3_UNIT_Y, optical_up, imu_up;
+			xrt_quat q_inv;
+			math_quat_invert(&q_opt, &q_inv);
+			math_quat_rotate_vec3(&q_inv, &world_up, &optical_up);
+			math_quat_invert(&q_imu, &q_inv);
+			math_quat_rotate_vec3(&q_inv, &world_up, &imu_up);
+			float angle_deg = RAD_TO_DEG(acosf(CLAMP(m_vec3_dot(optical_up, imu_up), -1.0f, 1.0f)));
 			if (angle_deg > tracker->gravity_gate_deg) {
 				CT_DEBUG(tracker,
 				         "Rejecting pose for device %d: up direction %.1f deg from its IMU (gate %.1f deg)",
@@ -1160,6 +1164,55 @@ Camera::pushPose(CameraSample &camera_sample,
 				device_state.solve_type = CONSTELLATION_SOLVE_NO_BLOBS_AFTER_RANSAC;
 				return;
 			}
+		}
+
+		/*
+		 * Gyro gate: a flip about the vertical axis keeps the up direction, so compare the rotation since the last
+		 * accepted pose with the IMU's over the same time (body frame, so the IMU's arbitrary yaw cancels). On the
+		 * 01:05 run, consecutive accepted solves agreed with the IMU to a median 0.4-0.6 deg (p95 < 2.5), the flips
+		 * the gravity gate misses were off by a ring step (60-72 deg); replayed, a 15 deg gate left 0 flips. Over
+		 * more than 0.25s the reference is too old to compare. After 5 rejections in a row the new pose becomes the
+		 * reference, so a reference that was itself a missed flip can't lock the device out (never needed in the
+		 * replay).
+		 */
+		if (tracker->gyro_gate_deg > 0.0f) {
+			std::lock_guard<std::mutex> guard(device->gyro_gate_lock);
+			bool reject = false;
+			if (device->gyro_ref_valid && camera_sample.timestamp_ns > device->gyro_ref_ts &&
+			    camera_sample.timestamp_ns - device->gyro_ref_ts < 250 * U_TIME_1MS_IN_NS) {
+				xrt_quat inv_ref, d_opt, d_imu, d_imu_inv, err;
+				math_quat_invert(&device->gyro_ref_optical, &inv_ref);
+				math_quat_rotate(&inv_ref, &q_opt, &d_opt);
+				math_quat_invert(&device->gyro_ref_imu, &inv_ref);
+				math_quat_rotate(&inv_ref, &q_imu, &d_imu);
+				math_quat_invert(&d_imu, &d_imu_inv);
+				math_quat_rotate(&d_imu_inv, &d_opt, &err);
+				float err_deg = RAD_TO_DEG(2.0f * acosf(CLAMP(fabsf(err.w), 0.0f, 1.0f)));
+				if (err_deg > tracker->gyro_gate_deg) {
+					if (++device->gyro_rejects_in_a_row < 5) {
+						reject = true;
+						CT_DEBUG(tracker,
+						         "Rejecting pose for device %d: rotated %.1f deg differently from its "
+						         "IMU since the last accepted pose (gate %.1f deg)",
+						         device->id, err_deg, tracker->gyro_gate_deg);
+					} else {
+						CT_DEBUG(tracker,
+						         "Device %d: %u poses in a row disagree with the gyro reference, taking "
+						         "the new one as the reference",
+						         device->id, device->gyro_rejects_in_a_row);
+					}
+				}
+			}
+			if (reject) {
+				device_state.found_pose.reset();
+				device_state.solve_type = CONSTELLATION_SOLVE_NO_BLOBS_AFTER_RANSAC;
+				return;
+			}
+			device->gyro_rejects_in_a_row = 0;
+			device->gyro_ref_valid = true;
+			device->gyro_ref_ts = camera_sample.timestamp_ns;
+			device->gyro_ref_optical = q_opt;
+			device->gyro_ref_imu = q_imu;
 		}
 	}
 
@@ -1361,6 +1414,7 @@ ConstellationTracker::ConstellationTracker(t_constellation_tracker_params *param
 {
 	this->ceres_context.reset(ceres::Context::Create());
 	this->gravity_gate_deg = debug_get_float_option_constellation_tracker_gravity_gate_deg();
+	this->gyro_gate_deg = debug_get_float_option_constellation_tracker_gyro_gate_deg();
 
 	// If the deterministic flag is set, we enable single-threaded processing, and mark it as deterministic.
 	if ((params->flags & T_CONSTELLATION_TRACKER_FLAGS_DETERMINISTIC) != 0) {

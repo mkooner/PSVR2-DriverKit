@@ -48,7 +48,7 @@ stub_push_constellation_tracker_sample(t_constellation_tracker_device *device, t
 
 static t_constellation_tracker_device stub_device = {
     .push_constellation_tracker_sample = stub_push_constellation_tracker_sample,
-    .get_imu_up = nullptr,
+    .get_imu_orientation = nullptr,
 };
 
 extern "C" void

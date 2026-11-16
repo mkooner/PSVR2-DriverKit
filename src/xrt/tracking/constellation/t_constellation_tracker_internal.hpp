@@ -420,6 +420,14 @@ public: // Fields
 	xrt_vec3 prior_rot_error{MIN_ROT_ERROR, MIN_ROT_ERROR, MIN_ROT_ERROR};
 	float gravity_error_rad{MIN_ROT_ERROR}; /* Gravity vector uncertainty in radians 0..M_PI */
 
+	//! Gyro gate reference: the last accepted pose's orientation and the device IMU's at the same time.
+	std::mutex gyro_gate_lock;
+	bool gyro_ref_valid{false};
+	int64_t gyro_ref_ts{0};
+	xrt_quat gyro_ref_optical = XRT_QUAT_IDENTITY;
+	xrt_quat gyro_ref_imu = XRT_QUAT_IDENTITY;
+	uint32_t gyro_rejects_in_a_row{0};
+
 	mutable os::Mutex data_lock;
 	struct
 	{
@@ -504,6 +512,9 @@ public: // Fields
 	bool deterministic{false};
 	//! Reject solved poses whose up direction is further than this from the device's IMU, degrees (0 = off).
 	float gravity_gate_deg{35.0f};
+	//! Reject solved poses whose rotation since the device's last accepted pose disagrees with its IMU's by more
+	//! than this, degrees (0 = off).
+	float gyro_gate_deg{15.0f};
 
 	std::vector<std::shared_ptr<CameraMosaic>> mosaics;
 
