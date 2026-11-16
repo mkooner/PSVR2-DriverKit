@@ -63,6 +63,12 @@ DEBUG_GET_ONCE_NUM_OPTION(scale_percentage, "XRT_COMPOSITOR_SCALE_PERCENTAGE", 1
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_play_area_size, "OVRD_PLAY_AREA_SIZE", 2.0f)
 
+/*!
+ * Set when Sony's PS VR2 Sense render models are available in this driver's resources (the test launcher links them
+ * in from the PlayStation VR2 App install). Otherwise SteamVR's built-in Oculus Touch models stand in.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(ovrd_pssense_render_models, "OVRD_PSSENSE_RENDER_MODELS", false)
+
 #define MODELNUM_LEN (XRT_DEVICE_NAME_LEN + 9) // "[Monado] "
 
 #define OPENVR_BONE_COUNT 31
@@ -432,6 +438,14 @@ public:
 				m_render_model = "{shiftall}flipvr_controller_vc1b_right";
 			}
 			break;
+		case XRT_DEVICE_PSSENSE: {
+			bool sony = debug_get_bool_option_ovrd_pssense_render_models();
+			if (hand == XRT_HAND_LEFT) {
+				m_render_model = sony ? "{monado}playstation_vr2_sense_left" : "oculus_cv1_controller_left";
+			} else {
+				m_render_model = sony ? "{monado}playstation_vr2_sense_right" : "oculus_cv1_controller_right";
+			}
+		} break;
 		case XRT_DEVICE_PSMV:
 		case XRT_DEVICE_HYDRA:
 		case XRT_DEVICE_DAYDREAM:
@@ -941,6 +955,12 @@ public:
 
 		struct xrt_space_relation rel;
 		xrt_device_get_tracked_pose(m_xdev, grip_name, now_ns, &rel);
+
+		// Report what the device actually knows, rather than always "valid".
+		m_pose.poseIsValid = (rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) != 0;
+		m_pose.result = (rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) != 0
+		                    ? vr::TrackingResult_Running_OK
+		                    : vr::TrackingResult_Fallback_RotationOnly;
 
 		struct xrt_pose *offset = &m_xdev->tracking_origin->initial_offset;
 

@@ -209,6 +209,10 @@ struct pssense_device
 		struct pssense_led_settings led_settings;
 
 		bool use_constellation;
+
+		//! Last optically tracked position, held while the constellation tracker has no lock.
+		bool have_last_optical_position;
+		struct xrt_vec3 last_optical_position;
 		struct t_constellation_tracker *constellation_tracker;
 		t_constellation_device_id_t constellation_device_id;
 		struct xrt_imu_sink *constellation_imu_sink;
@@ -948,6 +952,37 @@ pssense_get_constellation_pose(struct pssense_device *pssense,
 	                                             out_relation) < 0) {
 		(*out_relation) = XRT_C11_COMPOUND(struct xrt_space_relation) XRT_SPACE_RELATION_ZERO;
 	}
+
+	if ((out_relation->relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0 &&
+	    (out_relation->relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) != 0) {
+		pssense->tracking.have_last_optical_position = true;
+		pssense->tracking.last_optical_position = out_relation->pose.position;
+		return;
+	}
+
+	/*
+	 * No optical lock (LED sync still searching, or out of view). Returning an identity pose with no flags put the
+	 * controller at the tracking origin, which is the head's startup position, so it was never visible. Use the IMU
+	 * orientation instead, at the last optical position, or in front of the startup head pose at chest height.
+	 */
+	struct xrt_space_relation imu_rel = {0};
+	pssense_get_imu_fusion_pose(pssense, at_timestamp_ns, &imu_rel);
+	if ((imu_rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) == 0) {
+		return;
+	}
+
+	out_relation->pose.orientation = imu_rel.pose.orientation;
+	out_relation->angular_velocity = imu_rel.angular_velocity;
+	if (pssense->tracking.have_last_optical_position) {
+		out_relation->pose.position = pssense->tracking.last_optical_position;
+	} else {
+		float sx = pssense->hand == XRT_HAND_LEFT ? -1.0f : 1.0f;
+		out_relation->pose.position = (struct xrt_vec3){.x = sx * 0.2f, .y = -0.4f, .z = -0.4f};
+	}
+	out_relation->linear_velocity = (struct xrt_vec3)XRT_VEC3_ZERO;
+	out_relation->relation_flags = (enum xrt_space_relation_flags)(
+	    XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
+	    XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT);
 }
 
 static void
