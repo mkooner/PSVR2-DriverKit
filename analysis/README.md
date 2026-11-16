@@ -9,3 +9,5 @@ All read a test session's log (`logs/steamvr-*.log`, PSSENSE_LOG=debug) and reco
 - `variants.py <log> <record> <harness dir>` — re-places every hardware solve with each chain variant and reports
   cross-camera disagreement, where the controllers end up, and camera facing.
 - `hold_sim.py` — simulates the count-calibration hold (old vs new) with measured numbers.
+- Flip / alias check (inline in the 01:05 analysis): tilt of each optical solve vs the controller's own IMU; correct
+  solves ~5 deg, LED-ring aliases 50-70 deg. The tracker now rejects > T_CONSTELLATION_GRAVITY_GATE_DEG (35).
