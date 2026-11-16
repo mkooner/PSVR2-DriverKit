@@ -40,6 +40,7 @@
 #include "math/m_relation_history.h"
 #include "math/m_space.h"
 
+#include "pssense_clock.h"
 #include "pssense_interface.h"
 #include "pssense_led_model.h"
 #include "pssense_protocol.h"
@@ -211,7 +212,8 @@ struct pssense_device
 
 	struct
 	{
-		struct m_clock_windowed_skew_tracker *clock_tracker;
+		//! Host <-> controller clock, see pssense_clock.h.
+		struct pssense_clock clock;
 
 		timepoint_ns latest_imu_time_ns;
 
@@ -405,11 +407,27 @@ crc32_le(uint32_t crc, uint8_t const *p, size_t len)
 static void
 pssense_add_clock_offset_sample_locked(struct pssense_device *pssense, timepoint_ns local_ns, timepoint_ns remote_ns)
 {
-	m_clock_windowed_skew_tracker_push(pssense->timing.clock_tracker, local_ns, remote_ns);
+	struct pssense_clock *c = &pssense->timing.clock;
+	pssense_clock_push(c, local_ns, remote_ns);
 
 	time_duration_ns skew_ns;
-	if (m_clock_windowed_skew_tracker_get_skew(pssense->timing.clock_tracker, &skew_ns)) {
+	if (pssense_clock_get_offset(c, &skew_ns)) {
 		t_led_sync_push_host_device_clock_offset(&pssense->tracking.led_sync_refinement, -skew_ns);
+
+		if (local_ns - c->stats.last_log_ns >= U_TIME_1S_IN_NS * 5) {
+			if (c->stats.last_log_ns != 0) {
+				PSSENSE_DEBUG(pssense,
+				              "Clock: offset moved %+" PRId64 "us in %.1fs, skew %+.1fppm, max Bluetooth delay "
+				              "%" PRId64 "us, %u resets",
+				              (int64_t)((skew_ns - c->stats.output_at_log) / U_TIME_1US_IN_NS),
+				              (double)(local_ns - c->stats.last_log_ns) / U_TIME_1S_IN_NS, c->b / 1000.0,
+				              (int64_t)(c->stats.max_delay_ns / U_TIME_1US_IN_NS), c->stats.resets);
+			}
+			c->stats.output_at_log = skew_ns;
+			c->stats.max_delay_ns = 0;
+			c->stats.resets = 0;
+			c->stats.last_log_ns = local_ns;
+		}
 	}
 }
 
@@ -421,7 +439,7 @@ pssense_host_ts_to_device(struct pssense_device *pssense,
 	switch (pssense->tracking.latest_led_sync_sample.timestamp_mode) {
 	case T_LED_SYNC_SAMPLE_TIMESTAMP_MODE_INVALID:
 	case T_LED_SYNC_SAMPLE_TIMESTAMP_MODE_DEVICE_HOST_LATENCY: {
-		if (!m_clock_windowed_skew_tracker_to_remote(pssense->timing.clock_tracker, host_timestamp_ns,
+		if (!pssense_clock_to_remote(&pssense->timing.clock, host_timestamp_ns,
 		                                             out_device_timestamp_ns)) {
 			return false;
 		}
@@ -468,7 +486,7 @@ pssense_device_ts_to_host(struct pssense_device *pssense,
 	switch (pssense->tracking.latest_led_sync_sample.timestamp_mode) {
 	case T_LED_SYNC_SAMPLE_TIMESTAMP_MODE_INVALID:
 	case T_LED_SYNC_SAMPLE_TIMESTAMP_MODE_DEVICE_HOST_LATENCY: {
-		if (!m_clock_windowed_skew_tracker_to_local(pssense->timing.clock_tracker, device_timestamp_ns,
+		if (!pssense_clock_to_local(&pssense->timing.clock, device_timestamp_ns,
 		                                            out_host_timestamp_ns)) {
 			return false;
 		}
@@ -1136,6 +1154,27 @@ pssense_get_imu_fusion_pose(struct pssense_device *pssense,
 }
 
 static void
+pssense_get_imu_fusion_pose(struct pssense_device *pssense,
+                            int64_t at_timestamp_ns,
+                            struct xrt_space_relation *out_relation);
+
+//! Replace the orientation of @p rel with the controller's own IMU fusion (3DoF), if it has one.
+static void
+pssense_use_imu_orientation(struct pssense_device *pssense, int64_t at_timestamp_ns, struct xrt_space_relation *rel)
+{
+	struct xrt_space_relation imu_rel = {0};
+	pssense_get_imu_fusion_pose(pssense, at_timestamp_ns, &imu_rel);
+	if ((imu_rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) == 0) {
+		return;
+	}
+	rel->pose.orientation = imu_rel.pose.orientation;
+	rel->angular_velocity = imu_rel.angular_velocity;
+	rel->relation_flags = (enum xrt_space_relation_flags)(
+	    rel->relation_flags | XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
+	    XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT);
+}
+
+static void
 pssense_get_constellation_pose(struct pssense_device *pssense,
                                int64_t at_timestamp_ns,
                                struct xrt_space_relation *out_relation)
@@ -1181,6 +1220,8 @@ pssense_get_constellation_pose(struct pssense_device *pssense,
 					              m_vec3_len(d), pssense->tracking.fusion_overrides);
 				}
 				out_relation->pose = pssense->tracking.last_optical_fix_pose;
+				// The diverged fusion's orientation is as bad as its position, use the plain IMU one.
+				pssense_use_imu_orientation(pssense, at_timestamp_ns, out_relation);
 				out_relation->linear_velocity = (struct xrt_vec3)XRT_VEC3_ZERO;
 				out_relation->relation_flags = (enum xrt_space_relation_flags)(
 				    out_relation->relation_flags & ~XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT);
@@ -1212,6 +1253,12 @@ pssense_get_constellation_pose(struct pssense_device *pssense,
 		if (pssense->tracking.have_last_optical_position) {
 			out_relation->pose.position = pssense->tracking.last_optical_position;
 		}
+		/*
+		 * Without fresh fixes the tracker keeps predicting its fused state, orientation included, and a diverged
+		 * fusion froze or spun it: 3DoF stopped working once any optical fix had arrived. Use the plain IMU
+		 * orientation, as when there's no optical lock at all.
+		 */
+		pssense_use_imu_orientation(pssense, at_timestamp_ns, out_relation);
 		out_relation->linear_velocity = (struct xrt_vec3)XRT_VEC3_ZERO;
 		out_relation->relation_flags = (enum xrt_space_relation_flags)(
 		    (out_relation->relation_flags & ~(XRT_SPACE_RELATION_POSITION_TRACKED_BIT |
@@ -2117,7 +2164,6 @@ pssense_create(struct xrt_prober *xp,
 
 	m_imu_3dof_init(&pssense->tracking.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
 
-	pssense->timing.clock_tracker = m_clock_windowed_skew_tracker_alloc(2048);
 
 	m_relation_history_create(&pssense->tracking.imu_relation_history);
 
