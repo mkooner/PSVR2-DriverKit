@@ -1726,7 +1726,10 @@ CServerDriver_Monado::HandleHapticEvent(vr::VREvent_t *event)
 		return;
 	}
 
-	struct xrt_output_value out;
+	// Zero-init and set the type: it was left uninitialized, so drivers that check it (pssense) rejected the
+	// request as an unsupported output and haptics never played.
+	struct xrt_output_value out = {};
+	out.type = XRT_OUTPUT_VALUE_TYPE_VIBRATION;
 	out.vibration.amplitude = amp;
 	if (duration > 0.00001) {
 		out.vibration.duration_ns = (time_duration_ns)(duration * 1000.f * 1000.f * 1000.f);

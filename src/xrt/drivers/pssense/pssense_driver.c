@@ -62,6 +62,9 @@ DEBUG_GET_ONCE_LOG_OPTION(pssense_log, "PSSENSE_LOG", U_LOGGING_INFO)
 DEBUG_GET_ONCE_BOOL_OPTION(pssense_pc_polling_rate, "PSSENSE_SET_PC_POLLING_RATE", true)
 DEBUG_GET_ONCE_BOOL_OPTION(pssense_advanced_led_sync, "PSSENSE_ADVANCED_LED_SYNC", true)
 
+//! With nothing new to send, output reports still go out this often (~30Hz) as a keepalive.
+#define PSSENSE_KEEPALIVE_NS (U_TIME_1MS_IN_NS * 33)
+
 /*!
  * Indices where each input is in the input list.
  */
@@ -250,6 +253,12 @@ struct pssense_device
 		uint8_t packet_counter;
 
 		struct u_resampler *pcm_haptics_resampler;
+
+		//! PCM haptics were written recently enough that the resampler may still hold samples.
+		timepoint_ns pcm_active_until_ns;
+		//! When the last output report went out, and the LED settings it carried.
+		timepoint_ns last_send_ns;
+		struct pssense_led_settings last_sent_led_settings;
 
 		bool send_vibration;
 		uint8_t vibration_amplitude;
@@ -900,12 +909,33 @@ pssense_run_thread(void *ptr)
 			if (now >= next_output_ns) {
 				os_thread_helper_lock(&pssense->controller_thread);
 				bool carried_led_sample = pssense->tracking.led_sync_sample_needs_sending;
-				int send_result = pssense_send_output_report_locked(pssense);
-				if (send_result < 0 && carried_led_sample) {
-					// The LED sync sample in this report never reached the controller, send it again
-					// rather than letting it be marked as applied.
-					pssense->tracking.led_sync_sample_needs_marking = false;
-					pssense->tracking.led_sync_sample_needs_sending = true;
+
+				/*
+				 * Only send when there is something to send: PCM haptics playing, vibration or trigger
+				 * feedback changes, an LED sync sample, or changed LED settings; otherwise a slow keepalive.
+				 * Sending a full report to every controller at the PCM rate regardless loaded the Bluetooth
+				 * link enough to back up writes ("BT socket write error ... (11)") right before adapter resets.
+				 */
+				bool led_changed = memcmp(&pssense->output.last_sent_led_settings,
+				                          &pssense->tracking.led_settings,
+				                          sizeof(pssense->tracking.led_settings)) != 0;
+				bool needed = pssense->usb || now < pssense->output.pcm_active_until_ns ||
+				              pssense->output.send_vibration || pssense->output.send_trigger_feedback ||
+				              carried_led_sample || pssense->tracking.led_sync_sample_needs_marking ||
+				              led_changed || (now - pssense->output.last_send_ns) >= PSSENSE_KEEPALIVE_NS;
+
+				int send_result = 0;
+				if (needed) {
+					send_result = pssense_send_output_report_locked(pssense);
+					if (send_result >= 0) {
+						pssense->output.last_send_ns = now;
+						pssense->output.last_sent_led_settings = pssense->tracking.led_settings;
+					} else if (carried_led_sample) {
+						// The LED sync sample in this report never reached the controller, send it
+						// again rather than letting it be marked as applied.
+						pssense->tracking.led_sync_sample_needs_marking = false;
+						pssense->tracking.led_sync_sample_needs_sending = true;
+					}
 				}
 				os_thread_helper_unlock(&pssense->controller_thread);
 
@@ -1523,6 +1553,12 @@ set_vibration_output(struct pssense_device *pssense,
 		size_t samples_consumed =
 		    u_resampler_write(pssense->output.pcm_haptics_resampler, value->pcm_vibration.buffer,
 		                      value->pcm_vibration.buffer_size, value->pcm_vibration.sample_rate);
+		if (value->pcm_vibration.sample_rate > 0.0f) {
+			// Keep sending at the full rate while these samples (plus some slack) play out.
+			timepoint_ns play_ns = (timepoint_ns)((double)value->pcm_vibration.buffer_size /
+			                                      value->pcm_vibration.sample_rate * U_TIME_1S_IN_NS);
+			pssense->output.pcm_active_until_ns = os_monotonic_get_ns() + play_ns + U_TIME_1MS_IN_NS * 100;
+		}
 		os_thread_helper_unlock(&pssense->controller_thread);
 
 		*value->pcm_vibration.samples_consumed = samples_consumed;
