@@ -770,6 +770,21 @@ led_xfer_cb(struct libusb_transfer *xfer)
 		psvr2_blobwatch_push_ld_payload(hmd->blobwatch, payload, payload->header.frame_counter, ld_timestamp_ns);
 	}
 
+	// Raw LED records for the first frames of a recording, to identify the brightness field offline.
+	if (hmd->record_file != NULL && hmd->ld_stats_frames < 3000) {
+		for (int c = 0; c < 4; c++) {
+			const struct ld_camera *cam = &payload->cameras[c];
+			for (int j = 0; j < cam->num_leds && j < PSVR2_MAX_LEDS_PER_CAMERA; j++) {
+				const uint8_t *raw = (const uint8_t *)&cam->leds[j];
+				fprintf(hmd->record_file, "L,%u,%d,", payload->header.frame_counter, c);
+				for (size_t b = 0; b < sizeof(struct ld_led); b++) {
+					fprintf(hmd->record_file, "%02x", raw[b]);
+				}
+				fprintf(hmd->record_file, "\n");
+			}
+		}
+	}
+
 	// Periodic summary for testing: is LD data arriving, and are LEDs being seen per camera?
 	if ((hmd->ld_stats_frames++ % 300) == 0) {
 		PSVR2_DEBUG(hmd,

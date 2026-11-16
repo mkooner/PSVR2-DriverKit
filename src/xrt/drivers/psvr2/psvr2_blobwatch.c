@@ -94,6 +94,14 @@ led_to_blob(struct ld_led *led, struct t_blob *out_blob)
 	    .y = (float)(bottom - top),
 	};
 	out_blob->brightness = 1.0;
+
+	/*
+	 * LED sync decodes the Sense controllers' gray codes and BG brightness curve from each blob's greysum, and
+	 * treats 0 as "not seen". The LD payload has no decoded brightness (one of its unknown fields is probably
+	 * it), and greysum was left 0, so no gray code could ever be read. A brighter LED lights more pixels, so use
+	 * the bounding box area as a stand-in until the real brightness field is identified.
+	 */
+	out_blob->greysum = (float)(right - left + 2) * (float)(bottom - top + 2);
 }
 
 //! Fills the undistorted and homogenized centres the constellation tracker matches against.
