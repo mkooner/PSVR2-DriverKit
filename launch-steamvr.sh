@@ -146,6 +146,7 @@ export PSVR2_LOG=debug
 export PSSENSE_LOG=debug
 export CONSTELLATION_TRACKER_LOG=debug
 export T_LED_SYNC_REFINEMENT_LOG=debug
+export T_CONSTELLATION_SENSOR_FUSION_LOG=${FUSION_LOG:-debug}
 # Head pose: record raw IMU/SLAM for offline replay, and allow A/B against the old behaviour with
 # POSE_FILTER=0 ./script.sh
 export PSVR2_POSE_FILTER="${POSE_FILTER:-1}"
