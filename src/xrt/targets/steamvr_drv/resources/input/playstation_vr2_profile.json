@@ -1,0 +1,17 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "playstation_vr2_hmd",
+  "input_bindingui_mode": "hmd",
+  "input_bindingui_right": {
+    "image": "{monado}/icons/playstation_vr2/playstation_vr2_headset.svg"
+  },
+  "input_source": {
+    "/pose/raw": {
+      "type": "pose",
+      "binding_image_point": [
+        0,
+        0
+      ]
+    }
+  }
+}

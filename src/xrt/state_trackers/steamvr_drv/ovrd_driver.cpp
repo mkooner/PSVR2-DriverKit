@@ -68,6 +68,8 @@ DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_play_area_size, "OVRD_PLAY_AREA_SIZE", 2.0f)
  * in from the PlayStation VR2 App install). Otherwise SteamVR's built-in Oculus Touch models stand in.
  */
 DEBUG_GET_ONCE_BOOL_OPTION(ovrd_pssense_render_models, "OVRD_PSSENSE_RENDER_MODELS", false)
+//! Sony's PS VR2 icons are linked at resources/icons/playstation_vr2 (by psvr2-test/launch-steamvr.sh).
+DEBUG_GET_ONCE_BOOL_OPTION(ovrd_psvr2_sony_icons, "OVRD_PSVR2_SONY_ICONS", false)
 
 #define MODELNUM_LEN (XRT_DEVICE_NAME_LEN + 9) // "[Monado] "
 
@@ -101,6 +103,9 @@ struct SteamVRDriverControlInput : SteamVRDriverControl
 	enum xrt_input_name monado_input_name;
 
 	struct MonadoInputComponent component;
+
+	//! A boolean Monado input given to SteamVR as a 0/1 scalar (the profile declares a value).
+	bool bool_as_scalar = false;
 };
 
 struct SteamVRDriverControlOutput : SteamVRDriverControl
@@ -504,6 +509,69 @@ public:
 		ovrd_log("Added input %s\n", steamvr_control_path);
 	}
 
+	//! A boolean Monado input as a 0/1 scalar SteamVR component.
+	void
+	AddBoolAsScalarControl(const char *steamvr_control_path, enum xrt_input_name monado_input_name)
+	{
+		SteamVRDriverControlInput in;
+		in.monado_input_type = XRT_GET_INPUT_TYPE(monado_input_name);
+		in.steamvr_control_path = steamvr_control_path;
+		in.monado_input_name = monado_input_name;
+		in.component.has_component = false;
+		in.bool_as_scalar = true;
+		vr::VRDriverInput()->CreateScalarComponent(m_ulPropertyContainer, steamvr_control_path, &in.control_handle,
+		                                           vr::VRScalarType_Absolute, vr::VRScalarUnits_NormalizedOneSided);
+		m_input_controls.push_back(in);
+		ovrd_log("Added input %s (button as value)\n", steamvr_control_path);
+	}
+
+	/*!
+	 * PS VR2 Sense with Sony's input names (playstation_vr2_sense_controller_profile.json, as Sony's driver):
+	 * L2/R2 the trigger, L1/R1 the grip button (a click on the Sense, given as a 0/1 value as Sony's profile declares
+	 * it), the _sensor inputs the finger proximity, the face buttons, create/options and PS per hand.
+	 */
+	void
+	AddPssenseControls()
+	{
+		bool left = m_hand == XRT_HAND_LEFT;
+		struct MonadoInputComponent x = {true, true, false};
+		struct MonadoInputComponent y = {true, false, true};
+
+		AddControl(left ? "/input/l2/value" : "/input/r2/value", XRT_INPUT_PSSENSE_TRIGGER_VALUE, NULL);
+		AddControl(left ? "/input/l2/touch" : "/input/r2/touch", XRT_INPUT_PSSENSE_TRIGGER_TOUCH, NULL);
+		AddControl(left ? "/input/l2_sensor/value" : "/input/r2_sensor/value",
+		           XRT_INPUT_PSSENSE_TRIGGER_PROXIMITY_FLOAT, NULL);
+		AddBoolAsScalarControl(left ? "/input/l1/value" : "/input/r1/value", XRT_INPUT_PSSENSE_SQUEEZE_CLICK);
+		AddControl(left ? "/input/l1/touch" : "/input/r1/touch", XRT_INPUT_PSSENSE_SQUEEZE_TOUCH, NULL);
+		AddControl(left ? "/input/l1_sensor/value" : "/input/r1_sensor/value",
+		           XRT_INPUT_PSSENSE_SQUEEZE_PROXIMITY_FLOAT, NULL);
+
+		AddControl(left ? "/input/left_stick/x" : "/input/right_stick/x", XRT_INPUT_PSSENSE_THUMBSTICK, &x);
+		AddControl(left ? "/input/left_stick/y" : "/input/right_stick/y", XRT_INPUT_PSSENSE_THUMBSTICK, &y);
+		AddControl(left ? "/input/left_stick/click" : "/input/right_stick/click", XRT_INPUT_PSSENSE_THUMBSTICK_CLICK,
+		           NULL);
+		AddControl(left ? "/input/left_stick/touch" : "/input/right_stick/touch", XRT_INPUT_PSSENSE_THUMBSTICK_TOUCH,
+		           NULL);
+
+		if (left) {
+			AddControl("/input/square/click", XRT_INPUT_PSSENSE_SQUARE_CLICK, NULL);
+			AddControl("/input/square/touch", XRT_INPUT_PSSENSE_SQUARE_TOUCH, NULL);
+			AddControl("/input/triangle/click", XRT_INPUT_PSSENSE_TRIANGLE_CLICK, NULL);
+			AddControl("/input/triangle/touch", XRT_INPUT_PSSENSE_TRIANGLE_TOUCH, NULL);
+			AddControl("/input/create/click", XRT_INPUT_PSSENSE_SHARE_CLICK, NULL);
+			AddControl("/input/left_ps/click", XRT_INPUT_PSSENSE_PS_CLICK, NULL);
+		} else {
+			AddControl("/input/cross/click", XRT_INPUT_PSSENSE_CROSS_CLICK, NULL);
+			AddControl("/input/cross/touch", XRT_INPUT_PSSENSE_CROSS_TOUCH, NULL);
+			AddControl("/input/circle/click", XRT_INPUT_PSSENSE_CIRCLE_CLICK, NULL);
+			AddControl("/input/circle/touch", XRT_INPUT_PSSENSE_CIRCLE_TOUCH, NULL);
+			AddControl("/input/options/click", XRT_INPUT_PSSENSE_OPTIONS_CLICK, NULL);
+			AddControl("/input/right_ps/click", XRT_INPUT_PSSENSE_PS_CLICK, NULL);
+		}
+
+		AddOutputControl(XRT_OUTPUT_NAME_PSSENSE_VIBRATION, "/output/haptic");
+	}
+
 	void
 	AddOutputControl(enum xrt_output_name monado_output_name, const char *steamvr_control_path)
 	{
@@ -844,6 +912,15 @@ public:
 			} else if (m_hand == XRT_HAND_RIGHT) {
 				m_render_model = "{indexcontroller}valve_controller_knu_1_0_right";
 			}
+		} else if (m_xdev->name == XRT_DEVICE_PSSENSE) {
+			/*
+			 * Present the Sense controllers as Sony's driver does, so SteamVR and apps recognise them as PS VR2
+			 * Sense: controller type playstation_vr2_sense, Sony's input names (see AddPssenseControls), and a
+			 * remapping (Sony's format) that lets apps with only Touch, Index, Vive or simple controller bindings
+			 * use them. As oculus_touch with Monado's own input names, SteamVR showed them as Touch controllers.
+			 */
+			m_input_profile = "{monado}/input/playstation_vr2_sense_controller_profile.json";
+			m_controller_type = "playstation_vr2_sense";
 		} else {
 
 			struct profile_template *p = get_profile_template(m_xdev->name);
@@ -861,13 +938,42 @@ public:
 		ovrd_log("Using render model%s\n", m_render_model);
 		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_InputProfilePath_String, m_input_profile.c_str());
 		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_RenderModelName_String, m_render_model);
-		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ModelNumber_String, m_xdev->str);
+		if (!m_emulate_index_controller && m_xdev->name == XRT_DEVICE_PSSENSE) {
+			bool left = m_hand == XRT_HAND_LEFT;
+			vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ControllerType_String, m_controller_type);
+			vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ModelNumber_String, left ? "PlayStation VR2 Sense Left" : "PlayStation VR2 Sense Right");
+			vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ManufacturerName_String, "Sony Interactive Entertainment");
+			if (debug_get_bool_option_ovrd_psvr2_sony_icons()) {
+				// Sony's icons, linked into our resources by the launcher (psvr2-test/launch-steamvr.sh).
+				const char *s = left ? "left" : "right";
+				char p[256];
+				const struct { vr::ETrackedDeviceProperty prop; const char *state; } icons[] = {
+				    {vr::Prop_NamedIconPathDeviceOff_String, "off"},
+				    {vr::Prop_NamedIconPathDeviceSearching_String, "searching"},
+				    {vr::Prop_NamedIconPathDeviceSearchingAlert_String, "searching"},
+				    {vr::Prop_NamedIconPathDeviceReady_String, "ready"},
+				    {vr::Prop_NamedIconPathDeviceReadyAlert_String, "ready"},
+				    {vr::Prop_NamedIconPathDeviceNotReady_String, "error"},
+				    {vr::Prop_NamedIconPathDeviceStandby_String, "standby"},
+				    {vr::Prop_NamedIconPathDeviceAlertLow_String, "ready_low"},
+				};
+				for (const auto &ic : icons) {
+					snprintf(p, sizeof(p), "{monado}/icons/playstation_vr2/%s_controller_status_%s@2x.%s", s, ic.state,
+					         strcmp(ic.state, "searching") == 0 ? "gif" : "png");
+					vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, ic.prop, p);
+				}
+			}
+		} else {
+			vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ModelNumber_String, m_xdev->str);
+		}
 
 		// clang-format on
 
 		m_input_controls.clear();
 		if (m_emulate_index_controller) {
 			AddEmulatedIndexControls();
+		} else if (m_xdev->name == XRT_DEVICE_PSSENSE) {
+			AddPssenseControls();
 		} else {
 			AddMonadoControls();
 		}
@@ -1014,6 +1120,10 @@ public:
 
 			vr::VRInputComponentHandle_t handle = in.control_handle;
 
+			if (in.bool_as_scalar) {
+				vr::VRDriverInput()->UpdateScalarComponent(handle, input->value.boolean ? 1.0f : 0.0f, 0);
+				continue;
+			}
 			if (in.monado_input_type == XRT_INPUT_TYPE_BOOLEAN) {
 				bool state = input->value.boolean;
 				vr::VRDriverInput()->UpdateBooleanComponent(handle, state, 0);
@@ -1291,8 +1401,30 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 
 	vr::VRProperties()->SetInt32Property(m_ulPropertyContainer, vr::Prop_DeviceClass_Int32, vr::TrackedDeviceClass_HMD);
 	vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_TrackingSystemName_String, "monado");
-	vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ManufacturerName_String, "Monado");
-	vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ModelNumber_String, m_xdev->str);
+	if (m_xdev->name == XRT_DEVICE_PSVR2) {
+		// As Sony's driver presents it, so SteamVR recognises the headset as a PS VR2.
+		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ManufacturerName_String, "Sony Interactive Entertainment");
+		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ModelNumber_String, "PlayStation VR2");
+		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ControllerType_String, "playstation_vr2_hmd");
+		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_InputProfilePath_String, "{monado}/input/playstation_vr2_profile.json");
+		if (debug_get_bool_option_ovrd_psvr2_sony_icons()) {
+			const struct { vr::ETrackedDeviceProperty prop; const char *path; } icons[] = {
+			    {vr::Prop_NamedIconPathDeviceOff_String, "{monado}/icons/playstation_vr2/headset_status_off@2x.png"},
+			    {vr::Prop_NamedIconPathDeviceSearching_String, "{monado}/icons/playstation_vr2/headset_status_searching@2x.gif"},
+			    {vr::Prop_NamedIconPathDeviceSearchingAlert_String, "{monado}/icons/playstation_vr2/headset_status_searching@2x.gif"},
+			    {vr::Prop_NamedIconPathDeviceReady_String, "{monado}/icons/playstation_vr2/headset_status_ready@2x.png"},
+			    {vr::Prop_NamedIconPathDeviceReadyAlert_String, "{monado}/icons/playstation_vr2/headset_status_ready@2x.png"},
+			    {vr::Prop_NamedIconPathDeviceNotReady_String, "{monado}/icons/playstation_vr2/headset_status_error@2x.png"},
+			    {vr::Prop_NamedIconPathDeviceStandby_String, "{monado}/icons/playstation_vr2/headset_status_standby@2x.png"},
+			};
+			for (const auto &ic : icons) {
+				vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, ic.prop, ic.path);
+			}
+		}
+	} else {
+		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ManufacturerName_String, "Monado");
+		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ModelNumber_String, m_xdev->str);
+	}
 	vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_UserIpdMeters_Float, m_flIPD);
 	vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_UserHeadToEyeDepthMeters_Float, 0.f);
 	vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_DisplayFrequency_Float, m_flDisplayFrequency);
