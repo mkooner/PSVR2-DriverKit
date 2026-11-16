@@ -133,6 +133,14 @@ if [ -d "$SONY_MODELS/playstation_vr2_sense_left" ] && [ -d "$SONY_MODELS/playst
 	export OVRD_PSSENSE_RENDER_MODELS=1
 	echo "  linked PS VR2 Sense render models from the PlayStation VR2 App"
 fi
+# Sony's PS VR2 icons (status icons, binding screen pictures), linked the same way.
+SONY_ICONS="$(dirname "$SONY_MODELS")/icons"
+if [ -f "$SONY_ICONS/playstation_vr2_sense_left.svg" ]; then
+	mkdir -p "$PLUGIN/resources/icons"
+	ln -sfn "$SONY_ICONS" "$PLUGIN/resources/icons/playstation_vr2"
+	export OVRD_PSVR2_SONY_ICONS=1
+	echo "  linked PS VR2 icons from the PlayStation VR2 App"
+fi
 
 # ROOM_SETUP=1 ./launch-steamvr.sh runs SteamVR's own room setup instead of the driver-provided 2m play area.
 if [ "${ROOM_SETUP:-0}" = 1 ]; then
