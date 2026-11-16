@@ -1454,6 +1454,25 @@ pssense_push_constellation_tracker_sample(struct t_constellation_tracker_device 
 
 	// Forward to LED sync
 	t_led_sync_push_constellation_sample(&pssense->tracking.led_sync_refinement, sample);
+
+	/*
+	 * For calibrating the headset camera mount offline: the optical pose next to the IMU orientation at the same
+	 * time. With the right mount, both agree on which way is down.
+	 */
+	if (sample->has_world_pose && pssense->log_level <= U_LOGGING_DEBUG) {
+		struct xrt_space_relation imu = {0};
+		os_thread_helper_lock(&pssense->controller_thread);
+		pssense_get_imu_fusion_pose(pssense, sample->timestamp_ns, &imu);
+		os_thread_helper_unlock(&pssense->controller_thread);
+
+		const struct xrt_pose *w = &sample->world_pose;
+		PSSENSE_DEBUG(pssense,
+		              "OPT %" PRId64 " %d %.5f %.5f %.5f %.6f %.6f %.6f %.6f IMU %d %.6f %.6f %.6f %.6f",
+		              sample->timestamp_ns, pssense->hand == XRT_HAND_LEFT ? 0 : 1, w->position.x, w->position.y,
+		              w->position.z, w->orientation.x, w->orientation.y, w->orientation.z, w->orientation.w,
+		              (imu.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) != 0, imu.pose.orientation.x,
+		              imu.pose.orientation.y, imu.pose.orientation.z, imu.pose.orientation.w);
+	}
 }
 
 /*

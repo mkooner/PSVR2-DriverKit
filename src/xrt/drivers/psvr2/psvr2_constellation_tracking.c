@@ -93,6 +93,14 @@ psvr2_constellation_get_tracked_pose(struct t_constellation_tracker_tracking_sou
 	if (res == M_RELATION_HISTORY_RESULT_INVALID) {
 		*out_relation = source->current_pose;
 	}
+
+	// The head pose each camera sample was placed from, paired with the pssense "OPT" log by timestamp.
+	if (source->hmd->record_file != NULL) {
+		const struct xrt_pose *p = &out_relation->pose;
+		fprintf(source->hmd->record_file, "O,%" PRId64 ",%.6f,%.6f,%.6f,%.7f,%.7f,%.7f,%.7f\n", (int64_t)when_ns,
+		        p->position.x, p->position.y, p->position.z, p->orientation.x, p->orientation.y,
+		        p->orientation.z, p->orientation.w);
+	}
 }
 
 
