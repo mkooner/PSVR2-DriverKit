@@ -652,13 +652,16 @@ led_xfer_cb(struct libusb_transfer *xfer)
 		psvr2_blobwatch_push_ld_payload(hmd->blobwatch, payload, ld_timestamp_ns);
 	}
 
-	if (hmd->timing_source) {
+	if (hmd->timing_source && clock_ready) {
+		// Use the headset's own frame timestamp rather than USB arrival time, which adds transfer latency and
+		// jitter. Sony's driver does the same for camera frames (header timestamp + IMU clock offset), per
+		// PSVR2Toolkit's CaesarUsbThreadImage__pollHook.
 		struct t_timing_event event = {
 		    .type = T_TIMING_EVENT_TYPE_CAMERA_EXPOSURE_START,
 		    .camera_exposure_start =
 		        {
 		            .sequence_id = payload->header.frame_counter,
-		            .timestamp_ns = os_monotonic_get_ns(),
+		            .timestamp_ns = ld_timestamp_ns,
 		            .frame_period_ns =
 		                (time_duration_ns)((payload->header.timestamp - hmd->last_led_timestamp_us) * 1000),
 		            .exposure_time_ns = (time_duration_ns)(0),
