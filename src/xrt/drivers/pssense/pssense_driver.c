@@ -249,6 +249,19 @@ struct pssense_device
 		//! A debug value for testing sync issues.
 		int32_t timing_fudge_100us;
 
+		/*!
+		 * Host -> controller clock offset for PRESCAN blink positions, latched and then slewed at most
+		 * PSSENSE_LED_MAP_SLEW_NS per frame toward the Bluetooth clock tracking. On hardware the tracking's
+		 * estimate wandered by milliseconds within seconds (the LED visibility window moved 3-5ms between
+		 * count calibration attempts, and edges flipped within one), while the clocks themselves only drift by
+		 * crystal skew. PSVR2Toolkit's calibration likewise measures once and keeps the mapping.
+		 */
+		bool led_map_valid;
+		time_duration_ns led_map_offset_ns;
+		//! Largest |tracking - latched| seen since the last log, and when that was.
+		time_duration_ns led_map_max_dev_ns;
+		timepoint_ns led_map_last_log_ns;
+
 		//! Locked by controller_thread.
 		struct pssense_led_settings led_settings;
 
@@ -1587,6 +1600,33 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 			                               &next_blink_time)) {
 				os_thread_helper_unlock(&pssense->controller_thread);
 				return;
+			}
+
+			if (pssense->tracking.count_calibration) {
+				const timepoint_ns host_ns = pssense->tracking.last_exposure_local_timestamp_ns;
+				time_duration_ns target_ns = next_blink_time - host_ns;
+				time_duration_ns dev_ns = target_ns - pssense->tracking.led_map_offset_ns;
+				// ~60ppm, more than crystal skew between the controller and the host.
+				const time_duration_ns max_slew_ns = U_TIME_1US_IN_NS;
+				if (!pssense->tracking.led_map_valid || dev_ns > U_TIME_1MS_IN_NS * 50 ||
+				    dev_ns < -U_TIME_1MS_IN_NS * 50) {
+					// First use, or a reconnect / clock reset.
+					pssense->tracking.led_map_offset_ns = target_ns;
+					pssense->tracking.led_map_valid = true;
+				} else {
+					pssense->tracking.led_map_offset_ns += CLAMP(dev_ns, -max_slew_ns, max_slew_ns);
+					time_duration_ns abs_dev = dev_ns < 0 ? -dev_ns : dev_ns;
+					pssense->tracking.led_map_max_dev_ns = MAX(pssense->tracking.led_map_max_dev_ns, abs_dev);
+				}
+				if (host_ns - pssense->tracking.led_map_last_log_ns > U_TIME_1S_IN_NS * 5) {
+					PSSENSE_DEBUG(pssense,
+					              "LED clock map: Bluetooth tracking wandered up to %" PRId64
+					              "us from the held mapping in the last 5s",
+					              (int64_t)(pssense->tracking.led_map_max_dev_ns / U_TIME_1US_IN_NS));
+					pssense->tracking.led_map_max_dev_ns = 0;
+					pssense->tracking.led_map_last_log_ns = host_ns;
+				}
+				next_blink_time = host_ns + pssense->tracking.led_map_offset_ns;
 			}
 
 			next_blink_time += (int64_t)pssense->tracking.timing_fudge_100us * 100 * U_TIME_1US_IN_NS;
