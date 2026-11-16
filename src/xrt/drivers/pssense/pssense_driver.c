@@ -654,8 +654,18 @@ pssense_handle_read(struct pssense_device *pssense)
 	case INPUT_REPORT_ID_USB: {
 		struct pssense_usb_input_report data = {0};
 		if (ret != sizeof(data)) {
-			PSSENSE_ERROR(pssense, "Unexpected USB input report size %d (expected %zu)", ret, sizeof(data));
-			return -EINVAL;
+			/*
+			 * Over Bluetooth, the controller sends short "simple" reports with this same ID until it's
+			 * switched to full 0x31 reports. Returning an error here ends the controller thread on the very
+			 * first packet (no input, output, LEDs or LED sync after that), so just skip it.
+			 */
+			if (!pssense->usb) {
+				PSSENSE_DEBUG(pssense, "Skipping %d byte Bluetooth simple report", ret);
+			} else {
+				PSSENSE_WARN(pssense, "Unexpected USB input report size %d (expected %zu)", ret,
+				             sizeof(data));
+			}
+			return 0;
 		}
 
 		memcpy(&data, buf, sizeof(data));
@@ -665,9 +675,9 @@ pssense_handle_read(struct pssense_device *pssense)
 	case INPUT_REPORT_ID_BLUETOOTH: {
 		struct pssense_bluetooth_input_report data = {0};
 		if (ret != sizeof(data)) {
-			PSSENSE_ERROR(pssense, "Unexpected Bluetooth input report size %d (expected %zu)", ret,
-			              sizeof(data));
-			return -EINVAL;
+			PSSENSE_WARN(pssense, "Unexpected Bluetooth input report size %d (expected %zu), skipping", ret,
+			             sizeof(data));
+			return 0;
 		}
 
 		memcpy(&data, buf, sizeof(data));
@@ -677,9 +687,10 @@ pssense_handle_read(struct pssense_device *pssense)
 		uint32_t crc = crc32_le(0, &INPUT_REPORT_CRC32_SEED, 1);
 		crc = crc32_le(crc, (uint8_t *)&data, sizeof(struct pssense_bluetooth_input_report) - 4);
 		if (crc != expected_crc) {
+			// One corrupted Bluetooth packet shouldn't end the controller thread, skip it.
 			PSSENSE_WARN(pssense, "CRC mismatch; skipping input. Expected %08X but got %08X", expected_crc,
 			             crc);
-			return -EINVAL;
+			return 0;
 		}
 
 		return pssense_handle_packet(pssense, recv_time_ns, &data.common);
@@ -1694,6 +1705,21 @@ pssense_create(struct xrt_prober *xp,
 
 	pssense->base.name = XRT_DEVICE_PSSENSE;
 	snprintf(pssense->base.str, XRT_DEVICE_NAME_LEN, "%s", product_name);
+
+	/*
+	 * SteamVR (st/steamvr_drv) registers devices by serial and logs "attempted to add tracked device with no
+	 * serial number" for an empty one, and the controllers don't show up. Use the serial string descriptor (the
+	 * Bluetooth address over Bluetooth) when there is one, otherwise a stable per-side fallback.
+	 */
+	unsigned char serial[XRT_DEVICE_NAME_LEN] = {0};
+	ret = xrt_prober_get_string_descriptor(xp, xpdev, XRT_PROBER_STRING_SERIAL_NUMBER, serial, sizeof(serial) - 1);
+	if (ret > 0 && serial[0] != '\0') {
+		snprintf(pssense->base.serial, XRT_DEVICE_NAME_LEN, "%s", (const char *)serial);
+	} else {
+		snprintf(pssense->base.serial, XRT_DEVICE_NAME_LEN, "PS Sense %s %04x",
+		         xpdev->product_id == PSSENSE_PID_LEFT ? "Left" : "Right", xpdev->product_id);
+	}
+
 	pssense->base.update_inputs = pssense_device_update_inputs;
 	pssense->base.set_output = pssense_set_output;
 	pssense->base.get_output_limits = pssense_get_output_limits;
