@@ -36,6 +36,8 @@
 namespace xrt::tracking::constellation {
 
 DEBUG_GET_ONCE_LOG_OPTION(constellation_tracker_log, "CONSTELLATION_TRACKER_LOG", U_LOGGING_WARN)
+// See the gravity gate in Camera::pushPose; 0 turns it off.
+DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_gravity_gate_deg, "T_CONSTELLATION_GRAVITY_GATE_DEG", 35.0f)
 DEBUG_GET_ONCE_OPTION(constellation_tracker_data_recorder_output, "CONSTELLATION_TRACKER_DATA_RECORDER_OUTPUT", "")
 
 // Unconditionally present to allow warning that the feature is not enabled.
@@ -1131,6 +1133,36 @@ Camera::pushPose(CameraSample &camera_sample,
 		math_pose_transform(&Txr_world_cam.value(), &Txr_cam_device, &Txr_world_device.value());
 	}
 
+	/*
+	 * Gravity gate: a correspondence off by one step of a symmetric LED pattern still fits the blobs well, but the
+	 * pose is rotated by that step. On PS VR2 (01:05 run) such solves were off from the controller's own IMU up
+	 * direction by 50-70 deg, every one of a controller's > 10cm position jumps coincided with one, and they made up
+	 * half of one controller's solves, while correct ones agreed to a median 5-6 deg with almost nothing between 20
+	 * and 50. The IMU up is independent of the optical solution, so reject such a pose before it reaches the fusion
+	 * and the next frame's prior. Replayed on that run with a 35 deg gate: > 10cm consecutive jumps 53.6% -> 0.3%.
+	 */
+	if (Txr_world_device.has_value() && tracker->gravity_gate_deg > 0.0f && device->device->get_imu_up != NULL) {
+		xrt_vec3 imu_up;
+		if (device->device->get_imu_up(device->device, camera_sample.timestamp_ns, &imu_up)) {
+			xrt_quat q_device_world;
+			math_quat_invert(&Txr_world_device.value().orientation, &q_device_world);
+			xrt_vec3 optical_up;
+			xrt_vec3 world_up = XRT_VEC3_UNIT_Y;
+			math_quat_rotate_vec3(&q_device_world, &world_up, &optical_up);
+			float len = m_vec3_len(imu_up);
+			float cos_angle = len > 0.0f ? m_vec3_dot(optical_up, imu_up) / len : 1.0f;
+			float angle_deg = RAD_TO_DEG(acosf(CLAMP(cos_angle, -1.0f, 1.0f)));
+			if (angle_deg > tracker->gravity_gate_deg) {
+				CT_DEBUG(tracker,
+				         "Rejecting pose for device %d: up direction %.1f deg from its IMU (gate %.1f deg)",
+				         device->id, angle_deg, tracker->gravity_gate_deg);
+				device_state.found_pose.reset();
+				device_state.solve_type = CONSTELLATION_SOLVE_NO_BLOBS_AFTER_RANSAC;
+				return;
+			}
+		}
+	}
+
 	// Compute the metrics
 	t_constellation_tracker_sample_metrics metrics = {
 	    .matched_blob_count = score.matched_blobs,
@@ -1328,6 +1360,7 @@ ConstellationTracker::ConstellationTracker(t_constellation_tracker_params *param
     : log_level(debug_get_log_option_constellation_tracker_log()), params(*params), rig_calibration_lock()
 {
 	this->ceres_context.reset(ceres::Context::Create());
+	this->gravity_gate_deg = debug_get_float_option_constellation_tracker_gravity_gate_deg();
 
 	// If the deterministic flag is set, we enable single-threaded processing, and mark it as deterministic.
 	if ((params->flags & T_CONSTELLATION_TRACKER_FLAGS_DETERMINISTIC) != 0) {

@@ -502,6 +502,8 @@ public: // Fields
 	t_constellation_tracker_params params;
 
 	bool deterministic{false};
+	//! Reject solved poses whose up direction is further than this from the device's IMU, degrees (0 = off).
+	float gravity_gate_deg{35.0f};
 
 	std::vector<std::shared_ptr<CameraMosaic>> mosaics;
 
