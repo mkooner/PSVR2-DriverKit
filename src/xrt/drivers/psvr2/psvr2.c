@@ -86,6 +86,13 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_pos_tau, "PSVR2_POSE_POS_TAU", 0.03f)
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_floor_height, "PSVR2_FLOOR_HEIGHT", 1.6f)
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_recenter, "PSVR2_RECENTER", true)
+/*
+ * Tracking camera exposure time reported to LED sync. Not known from the headset yet (the LD header has undecoded
+ * fields, recorded for identification). LED sync centres the blink on exposure/2 and derives step sizes from it;
+ * with 0 it centred on the exposure start and one step size became 0. Sony's stable LED blink is 450us and has to
+ * fit inside the exposure, so the estimate is a little above that.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(psvr2_camera_exposure_us, "PSVR2_CAMERA_EXPOSURE_US", 500)
 // Path to record raw IMU and SLAM samples to (CSV), for replaying through the pose simulator.
 DEBUG_GET_ONCE_OPTION(psvr2_record_file, "PSVR2_RECORD_FILE", NULL)
 
@@ -772,6 +779,14 @@ led_xfer_cb(struct libusb_transfer *xfer)
 
 	// Raw LED records for the first frames of a recording, to identify the brightness field offline.
 	if (hmd->record_file != NULL && hmd->ld_stats_frames < 3000) {
+		// The 64 byte LD header too, it has undecoded fields (exposure time is still unknown).
+		const uint8_t *hraw = (const uint8_t *)&payload->header;
+		fprintf(hmd->record_file, "H,%u,", payload->header.frame_counter);
+		for (size_t b = 0; b < sizeof(payload->header); b++) {
+			fprintf(hmd->record_file, "%02x", hraw[b]);
+		}
+		fprintf(hmd->record_file, "\n");
+
 		for (int c = 0; c < 4; c++) {
 			const struct ld_camera *cam = &payload->cameras[c];
 			for (int j = 0; j < cam->num_leds && j < PSVR2_MAX_LEDS_PER_CAMERA; j++) {
@@ -815,7 +830,8 @@ led_xfer_cb(struct libusb_transfer *xfer)
 		                                                                        hmd->last_led_timestamp_us) *
 		                                                         U_TIME_1US_IN_NS / ld_frames_delta
 		                                                   : 0,
-		            .exposure_time_ns = (time_duration_ns)(0),
+		            .exposure_time_ns =
+		                (time_duration_ns)debug_get_num_option_psvr2_camera_exposure_us() * U_TIME_1US_IN_NS,
 		        },
 		};
 		hmd->last_led_timestamp_us = payload->header.timestamp;

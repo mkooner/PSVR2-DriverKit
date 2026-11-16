@@ -386,6 +386,14 @@ struct t_led_sync_refinement
 		uint8_t leds[T_LED_SYNC_SELECTED_LEDS];
 		//! The first frame the next measurement may use.
 		uint64_t window_start_sequence_id;
+
+		//! Why BG windows did or didn't produce a measurement, summarised every couple of seconds.
+		struct
+		{
+			uint32_t samples, incomplete, no_cycle, no_measure, measured, corrections;
+			float error_steps_sum;
+			timepoint_ns last_log_ns;
+		} stats;
 		//! Ring buffer of the last @ref T_LED_SYNC_BRIGHTNESS_CURVE_NUM_SAMPLES frames per camera.
 		struct t_led_sync_frame frames[XRT_TRACKING_MAX_CAMS][T_LED_SYNC_BRIGHTNESS_CURVE_NUM_SAMPLES];
 	} optimize_brightness_curve;

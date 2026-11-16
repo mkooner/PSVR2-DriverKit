@@ -235,6 +235,9 @@ struct pssense_device
 		//! Rate limit for the "OUT" debug log of what clients are given.
 		timepoint_ns last_out_log_ns;
 
+		//! Rate limit for the "FINAL" debug log of what clients actually get.
+		timepoint_ns last_final_log_ns;
+
 		//! Timestamp of the last sample the constellation tracker solved optically (0 until the first one).
 		timepoint_ns last_optical_fix_ns;
 		//! That sample's pose, in the same (tracker) space as the fused pose.
@@ -1852,6 +1855,17 @@ pssense_get_tracked_pose(struct xrt_device *xdev,
 	os_thread_helper_unlock(&pssense->controller_thread);
 
 	m_relation_chain_resolve(&xrc, out_relation);
+
+	// What clients actually get (after the fusion override, hold and fallback), ~30Hz.
+	if (pssense->log_level <= U_LOGGING_DEBUG && name == XRT_INPUT_PSSENSE_GRIP_POSE &&
+	    at_timestamp_ns - pssense->tracking.last_final_log_ns > 33000000) {
+		pssense->tracking.last_final_log_ns = at_timestamp_ns;
+		const struct xrt_space_relation *r = out_relation;
+		PSSENSE_DEBUG(pssense, "FINAL %" PRId64 " %d flags %x pos %.4f %.4f %.4f rot %.4f %.4f %.4f %.4f",
+		              at_timestamp_ns, pssense->hand == XRT_HAND_LEFT ? 0 : 1, r->relation_flags,
+		              r->pose.position.x, r->pose.position.y, r->pose.position.z, r->pose.orientation.x,
+		              r->pose.orientation.y, r->pose.orientation.z, r->pose.orientation.w);
+	}
 
 	return XRT_SUCCESS;
 }

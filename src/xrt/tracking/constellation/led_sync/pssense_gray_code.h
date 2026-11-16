@@ -710,8 +710,28 @@ handle_optimize_brightness_curve_sample(struct t_led_sync_refinement *refinement
 {
 	bg_store_frame(refinement, sample);
 
+	__typeof__(refinement->optimize_brightness_curve.stats) *st = &refinement->optimize_brightness_curve.stats;
+	st->samples++;
+	{
+		timepoint_ns now = os_monotonic_get_ns();
+		if (st->last_log_ns == 0) {
+			st->last_log_ns = now;
+		} else if (now - st->last_log_ns > U_TIME_1S_IN_NS * 2) {
+			LOG_DEBUG(refinement,
+			          "BG stats %p: %u samples, %u incomplete windows, %u no cycle marker, %u not measurable, "
+			          "%u measured (mean error %.2f steps), %u corrections, skew %.2f ppm",
+			          (void *)refinement, st->samples, st->incomplete,
+			          st->no_cycle, st->no_measure, st->measured,
+			          st->measured ? st->error_steps_sum / (float)st->measured : 0.0f, st->corrections,
+			          refinement->delta_sync.skew * 1e6);
+			memset(st, 0, sizeof(*st));
+			st->last_log_ns = now;
+		}
+	}
+
 	float brightness[T_LED_SYNC_SELECTED_LEDS][BG_NUM_FRAMES];
 	if (!bg_read_window(refinement, sample->sequence_id, brightness)) {
+		st->incomplete++;
 		return;
 	}
 
@@ -721,6 +741,7 @@ handle_optimize_brightness_curve_sample(struct t_led_sync_refinement *refinement
 
 	int cycle_start = bg_find_cycle_start(brightness);
 	if (cycle_start < 0) {
+		st->no_cycle++;
 		return;
 	}
 
@@ -729,8 +750,11 @@ handle_optimize_brightness_curve_sample(struct t_led_sync_refinement *refinement
 
 	float error_steps;
 	if (!bg_measure_error_steps(brightness[0], cycle_start, &error_steps)) {
+		st->no_measure++;
 		return;
 	}
+	st->measured++;
+	st->error_steps_sum += error_steps;
 
 	timepoint_ns now_ns = os_monotonic_get_ns();
 	refinement->delta_sync.last_measurement_ns = now_ns;
@@ -742,6 +766,7 @@ handle_optimize_brightness_curve_sample(struct t_led_sync_refinement *refinement
 	LOG_GRAY_SPEW(refinement, "BG error %f steps, skew %f ppm", error_steps, refinement->delta_sync.skew * 1e6);
 
 	if (fabsf(error_steps) > BG_DEADBAND_STEPS) {
+		st->corrections++;
 		bg_send_correction(refinement, (time_duration_ns)(error_ns * BG_OFFSET_GAIN));
 	}
 }
