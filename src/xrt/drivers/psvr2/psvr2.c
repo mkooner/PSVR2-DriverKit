@@ -87,12 +87,12 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_pos_tau, "PSVR2_POSE_POS_TAU", 0.03f)
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_floor_height, "PSVR2_FLOOR_HEIGHT", 1.6f)
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_recenter, "PSVR2_RECENTER", true)
 /*
- * Tracking camera exposure time reported to LED sync, 0 = unknown (the previous behaviour). A 500us estimate made
- * the LEDs vanish on hardware once LED sync took over their timing (detections fell from ~3500/s to ~0). The LD
- * header holds constants that may be it (float 1000.0 at byte 36, u16 1000 at byte 48), so 1000 is the value to
- * try next; kept opt-in until a run confirms it.
+ * Tracking camera exposure time reported to LED sync, which centres the LED blink on exposure/2 (BG included).
+ * Measured on hardware from the LED visibility edges found by the basic LED sync: 841us. Earlier, 0 centred the
+ * blink on the exposure start and a 500us guess put it too early, so the LEDs left the exposure during BG. The LD
+ * header has a 1000 constant (float at byte 36, u16 at byte 48) that may be the nominal value. 0 = unknown.
  */
-DEBUG_GET_ONCE_NUM_OPTION(psvr2_camera_exposure_us, "PSVR2_CAMERA_EXPOSURE_US", 0)
+DEBUG_GET_ONCE_NUM_OPTION(psvr2_camera_exposure_us, "PSVR2_CAMERA_EXPOSURE_US", 840)
 // Path to record raw IMU and SLAM samples to (CSV), for replaying through the pose simulator.
 DEBUG_GET_ONCE_OPTION(psvr2_record_file, "PSVR2_RECORD_FILE", NULL)
 
