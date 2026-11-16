@@ -72,6 +72,17 @@ enum count_calib_state
 //! Empty sweeps in a row before the LEDs-always-on visibility check.
 #define COUNT_CALIB_EMPTY_SWEEPS_DIAG 2
 
+/*!
+ * Visibility check before sweeping: one reading with the LEDs always on (visible at any timing) against off. On
+ * hardware the first controller's first sweep found nothing in both 01:45 and 01:47 starts (15 steps, 2.7s, then a 3s
+ * wait), with the controller not yet in view. While the check sees nothing it is repeated every
+ * COUNT_CALIB_PRECHECK_RETRY_NS instead of sweeping blind. The always-on reading hasn't been seen succeeding on
+ * hardware yet, so after COUNT_CALIB_PRECHECK_MAX_FAILS misses it sweeps anyway, and if that sweep finds the LEDs the
+ * check is skipped for the rest of the session: a broken check costs one calibration ~2s once.
+ */
+#define COUNT_CALIB_PRECHECK_RETRY_NS (U_TIME_1MS_IN_NS * 500)
+#define COUNT_CALIB_PRECHECK_MAX_FAILS 3
+
 //! The refinement currently calibrating, only one may at a time.
 static _Atomic(struct t_led_sync_refinement *) count_calib_owner = NULL;
 /*!
@@ -310,6 +321,61 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 }
 
 static void
+count_calib_start_sweep(struct t_led_sync_refinement *refinement)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	// Start just before where the window was last time, it's usually found within a step or two.
+	time_duration_ns start_ns = cc->have_known_left ? cc->known_left_ns - cc->full_window_ns : 0;
+	LOG_DEBUG(refinement, "Count calibration starting, sweeping from %" PRId64 "us",
+	          (int64_t)(start_ns / U_TIME_1US_IN_NS));
+	cc->state = COUNT_CALIB_FIND_ON;
+	cc->swept_ns = 0;
+	cc->pass_plausible = false;
+	count_calib_set_offset(refinement, start_ns);
+}
+
+//! One reading with the LEDs always on, then off, see COUNT_CALIB_PRECHECK_RETRY_NS.
+static void
+count_calib_start_diag_on(struct t_led_sync_refinement *refinement, bool precheck)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	cc->precheck = precheck;
+	cc->state = COUNT_CALIB_DIAG_ON;
+	cc->frames = 0;
+	cc->sum = 0;
+	cc->off_phase = false;
+	struct t_led_sync_sample_pssense_data data = {.leds = {0xFF, 0xFF, 0xFF, 0xFF}};
+	set_offset_duration_pssense(refinement, 0, cc->offset_ns, refinement->current_blink_duration_ns,
+	                            T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_ON, data);
+}
+
+static void
+count_calib_start_precheck(struct t_led_sync_refinement *refinement)
+{
+	LOG_DEBUG(refinement, "Count calibration checking the LEDs are in view before sweeping");
+	count_calib_start_diag_on(refinement, true);
+}
+
+/*!
+ * A confirmation step read wrong. One reading can be a frame where a hand or the controller itself hid the LEDs
+ * (01:47: the window 4680-6800us was found, then one confirmation read 0 blobs and ~30 more steps followed), so read
+ * it once more, one step, before searching again. A real timing error reads wrong again.
+ */
+static void
+count_calib_confirm_failed(struct t_led_sync_refinement *refinement, const char *why)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	if (!cc->confirm_reread) {
+		cc->confirm_reread = true;
+		LOG_DEBUG(refinement, "Count calibration reading the confirmation again (%s)", why);
+		count_calib_set_offset(refinement, cc->offset_ns);
+		return;
+	}
+	cc->confirm_reread = false;
+	count_calib_research(refinement, why);
+}
+
+static void
 handle_count_calibrate(struct t_led_sync_refinement *refinement)
 {
 	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
@@ -326,7 +392,7 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 	}
 	struct t_led_sync_refinement *wanted = atomic_load(&count_probe_wanted);
 	if (cc->owns_token && wanted != NULL && wanted != refinement && cc->state >= COUNT_CALIB_FIND_ON &&
-	    cc->frames == 0 && !cc->off_phase) {
+	    cc->state != COUNT_CALIB_DIAG_ON && cc->frames == 0 && !cc->off_phase) {
 		LOG_DEBUG(refinement, "Count calibration pausing for the other controller's hold probe");
 		count_calib_release_token(refinement);
 		cc->paused = true;
@@ -337,17 +403,16 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 		if (os_monotonic_get_ns() < cc->retry_after_ns || !count_calib_take_token(refinement)) {
 			return;
 		}
-		// Start just before where the window was last time, it's usually found within a step or two.
-		time_duration_ns start_ns = cc->have_known_left ? cc->known_left_ns - cc->full_window_ns : 0;
-		LOG_DEBUG(refinement, "Count calibration starting, sweeping from %" PRId64 "us",
-		          (int64_t)(start_ns / U_TIME_1US_IN_NS));
-		cc->state = COUNT_CALIB_FIND_ON;
-		cc->swept_ns = 0;
 		if (cc->started_ns == 0) {
 			cc->started_ns = os_monotonic_get_ns();
 		}
-		cc->pass_plausible = false;
-		count_calib_set_offset(refinement, start_ns);
+		cc->confirm_reread = false;
+		if (!cc->precheck_untrusted && cc->precheck_fails < COUNT_CALIB_PRECHECK_MAX_FAILS) {
+			count_calib_start_precheck(refinement);
+		} else {
+			cc->sweep_despite_precheck = !cc->precheck_untrusted;
+			count_calib_start_sweep(refinement);
+		}
 		return;
 	}
 
@@ -389,6 +454,13 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 	case COUNT_CALIB_FIND_ON:
 		if (on) {
 			cc->empty_sweeps = 0;
+			cc->precheck_fails = 0;
+			if (cc->sweep_despite_precheck) {
+				cc->sweep_despite_precheck = false;
+				cc->precheck_untrusted = true;
+				LOG_INFO(refinement, "Count calibration: the sweep found LEDs the always-on check missed, "
+				                     "skipping the check from now on");
+			}
 			cc->upper_ns = cc->offset_ns;
 			cc->lower_ns = cc->offset_ns - fw;
 			cc->state = COUNT_CALIB_LEFT_EDGE;
@@ -397,16 +469,13 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 			if (++cc->empty_sweeps >= COUNT_CALIB_EMPTY_SWEEPS_DIAG) {
 				// Are the LEDs visible at all? Light them regardless of timing and compare with off.
 				cc->empty_sweeps = 0;
-				cc->state = COUNT_CALIB_DIAG_ON;
-				cc->frames = 0;
-				cc->sum = 0;
-				cc->off_phase = false;
-				struct t_led_sync_sample_pssense_data data = {.leds = {0xFF, 0xFF, 0xFF, 0xFF}};
-				set_offset_duration_pssense(refinement, 0, cc->offset_ns, refinement->current_blink_duration_ns,
-				                            T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_ON, data);
+				count_calib_start_diag_on(refinement, false);
 				break;
 			}
 			// Out of view most likely: don't keep flashing across the headset's own exposures.
+			// The checks that saw nothing were right, so check again next time instead of sweeping blind.
+			cc->sweep_despite_precheck = false;
+			cc->precheck_fails = 0;
 			cc->retry_after_ns = os_monotonic_get_ns() + U_TIME_1S_IN_NS * 3;
 			count_calib_restart(refinement, "LEDs not seen at any offset, controller out of view?");
 		} else {
@@ -468,40 +537,66 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 
 	case COUNT_CALIB_CONFIRM_LEFT_OUTER:
 		if (on) {
-			count_calib_research(refinement, "left edge confirmation: on just before it");
+			count_calib_confirm_failed(refinement, "left edge confirmation: on just before it");
 			break;
 		}
+		cc->confirm_reread = false;
 		cc->state = COUNT_CALIB_CONFIRM_LEFT_INNER;
 		count_calib_set_offset(refinement, cc->left_ns + COUNT_CONFIRM_NS);
 		break;
 
 	case COUNT_CALIB_CONFIRM_LEFT_INNER:
 		if (!on) {
-			count_calib_research(refinement, "left edge confirmation: off just after it");
+			count_calib_confirm_failed(refinement, "left edge confirmation: off just after it");
 			break;
 		}
+		cc->confirm_reread = false;
 		cc->state = COUNT_CALIB_CONFIRM_RIGHT_OUTER;
 		count_calib_set_offset(refinement, cc->right_ns + COUNT_CONFIRM_NS);
 		break;
 
 	case COUNT_CALIB_CONFIRM_RIGHT_OUTER:
 		if (on) {
-			count_calib_research(refinement, "right edge confirmation: on just after it");
+			count_calib_confirm_failed(refinement, "right edge confirmation: on just after it");
 			break;
 		}
+		cc->confirm_reread = false;
 		cc->state = COUNT_CALIB_CONFIRM_RIGHT_INNER;
 		count_calib_set_offset(refinement, cc->right_ns - COUNT_CONFIRM_NS);
 		break;
 
 	case COUNT_CALIB_CONFIRM_RIGHT_INNER:
 		if (!on) {
-			count_calib_research(refinement, "right edge confirmation: off just before it");
+			count_calib_confirm_failed(refinement, "right edge confirmation: off just before it");
 			break;
 		}
+		cc->confirm_reread = false;
 		count_calib_finish(refinement);
 		break;
 
 	case COUNT_CALIB_DIAG_ON:
+		if (cc->precheck) {
+			cc->precheck = false;
+			if (on) {
+				LOG_DEBUG(refinement, "Count calibration: LEDs in view (%.1f vs %.1f blobs always on), sweeping",
+				          cc->on_mean, cc->baseline);
+				cc->precheck_fails = 0;
+				count_calib_start_sweep(refinement);
+			} else {
+				cc->precheck_fails++;
+				LOG_DEBUG(refinement,
+				          "Count calibration: LEDs not in view (%.1f vs %.1f blobs always on), check %u, "
+				          "checking again in %ums",
+				          cc->on_mean, cc->baseline, cc->precheck_fails,
+				          (unsigned)(COUNT_CALIB_PRECHECK_RETRY_NS / U_TIME_1MS_IN_NS));
+				// Let the other controller take its turn meanwhile; nothing measured to keep.
+				count_calib_release_token(refinement);
+				cc->state = COUNT_CALIB_WAIT_TOKEN;
+				cc->retry_after_ns = os_monotonic_get_ns() + COUNT_CALIB_PRECHECK_RETRY_NS;
+				count_calib_set_leds_off(refinement);
+			}
+			break;
+		}
 		if (on) {
 			// Visible, so the timing is what's wrong: re-latch the driver's mapping and sweep again.
 			LOG_INFO(refinement,

@@ -359,6 +359,16 @@ struct t_led_sync_refinement
 		timepoint_ns started_ns;
 		//! Sweeps in a row that saw nothing.
 		uint32_t empty_sweeps;
+		//! The current DIAG_ON reading is the visibility check before a sweep, not the empty-sweep diagnostic.
+		bool precheck;
+		//! Visibility checks in a row that saw nothing; after COUNT_CALIB_PRECHECK_MAX_FAILS it sweeps anyway.
+		uint32_t precheck_fails;
+		//! This sweep runs although the checks saw nothing; if it finds the LEDs the check is wrong.
+		bool sweep_despite_precheck;
+		//! The always-on check missed LEDs a sweep then found: skip it for the rest of the session.
+		bool precheck_untrusted;
+		//! A failed confirmation is being read again before searching again.
+		bool confirm_reread;
 		//! The latest window with a plausible width, from any pass of this calibration.
 		bool have_plausible;
 		time_duration_ns plausible_left_ns, plausible_right_ns;
