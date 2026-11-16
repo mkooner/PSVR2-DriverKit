@@ -38,7 +38,7 @@ grep -E "Pose stats:" "$LOG" | tail -4 | sed -E 's/.*Pose stats: //' | cut -c1-2
 
 echo
 echo "== Controllers (thread health, LED sync progress)"
-for pat in "Skipping .* Bluetooth simple report" "Failed to send output report" "Output reports recovered" "Output reports failed .* stopping" "trying offset" "Device has been seen" "Accepting gray code" "Entering STABLE" "Found pose for device" "holding position" "releasing held position" "using the optical pose" "agrees with the optical fix again"; do
+for pat in "Skipping .* Bluetooth simple report" "Failed to send output report" "Output reports recovered" "Output reports failed .* stopping" "trying offset" "Device has been seen" "Accepting gray code" "Gray code jump of .* sent" "Gray code jump applied" "Entering STABLE" "Found pose for device" "holding position" "releasing held position" "using the optical pose" "agrees with the optical fix again"; do
 	printf '  %-40s %s\n' "$pat" "$(grep -c -E "$pat" "$LOG" 2>/dev/null || true)"
 done
 
