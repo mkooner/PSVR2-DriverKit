@@ -55,6 +55,7 @@ extern "C" {
 
 #include "psvr2_protocol.h"
 #include "psvr2_blobwatch.h"
+#include "psvr2_pose_filter.h"
 
 #include <tracking/t_tracking.h>
 
@@ -279,6 +280,24 @@ struct psvr2_hmd
 	/* Tracking state */
 	struct m_relation_history *slam_relation_history;
 	struct m_ff_vec3_f32 *ff_gyro;
+
+	//! Gyro + SLAM pose filter for the head pose (PSVR2_POSE_FILTER, on by default).
+	bool use_pose_filter;
+	struct psvr2_pose_filter pose_filter;
+
+	//! Head pose filter stats, logged every couple of seconds.
+	struct
+	{
+		timepoint_ns window_start_ns;
+		uint32_t slam_count;
+		uint32_t snaps;
+		double orient_error_sum_rad;
+		float orient_error_max_rad;
+		double pos_residual_sum_m;
+	} pose_stats;
+
+	//! Raw IMU/SLAM recording for offline replay (PSVR2_RECORD_FILE), NULL when off.
+	FILE *record_file;
 
 	/* Eye State */
 	bool eye_feature_enabled;

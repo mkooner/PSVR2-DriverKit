@@ -76,6 +76,13 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_default_brightness, "PSVR2_DEFAULT_BRIGHTNESS"
 
 DEBUG_GET_ONCE_LOG_OPTION(psvr2_log, "PSVR2_LOG", U_LOGGING_WARN)
 
+// Head pose filter: set PSVR2_POSE_FILTER=0 for the previous SLAM + gyro dead reckoning behaviour (A/B testing).
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_pose_filter, "PSVR2_POSE_FILTER", true)
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_orient_tau, "PSVR2_POSE_ORIENT_TAU", 0.15f)
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_pos_tau, "PSVR2_POSE_POS_TAU", 0.03f)
+// Path to record raw IMU and SLAM samples to (CSV), for replaying through the pose simulator.
+DEBUG_GET_ONCE_OPTION(psvr2_record_file, "PSVR2_RECORD_FILE", NULL)
+
 static void
 psvr2_usb_stop(struct psvr2_hmd *hmd);
 
@@ -111,6 +118,10 @@ psvr2_hmd_destroy(struct xrt_device *xdev)
 
 	m_ff_vec3_f32_free(&hmd->ff_gyro);
 	m_relation_history_destroy(&hmd->slam_relation_history);
+	if (hmd->record_file != NULL) {
+		fclose(hmd->record_file);
+		hmd->record_file = NULL;
+	}
 	/*
 	 * @todo The LED tracker lives on hmd->xfctx, which is never torn down, and its worker thread can still call
 	 * mark_blob_device on the blobwatch. Until the tracker is destroyed here first, the blobwatch and origin
@@ -154,6 +165,10 @@ hmd_get_raw_tracker_pose(struct psvr2_hmd *hmd, timepoint_ns at_timestamp_ns, st
 {
 	struct xrt_space_relation latest_relation;
 	timepoint_ns latest_relation_ts;
+	if (hmd->use_pose_filter && psvr2_pose_filter_get(&hmd->pose_filter, at_timestamp_ns, out_relation)) {
+		return;
+	}
+
 	if (!m_relation_history_get_latest(hmd->slam_relation_history, &latest_relation_ts, &latest_relation)) {
 		*out_relation = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
 		return;
@@ -312,6 +327,13 @@ process_imu_record(struct psvr2_hmd *hmd, size_t index, struct imu_usb_record *i
 	};
 
 	m_ff_vec3_f32_push(hmd->ff_gyro, &hmd->last_gyro, sample.timestamp_ns);
+	psvr2_pose_filter_push_gyro(&hmd->pose_filter, sample.timestamp_ns, &hmd->last_gyro);
+
+	if (hmd->record_file != NULL) {
+		fprintf(hmd->record_file, "I,%" PRId64 ",%" PRId64 ",%.7f,%.7f,%.7f,%.5f,%.5f,%.5f\n",
+		        (int64_t)estimated_sample_time, (int64_t)sample.timestamp_ns, hmd->last_gyro.x, hmd->last_gyro.y,
+		        hmd->last_gyro.z, hmd->last_accel.x, hmd->last_accel.y, hmd->last_accel.z);
+	}
 }
 
 static void
@@ -492,6 +514,39 @@ img_xfer_cb(struct libusb_transfer *xfer)
 	os_mutex_unlock(&hmd->data_lock);
 }
 
+//! Logs SLAM rate and how much the pose filter corrects, every 2 seconds at debug level.
+static void
+psvr2_pose_stats_update_locked(struct psvr2_hmd *hmd, timepoint_ns vts_ns, const struct psvr2_pose_filter_update *u)
+{
+	if (hmd->pose_stats.window_start_ns == 0) {
+		hmd->pose_stats.window_start_ns = vts_ns;
+	}
+
+	hmd->pose_stats.slam_count++;
+	hmd->pose_stats.snaps += (u->orientation_snapped || u->position_reset) ? 1 : 0;
+	hmd->pose_stats.orient_error_sum_rad += u->orient_error_rad;
+	hmd->pose_stats.pos_residual_sum_m += u->pos_residual_m;
+	if (u->orient_error_rad > hmd->pose_stats.orient_error_max_rad) {
+		hmd->pose_stats.orient_error_max_rad = u->orient_error_rad;
+	}
+
+	time_duration_ns window_ns = vts_ns - hmd->pose_stats.window_start_ns;
+	if (window_ns < U_TIME_1S_IN_NS * 2) {
+		return;
+	}
+
+	uint32_t n = hmd->pose_stats.slam_count;
+	PSVR2_DEBUG(hmd,
+	            "Pose stats: SLAM %.1f Hz, gyro-vs-SLAM error mean %.3f max %.3f deg, position residual mean %.2f "
+	            "mm, %u snaps/resets, filter %s",
+	            (double)n / time_ns_to_s(window_ns), hmd->pose_stats.orient_error_sum_rad / n * 180.0 / M_PI,
+	            hmd->pose_stats.orient_error_max_rad * 180.0 / M_PI, hmd->pose_stats.pos_residual_sum_m / n * 1000.0,
+	            hmd->pose_stats.snaps, hmd->use_pose_filter ? "on" : "off");
+
+	memset(&hmd->pose_stats, 0, sizeof(hmd->pose_stats));
+	hmd->pose_stats.window_start_ns = vts_ns;
+}
+
 static void
 process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 {
@@ -537,6 +592,17 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	math_quat_rotate(&tmp.orientation, &hmd->last_slam_pose.orientation, &hmd->pose.orientation);
 	hmd->pose.position = hmd->last_slam_pose.position;
 	math_vec3_accum(&tmp.position, &hmd->pose.position);
+
+	struct psvr2_pose_filter_update filter_update;
+	psvr2_pose_filter_push_slam(&hmd->pose_filter, vts_ns, &hmd->pose, &filter_update);
+	psvr2_pose_stats_update_locked(hmd, vts_ns, &filter_update);
+
+	if (hmd->record_file != NULL) {
+		fprintf(hmd->record_file, "S,%" PRId64 ",%" PRId64 ",%.6f,%.6f,%.6f,%.7f,%.7f,%.7f,%.7f\n",
+		        (int64_t)os_monotonic_get_ns(), (int64_t)vts_ns, hmd->pose.position.x, hmd->pose.position.y,
+		        hmd->pose.position.z, hmd->pose.orientation.x, hmd->pose.orientation.y,
+		        hmd->pose.orientation.z, hmd->pose.orientation.w);
+	}
 	os_mutex_unlock(&hmd->data_lock);
 
 	PSVR2_TRACE(hmd, "SLAM - %d leftover bytes", (int)sizeof(slam.remainder));
@@ -1497,6 +1563,22 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	};
 
 	m_ff_vec3_f32_alloc(&hmd->ff_gyro, 1024);
+
+	struct psvr2_pose_filter_params pose_filter_params;
+	psvr2_pose_filter_default_params(&pose_filter_params);
+	pose_filter_params.orient_tau_s = debug_get_float_option_psvr2_pose_orient_tau();
+	pose_filter_params.pos_tau_s = debug_get_float_option_psvr2_pose_pos_tau();
+	psvr2_pose_filter_init(&hmd->pose_filter, &pose_filter_params);
+	hmd->use_pose_filter = debug_get_bool_option_psvr2_pose_filter();
+
+	const char *record_path = debug_get_option_psvr2_record_file();
+	if (record_path != NULL && record_path[0] != '\0') {
+		hmd->record_file = fopen(record_path, "w");
+		if (hmd->record_file != NULL) {
+			fprintf(hmd->record_file,
+			        "# I,host_est_ns,vts_ns,gx,gy,gz,ax,ay,az | S,host_rx_ns,vts_ns,px,py,pz,qx,qy,qz,qw\n");
+		}
+	}
 
 	// Print name.
 	snprintf(hmd->base.str, XRT_DEVICE_NAME_LEN, "PS VR2 HMD");

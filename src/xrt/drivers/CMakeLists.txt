@@ -253,6 +253,8 @@ if(XRT_BUILD_DRIVER_PSVR2)
 		psvr2/psvr2_blobwatch.h
 		psvr2/psvr2_constellation_tracking.h
 		psvr2/psvr2_constellation_tracking.c
+		psvr2/psvr2_pose_filter.c
+		psvr2/psvr2_pose_filter.h
 		)
 	target_link_libraries(
 		drv_psvr2
