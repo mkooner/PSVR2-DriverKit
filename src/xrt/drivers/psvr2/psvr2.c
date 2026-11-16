@@ -85,6 +85,7 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_pos_tau, "PSVR2_POSE_POS_TAU", 0.03f)
  * so poses are floor-relative: about your standing head height, or seated head height if you start seated.
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_floor_height, "PSVR2_FLOOR_HEIGHT", 1.6f)
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_recenter, "PSVR2_RECENTER", true)
 // Path to record raw IMU and SLAM samples to (CSV), for replaying through the pose simulator.
 DEBUG_GET_ONCE_OPTION(psvr2_record_file, "PSVR2_RECORD_FILE", NULL)
 
@@ -597,6 +598,24 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	math_quat_rotate(&tmp.orientation, &hmd->last_slam_pose.orientation, &hmd->pose.orientation);
 	hmd->pose.position = hmd->last_slam_pose.position;
 	math_vec3_accum(&tmp.position, &hmd->pose.position);
+
+	if (hmd->recenter_enabled) {
+		if (!hmd->recenter_done) {
+			// Head at the origin, facing -Z, keeping the headset's gravity alignment (yaw only).
+			struct xrt_vec3 fwd = {0, 0, -1};
+			math_quat_rotate_vec3(&hmd->pose.orientation, &fwd, &fwd);
+			float yaw = atan2f(-fwd.x, -fwd.z);
+			struct xrt_quat yaw_q;
+			math_quat_from_angle_vector(yaw, &(struct xrt_vec3){0, 1, 0}, &yaw_q);
+			struct xrt_pose start = {.orientation = yaw_q, .position = hmd->pose.position};
+			math_pose_invert(&start, &hmd->recenter_pose);
+			hmd->recenter_done = true;
+			PSVR2_INFO(hmd,
+			           "Re-centered SLAM space on the first pose: head was at (%.3f, %.3f, %.3f), yaw %.1f deg",
+			           start.position.x, start.position.y, start.position.z, yaw * 180.0f / (float)M_PI);
+		}
+		math_pose_transform(&hmd->recenter_pose, &hmd->pose, &hmd->pose);
+	}
 
 	struct psvr2_pose_filter_update filter_update;
 	psvr2_pose_filter_push_slam(&hmd->pose_filter, vts_ns, &hmd->pose, &filter_update);
@@ -1542,6 +1561,7 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	hmd->base.tracking_origin->type = XRT_TRACKING_TYPE_EXTERNAL_SLAM;
 	hmd->base.tracking_origin->initial_offset = (struct xrt_pose)XRT_POSE_IDENTITY;
 	hmd->base.tracking_origin->initial_offset.position.y = debug_get_float_option_psvr2_floor_height();
+	hmd->recenter_enabled = debug_get_bool_option_psvr2_recenter();
 
 	if (os_mutex_init(&hmd->data_lock) != 0) {
 		PSVR2_ERROR(hmd, "Failed to init data mutex!");

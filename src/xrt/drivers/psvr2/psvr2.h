@@ -218,6 +218,15 @@ struct psvr2_hmd
 	struct xrt_pose last_slam_pose; //< Last SLAM pose reading
 
 	struct xrt_pose slam_correction_pose;
+
+	/*!
+	 * Re-centers the headset's SLAM space on the first pose of the session (PSVR2_RECENTER). The headset can
+	 * relocalize into a map saved in an earlier session, with an arbitrary origin, which put the head far from
+	 * the tracking origin the floor offset and play area assume.
+	 */
+	bool recenter_enabled;
+	bool recenter_done;
+	struct xrt_pose recenter_pose;
 	struct u_var_button slam_correction_set_btn;
 	struct u_var_button slam_correction_reset_btn;
 
