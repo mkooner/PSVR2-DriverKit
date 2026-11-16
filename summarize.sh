@@ -43,6 +43,11 @@ for pat in "Skipping .* Bluetooth simple report" "Failed to send output report" 
 done
 
 echo
+echo "== Controller Bluetooth sends (last per controller)"
+grep -E "Send stats" "$LOG" | tail -2 | sed -E 's/.*Send stats: /  /' | cut -c1-200
+grep -c "BT socket write error" "$LOG" 2>/dev/null | sed 's/^/  bluetoothd write errors in log: /'
+
+echo
 echo "== LED sync BG phase (last summaries)"
 grep -E "BG stats" "$LOG" | tail -4 | sed -E 's/.*BG stats/  BG/' | cut -c1-200
 
