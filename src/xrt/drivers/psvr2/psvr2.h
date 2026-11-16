@@ -285,6 +285,13 @@ struct psvr2_hmd
 
 	time_duration_ns hw2mono_vts;
 	time_duration_ns hw2mono_imu;
+	/*!
+	 * VTS -> host clock for the LD (camera) timestamps, protected by data_lock. hw2mono_vts is a fast exponential
+	 * filter over USB arrival times, which left +-170us of jitter on camera exposure times (the headset's own LD
+	 * timestamps are steady to 0.5us); LED sync moved the controller LEDs by that jitter. This minimum-delay tracker
+	 * ignores the USB latency spread.
+	 */
+	struct m_clock_windowed_skew_tracker *ld_clock;
 
 	/* Tracking state */
 	struct m_relation_history *slam_relation_history;

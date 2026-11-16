@@ -331,6 +331,64 @@ static void
 handle_maintain_offset(struct t_led_sync_refinement *refinement)
 {}
 
+/*!
+ * Phase-locked estimate of the exposure timeline: predicts each frame's exposure from the last estimate and the
+ * period, and moves only a fraction of the way toward the measured timestamp, so per-frame jitter averages out while
+ * real drift is still followed.
+ */
+static timepoint_ns
+smooth_exposure_timestamp(struct t_led_sync_refinement *refinement,
+                          const struct t_timing_event_camera_exposure_start *event)
+{
+	const double phase_gain = 0.05;
+	const double period_gain = 0.002;
+	const double reset_residual_ns = (double)U_TIME_1MS_IN_NS * 3;
+	const uint64_t reset_gap_frames = 120;
+
+	__typeof__(refinement->exposure_timeline) *tl = &refinement->exposure_timeline;
+	double measured_ns = (double)event->timestamp_ns;
+
+	uint64_t frames = event->sequence_id > tl->sequence_id ? event->sequence_id - tl->sequence_id : 0;
+	double residual_ns = 0;
+	bool reset = !tl->valid || frames == 0 || frames > reset_gap_frames;
+	if (!reset) {
+		double predicted_ns = tl->exposure_ns + tl->period_ns * (double)frames;
+		residual_ns = measured_ns - predicted_ns;
+		reset = fabs(residual_ns) > reset_residual_ns;
+		if (!reset) {
+			tl->exposure_ns = predicted_ns + phase_gain * residual_ns;
+			tl->period_ns += period_gain * residual_ns / (double)frames;
+			tl->residual_sq_sum += residual_ns * residual_ns;
+			tl->residual_max_abs = fmax(tl->residual_max_abs, fabs(residual_ns));
+			tl->residual_count++;
+		}
+	}
+	if (reset) {
+		tl->valid = true;
+		tl->exposure_ns = measured_ns;
+		tl->period_ns = (double)event->frame_period_ns;
+		tl->resets++;
+	}
+	tl->sequence_id = event->sequence_id;
+
+	if (event->timestamp_ns - tl->last_log_ns >= U_TIME_1S_IN_NS * 5) {
+		if (tl->last_log_ns != 0 && tl->residual_count > 0) {
+			LOG_DEBUG(refinement,
+			          "Exposure timestamp jitter: rms %.0fus, max %.0fus over %u frames, %u resets, period "
+			          "%.1fns",
+			          sqrt(tl->residual_sq_sum / tl->residual_count) / 1000.0, tl->residual_max_abs / 1000.0,
+			          tl->residual_count, tl->resets, tl->period_ns);
+		}
+		tl->residual_sq_sum = 0;
+		tl->residual_max_abs = 0;
+		tl->residual_count = 0;
+		tl->resets = 0;
+		tl->last_log_ns = event->timestamp_ns;
+	}
+
+	return (timepoint_ns)tl->exposure_ns;
+}
+
 static void
 handle_timing_event_locked(struct t_led_sync_refinement *refinement,
                            const struct t_timing_event_camera_exposure_start *event)
@@ -345,7 +403,7 @@ handle_timing_event_locked(struct t_led_sync_refinement *refinement,
 	refinement->exposure_interval_ns = event->frame_period_ns;
 	update_period_estimate(refinement, event);
 	refinement->last_exposure_sequence_id = event->sequence_id;
-	refinement->last_exposure_ns = event->timestamp_ns;
+	refinement->last_exposure_ns = smooth_exposure_timestamp(refinement, event);
 	refinement->frames_since_last_visually_seen++;
 
 	// We have an exposure interval now, start searching!

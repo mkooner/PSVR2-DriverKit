@@ -272,7 +272,25 @@ struct t_led_sync_refinement
 	struct t_led_sync_period_estimate period_estimate;
 	//! The latest timing event's frame and exposure time.
 	uint64_t last_exposure_sequence_id;
+	//! Smoothed exposure time of that frame, see @ref exposure_timeline.
 	timepoint_ns last_exposure_ns;
+
+	/*!
+	 * Exposure timestamps smoothed over frames. The cameras run on a fixed hardware cadence, but the timestamps
+	 * reaching us jitter (PS VR2: re-anchors measured +-170us on average over ~11 frames, up to 1.5ms, with random
+	 * sign), and the delta sync re-anchor moved the LEDs by that jitter every 10 frames.
+	 */
+	struct
+	{
+		bool valid;
+		uint64_t sequence_id;
+		double exposure_ns;
+		double period_ns;
+		//! Residual stats (raw - predicted), logged every few seconds.
+		double residual_sq_sum, residual_max_abs;
+		uint32_t residual_count, resets;
+		timepoint_ns last_log_ns;
+	} exposure_timeline;
 
 	/*
 	 * Driver Sample

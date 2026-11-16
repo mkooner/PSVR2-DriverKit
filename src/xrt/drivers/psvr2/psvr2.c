@@ -131,6 +131,10 @@ psvr2_hmd_destroy(struct xrt_device *xdev)
 
 	m_ff_vec3_f32_free(&hmd->ff_gyro);
 	m_relation_history_destroy(&hmd->slam_relation_history);
+	if (hmd->ld_clock != NULL) {
+		m_clock_windowed_skew_tracker_destroy(hmd->ld_clock);
+		hmd->ld_clock = NULL;
+	}
 	if (hmd->record_file != NULL) {
 		fclose(hmd->record_file);
 		hmd->record_file = NULL;
@@ -327,6 +331,9 @@ process_imu_record(struct psvr2_hmd *hmd, size_t index, struct imu_usb_record *i
 	const timepoint_ns now_imu = hmd->last_imu_ns;
 
 	m_clock_offset_a2b(IMU_FREQ, now_vts, estimated_sample_time, &hmd->hw2mono_vts);
+	if (hmd->ld_clock != NULL) {
+		m_clock_windowed_skew_tracker_push(hmd->ld_clock, estimated_sample_time, now_vts);
+	}
 	m_clock_offset_a2b(IMU_FREQ, now_imu, estimated_sample_time, &hmd->hw2mono_imu);
 
 	if (hmd->timestamp_samples < TIMESTAMP_SAMPLES) {
@@ -768,8 +775,12 @@ led_xfer_cb(struct libusb_transfer *xfer)
 	 */
 	os_mutex_lock(&hmd->data_lock);
 	int32_t ld_vts_delta_us = (int32_t)(payload->header.timestamp - hmd->last_imu_vts_us);
-	timepoint_ns ld_timestamp_ns =
-	    hmd->last_imu_vts_ns + (timepoint_ns)ld_vts_delta_us * U_TIME_1US_IN_NS + hmd->hw2mono_vts;
+	timepoint_ns ld_vts_ns = hmd->last_imu_vts_ns + (timepoint_ns)ld_vts_delta_us * U_TIME_1US_IN_NS;
+	timepoint_ns ld_timestamp_ns = ld_vts_ns + hmd->hw2mono_vts;
+	timepoint_ns ld_tracked_ns;
+	if (hmd->ld_clock != NULL && m_clock_windowed_skew_tracker_to_local(hmd->ld_clock, ld_vts_ns, &ld_tracked_ns)) {
+		ld_timestamp_ns = ld_tracked_ns;
+	}
 	bool clock_ready = hmd->timestamp_samples >= TIMESTAMP_SAMPLES;
 	os_mutex_unlock(&hmd->data_lock);
 
@@ -1671,6 +1682,8 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	pose_filter_params.orient_tau_s = debug_get_float_option_psvr2_pose_orient_tau();
 	pose_filter_params.pos_tau_s = debug_get_float_option_psvr2_pose_pos_tau();
 	psvr2_pose_filter_init(&hmd->pose_filter, &pose_filter_params);
+	// ~2s of IMU samples (2kHz)
+	hmd->ld_clock = m_clock_windowed_skew_tracker_alloc(4096);
 	hmd->use_pose_filter = debug_get_bool_option_psvr2_pose_filter();
 
 	const char *record_path = debug_get_option_psvr2_record_file();
