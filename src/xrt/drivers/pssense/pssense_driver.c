@@ -17,6 +17,7 @@
 #include "os/os_time.h"
 
 #include "math/m_api.h"
+#include "math/m_vec3.h"
 
 #include "tracking/t_constellation.h"
 #include "tracking/t_imu.h"
@@ -68,6 +69,13 @@ DEBUG_GET_ONCE_BOOL_OPTION(pssense_advanced_led_sync, "PSSENSE_ADVANCED_LED_SYNC
  * controller run away quadratically ("flies off into the distance"). Orientation keeps coming from the tracker.
  */
 DEBUG_GET_ONCE_NUM_OPTION(pssense_max_prediction_ms, "PSSENSE_MAX_PREDICTION_MS", 150)
+
+/*!
+ * Largest distance (cm) the tracker's fused pose may be from the latest fresh optical fix before it is considered
+ * diverged and the optical pose is used instead. On hardware the fused output drifted to hundreds of metres with a
+ * constant velocity while the optical fixes stayed at the hands, flagged as tracked throughout. 0 disables.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR_CM", 20)
 
 //! With nothing new to send, output reports still go out this often (~30Hz) as a keepalive.
 #define PSSENSE_KEEPALIVE_NS (U_TIME_1MS_IN_NS * 33)
@@ -229,6 +237,11 @@ struct pssense_device
 
 		//! Timestamp of the last sample the constellation tracker solved optically (0 until the first one).
 		timepoint_ns last_optical_fix_ns;
+		//! That sample's pose, in the same (tracker) space as the fused pose.
+		struct xrt_pose last_optical_fix_pose;
+		//! Whether we're currently overriding a diverged fused pose with the optical one, and how often.
+		bool overriding_fusion;
+		uint32_t fusion_overrides;
 		//! Held position (tracker space) while the prediction is stale, and whether we're holding.
 		bool holding_position;
 		uint32_t holds_started;
@@ -1042,8 +1055,32 @@ pssense_get_constellation_pose(struct pssense_device *pssense,
 		const bool fresh = pssense->tracking.last_optical_fix_ns != 0 &&
 		                   at_timestamp_ns - pssense->tracking.last_optical_fix_ns <= max_prediction_ns;
 
+		const float max_error_m = (float)debug_get_num_option_pssense_fusion_max_error_cm() / 100.0f;
+		if (fresh && max_error_m > 0.0f) {
+			struct xrt_vec3 d = m_vec3_sub(out_relation->pose.position,
+			                               pssense->tracking.last_optical_fix_pose.position);
+			if (m_vec3_len(d) > max_error_m) {
+				// The fusion has diverged from what the cameras see; trust the cameras.
+				if (!pssense->tracking.overriding_fusion) {
+					pssense->tracking.overriding_fusion = true;
+					pssense->tracking.fusion_overrides++;
+					PSSENSE_DEBUG(pssense,
+					              "Fused pose %.2fm from the optical fix, using the optical pose "
+					              "(override #%u)",
+					              m_vec3_len(d), pssense->tracking.fusion_overrides);
+				}
+				out_relation->pose = pssense->tracking.last_optical_fix_pose;
+				out_relation->linear_velocity = (struct xrt_vec3)XRT_VEC3_ZERO;
+				out_relation->relation_flags = (enum xrt_space_relation_flags)(
+				    out_relation->relation_flags & ~XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT);
+			} else if (pssense->tracking.overriding_fusion) {
+				pssense->tracking.overriding_fusion = false;
+				PSSENSE_DEBUG(pssense, "Fused pose agrees with the optical fix again");
+			}
+		}
+
 		if (fresh || max_prediction_ns <= 0) {
-			// Recent optical fix: the fused pose is trustworthy, remember where it was.
+			// Recent optical fix: the (fused or optical) pose is trustworthy, remember where it was.
 			pssense->tracking.have_last_optical_position = true;
 			pssense->tracking.last_optical_position = out_relation->pose.position;
 			if (pssense->tracking.holding_position) {
@@ -1515,6 +1552,7 @@ pssense_push_constellation_tracker_sample(struct t_constellation_tracker_device 
 		os_thread_helper_lock(&pssense->controller_thread);
 		if (sample->timestamp_ns > pssense->tracking.last_optical_fix_ns) {
 			pssense->tracking.last_optical_fix_ns = sample->timestamp_ns;
+			pssense->tracking.last_optical_fix_pose = sample->world_pose;
 		}
 		os_thread_helper_unlock(&pssense->controller_thread);
 	}
