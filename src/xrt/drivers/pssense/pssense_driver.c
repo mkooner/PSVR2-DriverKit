@@ -95,6 +95,20 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR
  */
 #define PSSENSE_KEEPALIVE_NS (U_TIME_1MS_IN_NS * 100)
 
+/*!
+ * IMU -> tracking world alignment, see pssense_tracking align. Learned from PSSENSE_ALIGN_BOOT_N solves all within
+ * PSSENSE_ALIGN_BOOT_TOL_DEG of their mean (a mirrored solve can't seed it), then moved PSSENSE_ALIGN_RATE toward each
+ * solve within PSSENSE_ALIGN_UPDATE_TOL_DEG; the gates stop using it after PSSENSE_ALIGN_STALE_NS without solves until
+ * it is learned again. Simulated causally on the 02:03 / 01:47 runs (psvr2-test/analysis/align_sim.py): display turn
+ * on optical loss 105 / 131 deg -> 1.6 / 1.6 deg median (p90 ~5); gate reference error on accepted solves p99
+ * 29-45 deg -> 7-10 deg.
+ */
+#define PSSENSE_ALIGN_BOOT_N 15
+#define PSSENSE_ALIGN_BOOT_TOL_DEG 15.0f
+#define PSSENSE_ALIGN_UPDATE_TOL_DEG 20.0f
+#define PSSENSE_ALIGN_RATE 0.02f
+#define PSSENSE_ALIGN_STALE_NS (U_TIME_1S_IN_NS)
+
 //! Display smoothing around optical loss/return, see pssense_tracking::last_tracked_vel.
 #define PSSENSE_SMOOTH_COAST_TAU_S 0.08f
 #define PSSENSE_SMOOTH_BLEND_TAU_S 0.12f
@@ -109,9 +123,6 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR
  * allowed report. 0 disables the cap.
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(pssense_imu_angle_deg, "PSSENSE_IMU_ANGLE_DEG", PSSENSE_IMU_ANGLE_DEG_DEFAULT)
-DEBUG_GET_ONCE_FLOAT_OPTION(pssense_imu_ref_correction_deg,
-                            "PSSENSE_IMU_REF_CORRECTION_DEG",
-                            PSSENSE_IMU_REF_CORRECTION_DEG_DEFAULT)
 DEBUG_GET_ONCE_NUM_OPTION(pssense_bt_min_send_interval_ms, "PSSENSE_BT_MIN_SEND_INTERVAL_MS", 33)
 //! How long to stop sending after a failed output report, to let the Bluetooth link drain.
 #define PSSENSE_SEND_FAIL_BACKOFF_NS (U_TIME_1MS_IN_NS * 100)
@@ -326,6 +337,24 @@ struct pssense_device
 		timepoint_ns last_optical_fix_ns;
 		//! That sample's pose, in the same (tracker) space as the fused pose.
 		struct xrt_pose last_optical_fix_pose;
+
+		/*!
+		 * Rotation from the 3DoF IMU fusion's world into the tracking world, learned from accepted optical poses:
+		 * align ~= optical orientation * IMU orientation^-1. The fusion's world is tilted 27-30 deg from gravity
+		 * and turned in yaw, differently per controller (02:03 / 01:47 runs), so showing the raw 3DoF orientation
+		 * while optically lost turned the controller by a median 105 / 131 deg, and the gates, comparing against
+		 * it, threw away correct poses during ordinary wrist rotations (212 on 02:03). Stable within a median
+		 * 3.8 deg over the session.
+		 */
+		struct xrt_quat align;
+		//! Learned at least once: used for display.
+		bool align_valid;
+		//! Learned from recent solves: given to the tracker's gates. Cleared after PSSENSE_ALIGN_STALE_NS.
+		bool align_gate_trusted;
+		struct xrt_quat align_boot[PSSENSE_ALIGN_BOOT_N];
+		uint32_t align_boot_n;
+		timepoint_ns align_last_ns;
+		uint32_t align_learned;
 		//! Whether we're currently overriding a diverged fused pose with the optical one, and how often.
 		bool overriding_fusion;
 		uint32_t fusion_overrides;
@@ -1364,6 +1393,104 @@ pssense_get_imu_fusion_pose(struct pssense_device *pssense,
                             int64_t at_timestamp_ns,
                             struct xrt_space_relation *out_relation);
 
+//! Angle between two orientations, degrees.
+static float
+pssense_quat_angle_deg(const struct xrt_quat *a, const struct xrt_quat *b)
+{
+	float d = fabsf(a->x * b->x + a->y * b->y + a->z * b->z + a->w * b->w);
+	return RAD_TO_DEG(2.0f * acosf(d > 1.0f ? 1.0f : d));
+}
+
+//! Moves a 3DoF relation into the tracking world, once the alignment is known. Called with the thread lock held.
+static void
+pssense_align_imu_relation(struct pssense_device *pssense, struct xrt_space_relation *rel)
+{
+	if (!pssense->tracking.align_valid) {
+		return;
+	}
+	struct xrt_quat q = rel->pose.orientation;
+	math_quat_rotate(&pssense->tracking.align, &q, &rel->pose.orientation);
+	struct xrt_vec3 w = rel->angular_velocity;
+	math_quat_rotate_vec3(&pssense->tracking.align, &w, &rel->angular_velocity);
+}
+
+/*!
+ * Learns the alignment from an accepted optical pose and the 3DoF orientation at its time, see pssense_tracking
+ * align. Called with the thread lock held.
+ */
+static void
+pssense_learn_alignment_locked(struct pssense_device *pssense, timepoint_ns ts, const struct xrt_quat *optical)
+{
+	timepoint_ns imu_ts;
+	if (!pssense_host_ts_to_imu(pssense, ts, &imu_ts)) {
+		return;
+	}
+	struct xrt_space_relation rel = {0};
+	m_relation_history_get(pssense->tracking.imu_relation_history, imu_ts, &rel);
+	if ((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) == 0) {
+		return;
+	}
+	struct xrt_quat imu_inv, y;
+	math_quat_invert(&rel.pose.orientation, &imu_inv);
+	math_quat_rotate(optical, &imu_inv, &y);
+	math_quat_normalize(&y);
+
+	if (pssense->tracking.align_last_ns != 0 && ts - pssense->tracking.align_last_ns > PSSENSE_ALIGN_STALE_NS) {
+		pssense->tracking.align_gate_trusted = false;
+		pssense->tracking.align_boot_n = 0;
+	}
+	pssense->tracking.align_last_ns = ts;
+
+	if (pssense->tracking.align_gate_trusted) {
+		if (pssense_quat_angle_deg(&y, &pssense->tracking.align) < PSSENSE_ALIGN_UPDATE_TOL_DEG) {
+			struct xrt_quat out;
+			math_quat_slerp(&pssense->tracking.align, &y, PSSENSE_ALIGN_RATE, &out);
+			pssense->tracking.align = out;
+		}
+		return;
+	}
+
+	// Bootstrap over a sliding window of solves.
+	if (pssense->tracking.align_boot_n == PSSENSE_ALIGN_BOOT_N) {
+		memmove(&pssense->tracking.align_boot[0], &pssense->tracking.align_boot[1],
+		        sizeof(struct xrt_quat) * (PSSENSE_ALIGN_BOOT_N - 1));
+		pssense->tracking.align_boot_n--;
+	}
+	pssense->tracking.align_boot[pssense->tracking.align_boot_n++] = y;
+	if (pssense->tracking.align_boot_n < PSSENSE_ALIGN_BOOT_N) {
+		return;
+	}
+	const struct xrt_quat *b = pssense->tracking.align_boot;
+	struct xrt_quat m = {0, 0, 0, 0};
+	for (uint32_t i = 0; i < PSSENSE_ALIGN_BOOT_N; i++) {
+		float s = (b[i].x * b[0].x + b[i].y * b[0].y + b[i].z * b[0].z + b[i].w * b[0].w) < 0 ? -1.0f : 1.0f;
+		m.x += s * b[i].x;
+		m.y += s * b[i].y;
+		m.z += s * b[i].z;
+		m.w += s * b[i].w;
+	}
+	math_quat_normalize(&m);
+	for (uint32_t i = 0; i < PSSENSE_ALIGN_BOOT_N; i++) {
+		if (pssense_quat_angle_deg(&b[i], &m) >= PSSENSE_ALIGN_BOOT_TOL_DEG) {
+			return;
+		}
+	}
+	float change = pssense->tracking.align_valid ? pssense_quat_angle_deg(&m, &pssense->tracking.align) : 0.0f;
+	pssense->tracking.align = m;
+	pssense->tracking.align_valid = true;
+	pssense->tracking.align_gate_trusted = true;
+	pssense->tracking.align_boot_n = 0;
+	pssense->tracking.align_learned++;
+	struct xrt_vec3 up = {0, 1, 0}, g;
+	struct xrt_quat m_inv;
+	math_quat_invert(&m, &m_inv);
+	math_quat_rotate_vec3(&m_inv, &up, &g);
+	PSSENSE_DEBUG(pssense,
+	              "IMU alignment learned (#%u): 3DoF up tilted %.1f deg from gravity, %.1f deg total, changed %.1f deg",
+	              pssense->tracking.align_learned, RAD_TO_DEG(acosf(g.y > 1.0f ? 1.0f : g.y)),
+	              pssense_quat_angle_deg(&m, &(struct xrt_quat){0, 0, 0, 1}), change);
+}
+
 //! Replace the orientation of @p rel with the controller's own IMU fusion (3DoF), if it has one.
 static void
 pssense_use_imu_orientation(struct pssense_device *pssense, int64_t at_timestamp_ns, struct xrt_space_relation *rel)
@@ -1373,6 +1500,7 @@ pssense_use_imu_orientation(struct pssense_device *pssense, int64_t at_timestamp
 	if ((imu_rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) == 0) {
 		return;
 	}
+	pssense_align_imu_relation(pssense, &imu_rel);
 	rel->pose.orientation = imu_rel.pose.orientation;
 	rel->angular_velocity = imu_rel.angular_velocity;
 	rel->relation_flags = (enum xrt_space_relation_flags)(
@@ -1528,6 +1656,7 @@ pssense_get_constellation_pose(struct pssense_device *pssense,
 		return;
 	}
 
+	pssense_align_imu_relation(pssense, &imu_rel);
 	out_relation->pose.orientation = imu_rel.pose.orientation;
 	out_relation->angular_velocity = imu_rel.angular_velocity;
 	if (pssense->tracking.have_last_optical_position) {
@@ -2028,12 +2157,13 @@ pssense_get_imu_orientation(struct t_constellation_tracker_device *device,
 	if (pssense_host_ts_to_imu(pssense, timestamp_ns, &imu_ts)) {
 		struct xrt_space_relation rel = {0};
 		m_relation_history_get(pssense->tracking.imu_relation_history, imu_ts, &rel);
-		if ((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) != 0) {
-			// Into the LED model's IMU frame, see PSSENSE_IMU_REF_CORRECTION_DEG_DEFAULT.
-			struct xrt_quat corr;
-			math_quat_from_angle_vector(DEG_TO_RAD(debug_get_float_option_pssense_imu_ref_correction_deg()),
-			                            &(struct xrt_vec3){1, 0, 0}, &corr);
-			math_quat_rotate(&rel.pose.orientation, &corr, out_orientation);
+		/*
+		 * Only once aligned with the tracking world from recent solves; until then the gates are off, as the raw
+		 * 3DoF world is tilted ~28 deg and turned (see pssense_tracking align).
+		 */
+		if ((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) != 0 &&
+		    pssense->tracking.align_gate_trusted) {
+			math_quat_rotate(&pssense->tracking.align, &rel.pose.orientation, out_orientation);
 			ok = true;
 		}
 	}
@@ -2055,6 +2185,7 @@ pssense_push_constellation_tracker_sample(struct t_constellation_tracker_device 
 		if (sample->timestamp_ns > pssense->tracking.last_optical_fix_ns) {
 			pssense->tracking.last_optical_fix_ns = sample->timestamp_ns;
 			pssense->tracking.last_optical_fix_pose = sample->world_pose;
+			pssense_learn_alignment_locked(pssense, sample->timestamp_ns, &sample->world_pose.orientation);
 		}
 		os_thread_helper_unlock(&pssense->controller_thread);
 	}
