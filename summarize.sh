@@ -37,6 +37,16 @@ echo "== Head pose (SLAM rate, how far gyro drifts from SLAM, filter on/off)"
 grep -E "Pose stats:" "$LOG" | tail -4 | sed -E 's/.*Pose stats: //' | cut -c1-200
 
 echo
+echo "== Controllers (thread health, LED sync progress)"
+for pat in "Skipping .* Bluetooth simple report" "Failed to send output report" "Output reports recovered" "Output reports failed .* stopping" "trying offset" "Device has been seen" "Accepting gray code" "Entering STABLE" "Found pose for device"; do
+	printf '  %-40s %s\n' "$pat" "$(grep -c -E "$pat" "$LOG" 2>/dev/null || true)"
+done
+
+echo
+echo "== Undecoded headset data (VD entries, possibly play area)"
+grep -E "Unknown VD entry type" "$LOG" | sed -E 's/.*Unknown VD entry type/  type/' | sort | uniq -c | head -8
+
+echo
 echo "== Last LD stats lines"
 grep -E "LD stats:" "$LOG" | tail -3 | cut -c1-220
 
