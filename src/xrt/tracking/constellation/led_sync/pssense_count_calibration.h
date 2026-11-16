@@ -4,10 +4,13 @@
  * @file
  * @brief PS Sense LED sync calibration by counting the blobs the cameras see.
  *
- * Follows PSVR2Toolkit's custom-controller-sync latency calibration (libpad_hooks.cpp, MIT): measure the blob count
- * with the controller's LEDs all off, then blink all LEDs every frame and binary search, by whether the count rises
- * above that baseline, the earliest and latest blink offsets that the exposure still sees, confirm both edges, and
- * centre the blink between them. Unlike the edge searches, no step needs a solved pose, which on PS VR2 is often
+ * Follows PSVR2Toolkit's custom-controller-sync latency calibration (libpad_hooks.cpp, MIT): blink all LEDs every
+ * frame and binary search, by whether the blob count rises when they're on, the earliest and latest blink offsets that
+ * the exposure still sees, confirm both edges, and centre the blink between them.
+ *
+ * The count is of everything all cameras see, so lamps and reflections are in it and change as the head moves (on
+ * hardware 0 to 70 blobs between runs, 70 -> 10 within one calibration). So unlike the Toolkit's one baseline at the
+ * start, every step measures the LEDs at the test offset and then off right after, and only the difference counts. Unlike the edge searches, no step needs a solved pose, which on PS VR2 is often
  * missing even with the LEDs in view.
  *
  * Only one controller calibrates at a time, the others keep their LEDs off until their turn, so the counts are of
@@ -96,6 +99,7 @@ count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_n
 	refinement->count_calib.offset_ns = offset_ns;
 	refinement->count_calib.frames = 0;
 	refinement->count_calib.sum = 0;
+	refinement->count_calib.off_phase = false;
 	set_offset_duration(refinement, 0, offset_ns, refinement->current_blink_duration_ns);
 }
 
@@ -193,33 +197,36 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 		if (!count_calib_take_token(refinement)) {
 			return;
 		}
-		LOG_DEBUG(refinement, "Count calibration starting, measuring the LEDs-off baseline");
-		cc->state = COUNT_CALIB_BASELINE;
-		cc->frames = 0;
-		cc->sum = 0;
-		// The LEDs are already off from entering or restarting, and that change settled.
+		LOG_DEBUG(refinement, "Count calibration starting");
+		cc->state = COUNT_CALIB_FIND_ON;
+		count_calib_set_offset(refinement, 0);
 		return;
 	}
 
 	float mean = 0;
-	if (!count_calib_accumulate(refinement, cc->state == COUNT_CALIB_BASELINE ? COUNT_BASELINE_FRAMES
-	                                                                            : COUNT_FRAMES_PER_STEP,
-	                            &mean)) {
+	if (!count_calib_accumulate(refinement, COUNT_FRAMES_PER_STEP, &mean)) {
 		return;
 	}
-	bool on = mean > cc->threshold;
 
-	LOG_DEBUG(refinement, "Count calibration state %d offset %" PRId64 "us: %.1f blobs (threshold %.1f) -> %s",
-	          cc->state, (int64_t)(cc->offset_ns / U_TIME_1US_IN_NS), mean, cc->threshold,
-	          cc->state == COUNT_CALIB_BASELINE ? "baseline" : (on ? "on" : "off"));
+	if (!cc->off_phase) {
+		// Measured the LEDs at the test offset, now the same with them off.
+		cc->on_mean = mean;
+		cc->off_phase = true;
+		cc->frames = 0;
+		cc->sum = 0;
+		count_calib_set_leds_off(refinement);
+		return;
+	}
+
+	cc->baseline = mean;
+	cc->threshold = mean + COUNT_THRESHOLD_MARGIN;
+	bool on = cc->on_mean > cc->threshold;
+
+	LOG_DEBUG(refinement,
+	          "Count calibration state %d offset %" PRId64 "us: %.1f blobs with LEDs, %.1f without -> %s", cc->state,
+	          (int64_t)(cc->offset_ns / U_TIME_1US_IN_NS), cc->on_mean, mean, on ? "on" : "off");
 
 	switch (cc->state) {
-	case COUNT_CALIB_BASELINE:
-		cc->baseline = mean;
-		cc->threshold = mean + COUNT_THRESHOLD_MARGIN;
-		cc->state = COUNT_CALIB_FIND_ON;
-		count_calib_set_offset(refinement, 0);
-		break;
 
 	case COUNT_CALIB_FIND_ON:
 		if (on) {

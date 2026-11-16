@@ -317,6 +317,9 @@ struct t_led_sync_refinement
 		uint32_t frames, sum;
 		uint64_t last_counted_sequence_id;
 		float baseline, threshold;
+		//! Each step measures the LEDs at the offset, then off, and compares the two.
+		bool off_phase;
+		float on_mean;
 		time_duration_ns full_window_ns, offset_ns, lower_ns, upper_ns, left_ns, right_ns;
 		uint32_t attempts;
 	} count_calib;
