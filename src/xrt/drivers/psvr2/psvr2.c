@@ -669,10 +669,11 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	 * the room: controllers swung away or flew off whenever the head moved. Use the tracked head pose (same space
 	 * as the head pose we report, so controllers and head agree); the camera mount is applied per camera.
 	 */
+	// In the head frame (like the camera-to-head calibration and the pose we report), not the IMU/SLAM body.
 	struct xrt_space_relation head_relation_for_tracker = {
-	    .pose = head_pose_for_tracker,
 	    .relation_flags = cam0_relation.relation_flags,
 	};
+	math_pose_transform(&head_pose_for_tracker, &hmd->T_imu_head, &head_relation_for_tracker.pose);
 	psvr2_constellation_tracking_source_push(hmd->constellation_origin_source, &head_relation_for_tracker, vts_ns);
 
 	if (hmd->record_file != NULL) {

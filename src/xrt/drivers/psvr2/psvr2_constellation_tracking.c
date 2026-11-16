@@ -30,7 +30,15 @@
  * Negative pitch tilts the camera down, positive yaw turns it left (outward for the left camera).
  * Not in the headset's calibration blocks, so it is configurable while it is being verified on hardware.
  */
-DEBUG_GET_ONCE_OPTION(psvr2_cam0_mount, "PSVR2_CAM0_MOUNT", "-20 15 0")
+DEBUG_GET_ONCE_OPTION(psvr2_cam0_mount, "PSVR2_CAM0_MOUNT", NULL)
+
+/*!
+ * Offset in the calibration block of camera 0's camera-to-head rotation (row-major 3x3 floats); camera 1's is at
+ * 0x7dc. PSVR2Toolkit reads the same offsets from Sony's driver and builds SteamVR's camera-to-head transform as
+ * Rx(-15 deg) * R (hmd_device_hooks.cpp). Verified on hardware: R0^T * R1 matches the block's cam0->cam1 relation
+ * to 0.01 deg.
+ */
+#define PSVR2_CALIB_CAM0_TO_HEAD_OFFSET 0x6f0
 #include "../pssense/pssense_interface.h"
 
 // Version of the camera relation data that is easier to work with for determining final orientation of all cameras
@@ -193,23 +201,57 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 	int parent_ids[4] = {0};
 	parent_ids[0] = -1;
 
-	// Camera 0 relative to the head pose the origin source reports, see PSVR2_CAM0_MOUNT.
-	float pitch_deg = -20.0f, yaw_deg = 15.0f, roll_deg = 0.0f;
-	const char *mount = debug_get_option_psvr2_cam0_mount();
-	if (mount == NULL || sscanf(mount, "%f %f %f", &pitch_deg, &yaw_deg, &roll_deg) < 2) {
-		PSVR2_WARN(hmd, "Could not parse PSVR2_CAM0_MOUNT '%s', using defaults", mount ? mount : "");
-	}
-	struct xrt_quat q_yaw, q_pitch, q_roll, q_cv_to_head, q_mount;
-	math_quat_from_angle_vector(DEG_TO_RAD(yaw_deg), &(struct xrt_vec3){0, 1, 0}, &q_yaw);
-	math_quat_from_angle_vector(DEG_TO_RAD(pitch_deg), &(struct xrt_vec3){1, 0, 0}, &q_pitch);
-	math_quat_from_angle_vector(DEG_TO_RAD(roll_deg), &(struct xrt_vec3){0, 0, 1}, &q_roll);
-	// OpenCV camera axes (x right, y down, z forward) into head axes (x right, y up, -z forward).
+	// Camera 0 relative to the head pose the origin source reports.
+	struct xrt_quat q_cv_to_head, q_mount;
+	// OpenCV camera axes (x right, y down, z forward) into OpenVR/OpenXR camera axes (y up, -z forward).
 	math_quat_from_angle_vector((float)M_PI, &(struct xrt_vec3){1, 0, 0}, &q_cv_to_head);
-	math_quat_rotate(&q_yaw, &q_pitch, &q_mount);
-	math_quat_rotate(&q_mount, &q_roll, &q_mount);
+
+	float pitch_deg = 0, yaw_deg = 0, roll_deg = 0;
+	const char *mount = debug_get_option_psvr2_cam0_mount();
+	bool have_mount = false;
+
+	if (mount != NULL && sscanf(mount, "%f %f %f", &pitch_deg, &yaw_deg, &roll_deg) >= 2) {
+		// Manual override.
+		struct xrt_quat q_yaw, q_pitch, q_roll;
+		math_quat_from_angle_vector(DEG_TO_RAD(yaw_deg), &(struct xrt_vec3){0, 1, 0}, &q_yaw);
+		math_quat_from_angle_vector(DEG_TO_RAD(pitch_deg), &(struct xrt_vec3){1, 0, 0}, &q_pitch);
+		math_quat_from_angle_vector(DEG_TO_RAD(roll_deg), &(struct xrt_vec3){0, 0, 1}, &q_roll);
+		math_quat_rotate(&q_yaw, &q_pitch, &q_mount);
+		math_quat_rotate(&q_mount, &q_roll, &q_mount);
+		PSVR2_INFO(hmd, "Camera 0 mount from PSVR2_CAM0_MOUNT: pitch %.1f yaw %.1f roll %.1f deg", pitch_deg,
+		           yaw_deg, roll_deg);
+		have_mount = true;
+	} else if (size >= PSVR2_CALIB_CAM0_TO_HEAD_OFFSET + 9 * sizeof(float)) {
+		// From the headset's own calibration: Rx(-15 deg) * R_cam0_to_head, as Sony's driver does.
+		struct xrt_matrix_3x3 r = {0};
+		for (int j = 0; j < 9; j++) {
+			uint32_t bits;
+			memcpy(&bits, data + PSVR2_CALIB_CAM0_TO_HEAD_OFFSET + j * 4, sizeof(bits));
+			bits = __le32_to_cpu(bits);
+			memcpy(&r.v[j], &bits, sizeof(float));
+		}
+		struct xrt_quat q_r;
+		math_quat_from_matrix_3x3(&r, &q_r);
+		float n = sqrtf(q_r.x * q_r.x + q_r.y * q_r.y + q_r.z * q_r.z + q_r.w * q_r.w);
+		if (n > 0.9f && n < 1.1f) {
+			struct xrt_quat q_pitch15;
+			math_quat_from_angle_vector(DEG_TO_RAD(-15.0), &(struct xrt_vec3){1, 0, 0}, &q_pitch15);
+			math_quat_normalize(&q_r);
+			math_quat_rotate(&q_pitch15, &q_r, &q_mount);
+			PSVR2_INFO(hmd, "Camera 0 mount from the headset calibration (cam-to-head at 0x%x)",
+			           PSVR2_CALIB_CAM0_TO_HEAD_OFFSET);
+			have_mount = true;
+		}
+	}
+
+	if (!have_mount) {
+		PSVR2_WARN(hmd, "No camera 0 mount in the calibration block, using an estimate (set PSVR2_CAM0_MOUNT)");
+		struct xrt_quat q_yaw, q_pitch;
+		math_quat_from_angle_vector(DEG_TO_RAD(17.0), &(struct xrt_vec3){0, 1, 0}, &q_yaw);
+		math_quat_from_angle_vector(DEG_TO_RAD(-29.0), &(struct xrt_vec3){1, 0, 0}, &q_pitch);
+		math_quat_rotate(&q_yaw, &q_pitch, &q_mount);
+	}
 	math_quat_rotate(&q_mount, &q_cv_to_head, &q_mount);
-	PSVR2_INFO(hmd, "Camera 0 mount: pitch %.1f yaw %.1f roll %.1f deg (PSVR2_CAM0_MOUNT)", pitch_deg, yaw_deg,
-	           roll_deg);
 
 	struct xrt_matrix_3x3 scratch_3x3;
 	math_matrix_3x3_from_quat(&q_mount, &scratch_3x3);
