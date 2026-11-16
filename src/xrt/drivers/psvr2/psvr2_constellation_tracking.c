@@ -209,6 +209,8 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 	float pitch_deg = 0, yaw_deg = 0, roll_deg = 0;
 	const char *mount = debug_get_option_psvr2_cam0_mount();
 	bool have_mount = false;
+	// The calibration's camera-to-head rotation is already in OpenXR camera axes, see below.
+	bool mount_in_xr_axes = false;
 
 	if (mount != NULL && sscanf(mount, "%f %f %f", &pitch_deg, &yaw_deg, &roll_deg) >= 2) {
 		// Manual override.
@@ -241,6 +243,7 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 			PSVR2_INFO(hmd, "Camera 0 mount from the headset calibration (cam-to-head at 0x%x)",
 			           PSVR2_CALIB_CAM0_TO_HEAD_OFFSET);
 			have_mount = true;
+			mount_in_xr_axes = true;
 		}
 	}
 
@@ -251,7 +254,19 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 		math_quat_from_angle_vector(DEG_TO_RAD(-29.0), &(struct xrt_vec3){1, 0, 0}, &q_pitch);
 		math_quat_rotate(&q_yaw, &q_pitch, &q_mount);
 	}
-	math_quat_rotate(&q_mount, &q_cv_to_head, &q_mount);
+	/*
+	 * The tracker takes camera poses in OpenXR camera axes (Txr_origin_cam, converted to OpenCV internally). The
+	 * calibration's rotations R0..R3 and its camera relations share one convention (R0^T * R1 matches the cam0->cam1
+	 * relation to 0.01 deg), so camera i is Rx(-15) * R0 * (R0^T * Ri) = Rx(-15) * Ri, Sony's camera-to-head for
+	 * SteamVR (OpenVR camera axes, as OpenXR). Applying the OpenCV -> OpenXR flip on top put it inside every
+	 * camera's chain, Rx(-15) * R0 * F * R0^T * Ri: the tracker saw the cameras facing backwards and upside down,
+	 * and on hardware put the controllers behind the head (impossible for forward facing cameras) in 87% of solves
+	 * and above it in 99%; without it, 99% below and 87-96% in front. The manual and estimated mounts are given
+	 * after converting OpenCV axes, so they keep it.
+	 */
+	if (!mount_in_xr_axes) {
+		math_quat_rotate(&q_mount, &q_cv_to_head, &q_mount);
+	}
 
 	struct xrt_matrix_3x3 scratch_3x3;
 	math_matrix_3x3_from_quat(&q_mount, &scratch_3x3);
