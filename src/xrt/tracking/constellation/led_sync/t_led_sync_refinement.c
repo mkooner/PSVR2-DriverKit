@@ -44,7 +44,16 @@ DEBUG_GET_ONCE_LOG_OPTION(led_sync_refinement_log, "T_LED_SYNC_REFINEMENT_LOG", 
 static time_duration_ns
 change_good_cutoff(struct t_led_sync_refinement *refinement)
 {
-	return MIN(refinement->current_blink_duration_ns, refinement->exposure_time_ns) / 50;
+	/*
+	 * Without a known exposure time (PS VR2 doesn't report one) this was 0, so the edge binary searches could
+	 * never finish. Fall back to 25us, the edge resolution PSVR2Toolkit's custom-controller-sync calibration uses
+	 * on PS VR2 hardware.
+	 */
+	const time_duration_ns floor_ns = U_TIME_1US_IN_NS * 25;
+	if (!refinement->has_exposure_time || refinement->exposure_time_ns <= 0) {
+		return floor_ns;
+	}
+	return MAX(floor_ns, MIN(refinement->current_blink_duration_ns, refinement->exposure_time_ns) / 50);
 }
 
 //! The amount of frames since the sample was applied to the controller
