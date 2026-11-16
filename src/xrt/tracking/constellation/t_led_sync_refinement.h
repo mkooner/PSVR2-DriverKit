@@ -326,7 +326,9 @@ struct t_led_sync_refinement
 		//! Hold: the centre, measured window, probing state and drift correction.
 		time_duration_ns hold_centre_ns, hold_window_ns;
 		int hold_sub;
-		float hold_left_mean;
+		float hold_left_mean, hold_centre_mean;
+		//! The last probe saw the controller, drift is only applied then.
+		bool hold_in_view;
 		timepoint_ns hold_last_probe_ns, hold_last_apply_ns;
 		double hold_drift_ns_per_s;
 		uint32_t hold_corrections;
