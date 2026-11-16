@@ -778,6 +778,26 @@ Camera::processSampleSlow(CameraSample &sample)
 				}
 			}
 
+			/*
+			 * The device IMU's up, for the search's own check of every candidate (see correspondence_search.c):
+			 * needs the camera's pose for its up direction, and works without a pose prior.
+			 */
+			xrt_vec3 imu_up_in_device, up_in_camera = {0, 1, 0};
+			bool have_imu_up = false;
+			xrt_quat q_imu;
+			if (tracker->gravity_gate_deg > 0.0f && Txr_world_cam.has_value() &&
+			    device->device->get_imu_orientation != NULL &&
+			    device->device->get_imu_orientation(device->device, sample.timestamp_ns, &q_imu)) {
+				xrt_pose Tcv_world_cam;
+				math_pose_convert_from_opencv(&Txr_world_cam.value(), &Tcv_world_cam);
+				get_pose_gravity_vector(Tcv_world_cam, up_in_camera);
+				xrt_quat inv;
+				xrt_vec3 world_up = XRT_VEC3_UNIT_Y;
+				math_quat_invert(&q_imu, &inv);
+				math_quat_rotate_vec3(&inv, &world_up, &imu_up_in_device);
+				have_imu_up = true;
+			}
+
 			pose_metrics score;
 			bool found_pose = correspondence_search_find_one_pose( //
 			    data.cs,                                           //
@@ -788,6 +808,9 @@ Camera::processSampleSlow(CameraSample &sample)
 			    &device->prior_rot_error,                          //
 			    &cv_camera_gravity_vector,                         //
 			    device->gravity_error_rad,                         //
+			    have_imu_up ? &imu_up_in_device : NULL,            //
+			    have_imu_up ? &up_in_camera : NULL,                //
+			    DEG_TO_RAD(tracker->gravity_gate_deg),             //
 			    &score);                                           //
 			if (found_pose) {
 				const auto solve_type = shallow ? CONSTELLATION_SOLVE_TYPE_SHALLOW_CORRESPONDENCE_SEARCH

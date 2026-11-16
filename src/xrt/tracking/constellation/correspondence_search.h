@@ -89,6 +89,12 @@ struct cs_model_info
 	struct xrt_vec3 gravity_vector;
 	struct xrt_quat gravity_swing;
 	float gravity_tolerance_rad;
+
+	//! The device's own IMU up direction in the device frame, and the camera's up in camera (OpenCV) space.
+	bool has_imu_up;
+	struct xrt_vec3 imu_up_in_device;
+	struct xrt_vec3 up_in_camera;
+	float imu_up_tolerance_rad;
 };
 
 struct correspondence_search
@@ -132,6 +138,9 @@ correspondence_search_find_one_pose(struct correspondence_search *cs,
                                     const struct xrt_vec3 *rot_error_thresh,
                                     const struct xrt_vec3 *gravity_vector,
                                     float gravity_tolerance_rad,
+                                    const struct xrt_vec3 *imu_up_in_device,
+                                    const struct xrt_vec3 *up_in_camera,
+                                    float imu_up_tolerance_rad,
                                     struct pose_metrics *out_score);
 
 #ifdef __cplusplus

@@ -205,6 +205,26 @@ correspondence_search_project_pose(struct correspondence_search *cs,
 		}
 	}
 
+	/*
+	 * IMU up check: a candidate whose up direction in the device frame differs from the device IMU's is an LED
+	 * correspondence off by a step of a symmetric pattern (on PS VR2 those came out 50-70 deg off, correct ones
+	 * ~5 deg). Rejecting it here keeps the search looking for the right correspondence in the same frame, instead of
+	 * returning one the tracker's gates then throw away.
+	 */
+	if (mi->has_imu_up) {
+		struct xrt_quat inv;
+		struct xrt_vec3 up_in_device;
+		math_quat_invert(&pose->orientation, &inv);
+		math_quat_rotate_vec3(&inv, &mi->up_in_camera, &up_in_device);
+		float cos_a = up_in_device.x * mi->imu_up_in_device.x + up_in_device.y * mi->imu_up_in_device.y +
+		              up_in_device.z * mi->imu_up_in_device.z;
+		if (cos_a < cosf(mi->imu_up_tolerance_rad)) {
+			CS_FULL_LOG(cs, "model %d failed pose match - up %f deg from the IMU", mi->id,
+			            RAD_TO_DEG(acosf(fmaxf(-1.0f, fminf(1.0f, cos_a)))));
+			return false;
+		}
+	}
+
 	struct pose_metrics score;
 
 	bool success;
@@ -949,6 +969,9 @@ correspondence_search_find_one_pose(struct correspondence_search *cs,
                                     const struct xrt_vec3 *rot_error_thresh,
                                     const struct xrt_vec3 *gravity_vector,
                                     float gravity_tolerance_rad,
+                                    const struct xrt_vec3 *imu_up_in_device,
+                                    const struct xrt_vec3 *up_in_camera,
+                                    float imu_up_tolerance_rad,
                                     struct pose_metrics *out_score)
 {
 	assert(inout_pose != NULL);
@@ -974,6 +997,13 @@ correspondence_search_find_one_pose(struct correspondence_search *cs,
 		mi.pose_prior = *inout_pose;
 		mi.pos_error_thresh = pos_error_thresh;
 		mi.rot_error_thresh = rot_error_thresh;
+	}
+
+	if (imu_up_in_device != NULL && up_in_camera != NULL) {
+		mi.has_imu_up = true;
+		mi.imu_up_in_device = *imu_up_in_device;
+		mi.up_in_camera = *up_in_camera;
+		mi.imu_up_tolerance_rad = imu_up_tolerance_rad;
 	}
 
 	if (search_flags & CS_FLAG_MATCH_GRAVITY) {
