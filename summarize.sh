@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Summarize a PS VR2 tracking test log stage by stage.
+# Usage: ./summarize.sh logs/<file>.log
+
+set -u
+LOG="${1:?usage: summarize.sh <log>}"
+
+count() { grep -c -E "$1" "$LOG" 2>/dev/null || true; }
+first() { grep -m1 -E "$1" "$LOG" 2>/dev/null | cut -c1-200; }
+stage() { # name, pattern, hint-if-missing
+	local n; n=$(count "$2")
+	if [ "$n" -gt 0 ]; then
+		printf '  [ok] %-38s (%s lines)\n' "$1" "$n"
+	else
+		printf '  [--] %-38s  -> %s\n' "$1" "$3"
+	fi
+}
+
+echo "== Stages ($LOG)"
+stage "1 Headset opened"                "psvr2|PSVR2|PS VR2"                    "headset not probed: USB/udev, or another runtime holds it"
+stage "2 Calibration block parsed"      "Camera [0-9] calibration: resolution"  "no calibration block: controllers must be on when the service starts"
+stage "3 Camera poses computed"         "camera [0-9] pose position"            "tracker not created"
+stage "4 LD (LED) data arriving"        "LD stats:"                             "no LED payloads from the headset"
+stage "5 LEDs seen by cameras"          "LEDs per camera \[[^0]|LEDs per camera \[[0-9]+ [1-9]|LEDs per camera \[[0-9]+ [0-9]+ [1-9]|LEDs per camera \[[0-9]+ [0-9]+ [0-9]+ [1-9]" "cameras see no LEDs: controllers not in view, or LEDs not lit (LED sync)"
+stage "6 Controllers seen by LED sync"  "Device has been seen"                   "LEDs never identified: LED sync / timing"
+stage "7 LED sync phase changes"        "Transitioning from search phase"       "LED sync stuck in its first phase"
+stage "8 Gray code accepted"            "Accepting gray code"                   "gray code never locked"
+stage "9 LED sync STABLE"               "Entering STABLE"                       "LED sync never reached STABLE"
+stage "10 Controller poses solved"      "Found pose for device|succeeded with"  "no 6DoF poses solved: camera placement / LED model"
+
+echo
+echo "== Clock check (ts host-now should be a few ms negative)"
+grep -E "LD stats:" "$LOG" | grep -o "ts host-now [+-][0-9.]*ms" | sort | uniq -c | sort -rn | head -5
+
+echo
+echo "== Head pose (SLAM rate, how far gyro drifts from SLAM, filter on/off)"
+grep -E "Pose stats:" "$LOG" | tail -4 | sed -E 's/.*Pose stats: //' | cut -c1-200
+
+echo
+echo "== Last LD stats lines"
+grep -E "LD stats:" "$LOG" | tail -3 | cut -c1-220
+
+echo
+echo "== Camera poses"
+grep -E "camera [0-9] pose position" "$LOG" | tail -4 | cut -c1-200
+
+echo
+echo "== Errors/warnings (top 15 distinct)"
+grep -E "\b(ERROR|WARN|error|warning)\b|\(E\)|\(W\)" "$LOG" | sed -E 's/[0-9]+(\.[0-9]+)?/N/g' | sort | uniq -c | sort -rn | head -15 | cut -c1-220
+
+echo
+echo "Send me this summary plus the log file: $LOG"
