@@ -60,7 +60,7 @@ grep -o "Clock model drifted -\?[0-9]*ns" "$LOG" | grep -o -- "-\?[0-9]*" | awk 
 grep -E "Transitioning from search phase (4 -> 5|5 -> 6|. -> 6)" "$LOG" | sed -E 's/.*Transitioning/  reached:/' | sort | uniq -c
 echo
 echo "== Count calibration (LED sync by blob counts)"
-for pat in "Count calibration starting" "Count calibration restarting" "searching again near the window" "Count calibration done" "Count hold probe" "moved (later|earlier)" "not in view" "Transitioning from search phase 10 -> 9"; do
+for pat in "Count calibration starting" "Count calibration restarting" "searching again near the window" "Count calibration done" "accepting the window without confirmation" "time limit reached" "LEDs visible when always on" "not visible even always on" "Count hold probe" "moved (later|earlier)" "not in view" "Transitioning from search phase 10 -> 9"; do
 	printf '  %-42s %s\n' "$pat" "$(grep -c -E "$pat" "$LOG" 2>/dev/null || true)"
 done
 grep -E "Count calibration (done|restarting)" "$LOG" | tail -4 | sed -E 's/.*Count calibration/  /' | cut -c1-200
