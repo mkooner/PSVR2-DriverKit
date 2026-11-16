@@ -89,7 +89,11 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_max_prediction_ms, "PSSENSE_MAX_PREDICTION_MS"
 DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR_CM", 20)
 
 //! With nothing new to send, output reports still go out this often (~30Hz) as a keepalive.
-#define PSSENSE_KEEPALIVE_NS (U_TIME_1MS_IN_NS * 33)
+/*
+ * With nothing else to send. 33ms kept ~30 reports/s per controller going; with two controllers and LED sync on top
+ * the Bluetooth link backed up (LED command round trips of 0.2-1.3s, input reports up to 0.7s late).
+ */
+#define PSSENSE_KEEPALIVE_NS (U_TIME_1MS_IN_NS * 100)
 
 /*
  * Bluetooth output report rate cap, per controller, when no PCM haptics are playing. Each report is a full PS5 format
@@ -99,7 +103,7 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR
  * while earlier ones are still queued. Anything pending (LED sync sample, vibration, LED settings) goes out in the next
  * allowed report. 0 disables the cap.
  */
-DEBUG_GET_ONCE_NUM_OPTION(pssense_bt_min_send_interval_ms, "PSSENSE_BT_MIN_SEND_INTERVAL_MS", 20)
+DEBUG_GET_ONCE_NUM_OPTION(pssense_bt_min_send_interval_ms, "PSSENSE_BT_MIN_SEND_INTERVAL_MS", 33)
 //! How long to stop sending after a failed output report, to let the Bluetooth link drain.
 #define PSSENSE_SEND_FAIL_BACKOFF_NS (U_TIME_1MS_IN_NS * 100)
 
@@ -1063,6 +1067,9 @@ pssense_run_thread(void *ptr)
 					struct pssense_led_settings b = pssense->tracking.led_settings;
 					a.cycle_position_absolute = 0;
 					b.cycle_position_absolute = 0;
+					// Follows the averaged exposure interval, so changes slightly every frame too.
+					a.cycle_length = 0;
+					b.cycle_length = 0;
 					led_changed = memcmp(&a, &b, sizeof(a)) != 0;
 				}
 				/*
@@ -1215,9 +1222,17 @@ pssense_get_imu_fusion_pose(struct pssense_device *pssense,
 	 */
 	int64_t latest_ns = 0;
 	struct xrt_space_relation latest_rel;
-	if (m_relation_history_get_latest(pssense->tracking.imu_relation_history, &latest_ns, &latest_rel) &&
-	    device_ts > latest_ns + (int64_t)U_TIME_1MS_IN_NS * 30) {
-		device_ts = latest_ns + (int64_t)U_TIME_1MS_IN_NS * 30;
+	if (m_relation_history_get_latest(pssense->tracking.imu_relation_history, &latest_ns, &latest_rel)) {
+		if (device_ts > latest_ns + (int64_t)U_TIME_1MS_IN_NS * 30) {
+			device_ts = latest_ns + (int64_t)U_TIME_1MS_IN_NS * 30;
+		}
+		/*
+		 * Nor look up an orientation older than the newest one: that only adds lag, and with the clock estimate
+		 * off by hundreds of ms under Bluetooth congestion the controller followed the hand slowly.
+		 */
+		if (device_ts < latest_ns) {
+			device_ts = latest_ns;
+		}
 	}
 
 	m_relation_history_get(pssense->tracking.imu_relation_history, device_ts, out_relation);
