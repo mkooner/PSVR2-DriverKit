@@ -340,6 +340,17 @@ struct t_led_sync_refinement
 		time_duration_ns prev_left_ns;
 		timepoint_ns prev_left_time_ns;
 
+		/*!
+		 * Keeping the sweep away from the headset's own (SLAM) exposures, which on PS VR2 are timestamped ~5.4ms
+		 * after the controller exposure: a full-frame sweep lights the LEDs across them, and head tracking got
+		 * worse (more snaps) with repeated sweeps. Sweeps start just before the last known window and stop
+		 * after one frame, and a sweep that found nothing waits a while with the LEDs off before the next.
+		 */
+		bool have_known_left;
+		time_duration_ns known_left_ns;
+		time_duration_ns swept_ns;
+		timepoint_ns retry_after_ns;
+
 		//! Hold: the centre, measured window, probing state and drift correction.
 		time_duration_ns hold_centre_ns, hold_window_ns;
 		int hold_sub;

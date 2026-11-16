@@ -202,6 +202,7 @@ count_calib_research(struct t_led_sync_refinement *refinement, const char *why)
 		start_ns = 0;
 	}
 	cc->state = COUNT_CALIB_FIND_ON;
+	cc->swept_ns = 0;
 	count_calib_set_offset(refinement, start_ns);
 }
 
@@ -292,6 +293,8 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	         (int64_t)(centre_ns / U_TIME_1US_IN_NS));
 
 	cc->local_retries = 0;
+	cc->have_known_left = true;
+	cc->known_left_ns = cc->left_ns;
 	cc->hold_centre_ns = centre_ns;
 	cc->hold_window_ns = window_ns;
 	cc->hold_sub = 0;
@@ -330,12 +333,16 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 	}
 
 	if (cc->state == COUNT_CALIB_WAIT_TOKEN) {
-		if (!count_calib_take_token(refinement)) {
+		if (os_monotonic_get_ns() < cc->retry_after_ns || !count_calib_take_token(refinement)) {
 			return;
 		}
-		LOG_DEBUG(refinement, "Count calibration starting");
+		// Start just before where the window was last time, it's usually found within a step or two.
+		time_duration_ns start_ns = cc->have_known_left ? cc->known_left_ns - cc->full_window_ns : 0;
+		LOG_DEBUG(refinement, "Count calibration starting, sweeping from %" PRId64 "us",
+		          (int64_t)(start_ns / U_TIME_1US_IN_NS));
 		cc->state = COUNT_CALIB_FIND_ON;
-		count_calib_set_offset(refinement, 0);
+		cc->swept_ns = 0;
+		count_calib_set_offset(refinement, start_ns);
 		return;
 	}
 
@@ -370,7 +377,9 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 			cc->lower_ns = cc->offset_ns - fw;
 			cc->state = COUNT_CALIB_LEFT_EDGE;
 			count_calib_set_offset(refinement, (cc->lower_ns + cc->upper_ns) / 2);
-		} else if (cc->offset_ns + fw / 2 >= refinement->exposure_interval_ns) {
+		} else if ((cc->swept_ns += fw / 2) >= refinement->exposure_interval_ns) {
+			// Out of view most likely: don't keep flashing across the headset's own exposures.
+			cc->retry_after_ns = os_monotonic_get_ns() + U_TIME_1S_IN_NS * 3;
 			count_calib_restart(refinement, "LEDs not seen at any offset, controller out of view?");
 		} else {
 			// Half window steps overlap, so a little clock drift during the sweep can't skip the window.
