@@ -322,6 +322,8 @@ struct t_led_sync_refinement
 		float on_mean;
 		//! Local re-searches since the last full restart.
 		uint32_t local_retries;
+		//! Gave the token to the other controller's hold probe mid calibration, resume this step after.
+		bool paused;
 
 		//! Hold: the centre, measured window, probing state and drift correction.
 		time_duration_ns hold_centre_ns, hold_window_ns;

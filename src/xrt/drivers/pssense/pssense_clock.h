@@ -34,8 +34,8 @@
 //! An offset this far below the estimate means the controller clock jumped (reports can't arrive early).
 #define PSSENSE_CLOCK_RESET_BELOW_NS (U_TIME_1MS_IN_NS * 20)
 #define PSSENSE_CLOCK_RESET_COUNT 20
-//! Output slew per report (~133Hz, so ~650us/s), above real clock skew (~90ppm measured), below delay noise.
-#define PSSENSE_CLOCK_SLEW_NS (U_TIME_1US_IN_NS * 5)
+//! Output slew per report (~133Hz, so ~130us/s): real skew measured 7-14ppm (14us/s) on an uncongested link.
+#define PSSENSE_CLOCK_SLEW_NS (U_TIME_1US_IN_NS * 1)
 //! Reports before the estimate is used.
 #define PSSENSE_CLOCK_MIN_SAMPLES 20
 
@@ -159,22 +159,36 @@ pssense_clock_fit(struct pssense_clock *c, timepoint_ns now_ns)
 	}
 	double a = (sy - b * sx) / n;
 
-	// Shift the line down to the lowest bucket minimum: the true offset is at or below every observation.
-	double lowest = 0;
-	bool first = true;
+	(void)a;
+	/*
+	 * Level: the median of the bucket minima around the skew line. Shifting the line down to the single lowest
+	 * minimum made the output step whenever that bucket aged out or a luckier report arrived (~0.5ms within 5s on
+	 * hardware), which moved the held LEDs out of the camera window. A constant bias from the typical minimum
+	 * Bluetooth delay doesn't matter: LED sync calibrates it out.
+	 */
+	double residuals[PSSENSE_CLOCK_NUM_BUCKETS];
+	int nr = 0;
 	for (int i = 0; i < PSSENSE_CLOCK_NUM_BUCKETS; i++) {
 		const struct pssense_clock_bucket *bk = &c->buckets[i];
 		if (!bk->used) {
 			continue;
 		}
 		double x = (double)(bk->local_ns - c->ref_ns) / U_TIME_1S_IN_NS;
-		double r = (double)bk->min_offset - (a + b * x);
-		if (first || r < lowest) {
-			lowest = r;
-			first = false;
-		}
+		residuals[nr++] = (double)bk->min_offset - b * x;
 	}
-	c->a = a + lowest;
+	int mid = nr / 2;
+	for (int i = 0; i <= mid; i++) {
+		int m = i;
+		for (int k = i + 1; k < nr; k++) {
+			if (residuals[k] < residuals[m]) {
+				m = k;
+			}
+		}
+		double t = residuals[i];
+		residuals[i] = residuals[m];
+		residuals[m] = t;
+	}
+	c->a = residuals[mid];
 	c->b = b;
 }
 

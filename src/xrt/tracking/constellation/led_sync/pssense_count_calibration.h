@@ -65,6 +65,12 @@ enum count_calib_state
 
 //! The refinement currently calibrating, only one may at a time.
 static _Atomic(struct t_led_sync_refinement *) count_calib_owner = NULL;
+/*!
+ * A holding refinement that needs to probe while another calibrates. The calibration yields between steps: on
+ * hardware the second controller's calibration held the token for 40s+, the first's hold couldn't probe, and its lock
+ * drifted out.
+ */
+static _Atomic(struct t_led_sync_refinement *) count_probe_wanted = NULL;
 
 static bool
 count_calib_take_token(struct t_led_sync_refinement *refinement)
@@ -146,6 +152,7 @@ static void
 count_calib_restart(struct t_led_sync_refinement *refinement, const char *why)
 {
 	refinement->count_calib.local_retries = 0;
+	refinement->count_calib.paused = false;
 	LOG_DEBUG(refinement, "Count calibration restarting (%s), attempt %u", why, refinement->count_calib.attempts);
 	refinement->count_calib.attempts++;
 	// Give the other controller a turn.
@@ -164,6 +171,7 @@ count_calib_enter(struct t_led_sync_refinement *refinement)
 	    refinement->has_exposure_time ? refinement->exposure_time_ns : COUNT_DEFAULT_EXPOSURE_NS;
 	refinement->count_calib.full_window_ns = refinement->current_blink_duration_ns + exposure_ns;
 	refinement->count_calib.state = COUNT_CALIB_WAIT_TOKEN;
+	refinement->count_calib.paused = false;
 	refinement->count_calib.frames = 0;
 	refinement->count_calib.sum = 0;
 	count_calib_set_leds_off(refinement);
@@ -241,6 +249,24 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 {
 	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
 	const time_duration_ns fw = cc->full_window_ns;
+
+	if (cc->paused) {
+		if (!count_calib_take_token(refinement)) {
+			return;
+		}
+		cc->paused = false;
+		// Measure this step again, the other controller's probe ran in between.
+		count_calib_set_offset(refinement, cc->offset_ns);
+		return;
+	}
+	struct t_led_sync_refinement *wanted = atomic_load(&count_probe_wanted);
+	if (cc->owns_token && wanted != NULL && wanted != refinement && cc->state >= COUNT_CALIB_FIND_ON &&
+	    cc->frames == 0 && !cc->off_phase) {
+		LOG_DEBUG(refinement, "Count calibration pausing for the other controller's hold probe");
+		count_calib_release_token(refinement);
+		cc->paused = true;
+		return;
+	}
 
 	if (cc->state == COUNT_CALIB_WAIT_TOKEN) {
 		if (!count_calib_take_token(refinement)) {
@@ -400,8 +426,12 @@ handle_count_hold(struct t_led_sync_refinement *refinement)
 		time_duration_ns since_probe_ns = now_ns - cc->hold_last_probe_ns;
 		if (since_probe_ns >= COUNT_HOLD_PROBE_NS || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS)) {
 			if (!count_calib_take_token(refinement)) {
-				return; // The other controller is calibrating or probing.
+				// The other controller is calibrating or probing, ask it to yield between steps.
+				atomic_store(&count_probe_wanted, refinement);
+				return;
 			}
+			struct t_led_sync_refinement *self = refinement;
+			atomic_compare_exchange_strong(&count_probe_wanted, &self, NULL);
 			// First the count at the centre, where the blink already is.
 			cc->hold_sub = 1;
 			cc->frames = 0;

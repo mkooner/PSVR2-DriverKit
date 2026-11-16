@@ -702,6 +702,8 @@ t_led_sync_refinement_destroy(struct t_led_sync_refinement *refinement)
 	u_var_remove_root(refinement);
 
 	count_calib_release_token(refinement);
+	struct t_led_sync_refinement *self = refinement;
+	atomic_compare_exchange_strong(&count_probe_wanted, &self, NULL);
 
 	os_mutex_destroy(&refinement->lock);
 }
