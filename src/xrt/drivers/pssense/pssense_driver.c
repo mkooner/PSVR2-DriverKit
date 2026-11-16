@@ -216,8 +216,24 @@ struct pssense_device
 
 	struct
 	{
-		//! Host <-> controller clock, see pssense_clock.h.
+		//! Host <-> controller clock, see pssense_clock.h, on the device timestamp (input @49); LED scheduling.
 		struct pssense_clock clock;
+		/*!
+		 * Host <-> controller clock on the IMU timestamp (input @29), for IMU sample times. The two are separate
+		 * counters (PSVR2-Documentation: @49 has 1ms granularity), and IMU times used to be converted with the
+		 * device timestamp's clock, putting IMU samples off the camera frames by whatever separates them.
+		 */
+		struct pssense_clock imu_clock;
+		//! Echo-based (two-way) offset estimate on the IMU timestamp, diagnostics only for now.
+		struct
+		{
+			uint32_t last_echo_us;
+			bool have_echo;
+			time_duration_ns window_min_rtt_ns, window_offset_ns;
+			timepoint_ns window_start_ns;
+			time_duration_ns last_offset_ns, last_rtt_ns;
+			bool have_window;
+		} echo;
 
 		timepoint_ns latest_imu_time_ns;
 
@@ -452,6 +468,73 @@ pssense_add_clock_offset_sample_locked(struct pssense_device *pssense, timepoint
 	}
 }
 
+/*!
+ * Feeds the IMU-timestamp clock (one-way, the same estimator as the device timestamp's) and the two-way echo
+ * estimate: the controller echoes the host time of the newest output report it received (input @45), so for the
+ * first report carrying a new echo, offset = (T_send + T_receive) / 2 - device time, within +-RTT/2, and the minimum
+ * round trip per second is kept (PSVR2-Documentation 11.2). Logged against the one-way estimate every 5s.
+ */
+static void
+pssense_add_imu_clock_sample_locked(struct pssense_device *pssense, timepoint_ns recv_time_ns, uint32_t echo_us)
+{
+	struct pssense_clock *c = &pssense->timing.imu_clock;
+	pssense_clock_push(c, recv_time_ns, pssense->timing.latest_imu_time_ns);
+
+	__typeof__(pssense->timing.echo) *e = &pssense->timing.echo;
+	if (e->have_echo && echo_us != e->last_echo_us && echo_us != 0) {
+		// Unwrap the 32-bit microsecond echo against the receive time; it was sent within the last ~71 minutes.
+		uint32_t now_us = (uint32_t)(recv_time_ns / U_TIME_1US_IN_NS);
+		timepoint_ns sent_ns = recv_time_ns - (timepoint_ns)(uint32_t)(now_us - echo_us) * U_TIME_1US_IN_NS;
+		time_duration_ns rtt_ns = recv_time_ns - sent_ns;
+		if (rtt_ns > 0 && rtt_ns < U_TIME_1MS_IN_NS * 40) {
+			time_duration_ns offset_ns = (sent_ns + rtt_ns / 2) - pssense->timing.latest_imu_time_ns;
+			if (recv_time_ns - e->window_start_ns >= U_TIME_1S_IN_NS) {
+				if (e->window_start_ns != 0 && e->window_min_rtt_ns > 0) {
+					e->last_offset_ns = e->window_offset_ns;
+					e->last_rtt_ns = e->window_min_rtt_ns;
+					e->have_window = true;
+				}
+				e->window_start_ns = recv_time_ns;
+				e->window_min_rtt_ns = 0;
+			}
+			if (e->window_min_rtt_ns == 0 || rtt_ns < e->window_min_rtt_ns) {
+				e->window_min_rtt_ns = rtt_ns;
+				e->window_offset_ns = offset_ns;
+			}
+		}
+	}
+	e->last_echo_us = echo_us;
+	e->have_echo = true;
+
+	time_duration_ns imu_off_ns, dev_off_ns;
+	if (c->stats.last_log_ns == 0 || recv_time_ns - c->stats.last_log_ns >= U_TIME_1S_IN_NS * 5) {
+		if (c->stats.last_log_ns != 0 && pssense_clock_get_offset(c, &imu_off_ns) &&
+		    pssense_clock_get_offset(&pssense->timing.clock, &dev_off_ns)) {
+			PSSENSE_DEBUG(pssense,
+			              "IMU clock: IMU counter - device timestamp counter %+.3fms, IMU skew %+.1fppm, "
+			              "two-way echo offset - one-way %s%+.3fms (min round trip %.1fms)",
+			              (double)(imu_off_ns - dev_off_ns) / -1e6, c->b / 1000.0, e->have_window ? "" : "n/a ",
+			              e->have_window ? (double)(e->last_offset_ns - imu_off_ns) / 1e6 : 0.0,
+			              (double)e->last_rtt_ns / 1e6);
+		}
+		c->stats.last_log_ns = recv_time_ns;
+	}
+}
+
+//! Host time of an IMU timestamp (input @29), through the IMU timestamp's own clock.
+static bool
+pssense_imu_ts_to_host(struct pssense_device *pssense, timepoint_ns imu_ns, timepoint_ns *out_host_ns)
+{
+	return pssense_clock_to_local(&pssense->timing.imu_clock, imu_ns, out_host_ns);
+}
+
+//! IMU timestamp (input @29) of a host time.
+static bool
+pssense_host_ts_to_imu(struct pssense_device *pssense, timepoint_ns host_ns, timepoint_ns *out_imu_ns)
+{
+	return pssense_clock_to_remote(&pssense->timing.imu_clock, host_ns, out_imu_ns);
+}
+
 static bool
 pssense_host_ts_to_device(struct pssense_device *pssense,
                           timepoint_ns host_timestamp_ns,
@@ -603,9 +686,7 @@ pssense_update_fusion(struct pssense_device *pssense)
 		        },
 		};
 
-		if (pssense_device_ts_to_host(pssense,                            //
-		                              pssense->timing.latest_imu_time_ns, //
-		                              &sample.timestamp_ns)) {            //
+		if (pssense_imu_ts_to_host(pssense, pssense->timing.latest_imu_time_ns, &sample.timestamp_ns)) {
 			xrt_sink_push_imu(pssense->tracking.constellation_imu_sink, &sample);
 		}
 	}
@@ -774,6 +855,7 @@ pssense_handle_packet(struct pssense_device *pssense,
 
 	// Update the clock offset
 	pssense_add_clock_offset_sample_locked(pssense, recv_time_ns, pssense->timing.latest_device_time_ns);
+	pssense_add_imu_clock_sample_locked(pssense, recv_time_ns, latest_host_send_time);
 
 	pssense->state = input;
 	pssense_update_fusion(pssense);
@@ -1224,8 +1306,9 @@ pssense_get_imu_fusion_pose(struct pssense_device *pssense,
                             int64_t at_timestamp_ns,
                             struct xrt_space_relation *out_relation)
 {
+	// The history is indexed by IMU timestamp, so convert with the IMU timestamp's clock.
 	timepoint_ns device_ts;
-	if (!pssense_host_ts_to_device(pssense, at_timestamp_ns, &device_ts)) {
+	if (!pssense_host_ts_to_imu(pssense, at_timestamp_ns, &device_ts)) {
 		(*out_relation) = (struct xrt_space_relation){0};
 		return;
 	}
