@@ -281,6 +281,7 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	         (int64_t)(centre_ns / U_TIME_1US_IN_NS));
 
 	cc->local_retries = 0;
+	cc->quick = false;
 	cc->started_ns = 0;
 	cc->have_plausible = false;
 	cc->pass_plausible = false;
@@ -444,6 +445,15 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 				cc->have_plausible = true;
 				cc->plausible_left_ns = cc->left_ns;
 				cc->plausible_right_ns = cc->right_ns;
+			}
+			if (cc->quick && cc->pass_plausible) {
+				/*
+				 * Recalibrating after a lost hold: the hold's edge probes centre the window within seconds, so
+				 * skip the four confirmation steps (and the re-searches a failed one starts).
+				 */
+				LOG_INFO(refinement, "Count calibration after a lost hold: window plausible, skipping confirmation");
+				count_calib_finish(refinement);
+				break;
 			}
 			cc->state = COUNT_CALIB_CONFIRM_LEFT_OUTER;
 			count_calib_set_offset(refinement, cc->left_ns - COUNT_CONFIRM_NS);
@@ -671,6 +681,7 @@ handle_count_hold(struct t_led_sync_refinement *refinement)
 		// This controller's own LEDs gone at the centre for several probes: find the window again.
 		LOG_INFO(refinement, "Count hold lost the LEDs for %u probes, calibrating again", cc->hold_unseen_probes);
 		set_phase_locked(refinement, T_LED_SYNC_PHASE_FIND_INITIAL_OFFSET);
+		cc->quick = true;
 		return;
 	}
 	count_calib_set_offset(refinement, cc->hold_centre_ns);

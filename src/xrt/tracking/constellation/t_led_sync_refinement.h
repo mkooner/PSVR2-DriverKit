@@ -364,6 +364,8 @@ struct t_led_sync_refinement
 		time_duration_ns plausible_left_ns, plausible_right_ns;
 		//! The edges of this pass are plausible, a failed confirmation can accept them.
 		bool pass_plausible;
+		//! This calibration follows a hold that lost the LEDs: finish on plausible edges without confirming.
+		bool quick;
 
 		//! Hold: the centre, measured window, probing state and drift correction.
 		time_duration_ns hold_centre_ns, hold_window_ns;

@@ -1852,6 +1852,13 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 				if (!pssense->tracking.led_map_valid || dev_ns > U_TIME_1MS_IN_NS * 50 ||
 				    dev_ns < -U_TIME_1MS_IN_NS * 50) {
 					// First use, or a reconnect / clock reset.
+					PSSENSE_DEBUG(pssense,
+					              "LED clock map latched at %" PRId64 "us (%s, %+" PRId64
+					              "us from the previous)",
+					              (int64_t)(target_ns / U_TIME_1US_IN_NS),
+					              pssense->tracking.led_map_valid ? "jump over 50ms" : "first use",
+					              (int64_t)((target_ns - pssense->tracking.led_map_offset_ns) /
+					                        U_TIME_1US_IN_NS));
 					pssense->tracking.led_map_offset_ns = target_ns;
 					pssense->tracking.led_map_valid = true;
 				} else {
@@ -1865,8 +1872,9 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 				if (host_ns - pssense->tracking.led_map_last_log_ns > U_TIME_1S_IN_NS * 5) {
 					PSSENSE_DEBUG(pssense,
 					              "LED clock map: Bluetooth tracking wandered up to %" PRId64
-					              "us from the held mapping in the last 5s",
-					              (int64_t)(pssense->tracking.led_map_max_dev_ns / U_TIME_1US_IN_NS));
+					              "us from the held mapping in the last 5s, mapping offset %" PRId64 "us",
+					              (int64_t)(pssense->tracking.led_map_max_dev_ns / U_TIME_1US_IN_NS),
+					              (int64_t)(pssense->tracking.led_map_offset_ns / U_TIME_1US_IN_NS));
 					pssense->tracking.led_map_max_dev_ns = 0;
 					pssense->tracking.led_map_last_log_ns = host_ns;
 				}
