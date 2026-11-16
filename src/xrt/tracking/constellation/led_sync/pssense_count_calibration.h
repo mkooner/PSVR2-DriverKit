@@ -147,30 +147,6 @@ count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_n
 	refinement->sample_for_driver.clock_skew = cc->skew;
 }
 
-/*!
- * The window moved @p moved_ns in @p dt_ns since the last measurement: fold that into the cycle period trim. The
- * position is in the anchored cycle's coordinates, so the remaining motion is what the trim hasn't cancelled yet.
- */
-static void
-count_calib_learn_drift(struct t_led_sync_refinement *refinement,
-                        time_duration_ns moved_ns,
-                        time_duration_ns dt_ns,
-                        double gain,
-                        const char *what)
-{
-	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
-	if (dt_ns < U_TIME_1S_IN_NS / 2) {
-		return;
-	}
-	double rate = (double)moved_ns / (double)dt_ns; // fraction, ns per ns
-	cc->skew += gain * rate;
-	const double max_skew = 500e-6; // 500ppm
-	cc->skew = CLAMP(cc->skew, -max_skew, max_skew);
-	LOG_DEBUG(refinement, "Count drift from %s: moved %+" PRId64 "us in %.1fs (%+.1fppm), cycle trim now %+.1fppm",
-	          what, (int64_t)(moved_ns / U_TIME_1US_IN_NS), (double)dt_ns / U_TIME_1S_IN_NS, rate * 1e6,
-	          cc->skew * 1e6);
-	count_calib_apply_trim(refinement);
-}
 
 static void
 count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_ns offset_ns);
@@ -318,6 +294,11 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	cc->hold_drift_ns_per_s = 0;
 	cc->hold_corrections = 0;
 	cc->hold_in_view = true;
+	cc->hold_start_ns = cc->hold_last_probe_ns;
+	cc->hold_trim_last_ns = cc->hold_last_probe_ns;
+	cc->hold_corrections_sum_ns = 0;
+	cc->hold_trim_integral_ns = 0;
+	cc->hold_unseen_probes = 0;
 	count_calib_set_offset(refinement, centre_ns);
 	refinement->frames_since_last_visually_seen = 0;
 	set_phase_locked(refinement, T_LED_SYNC_PHASE_COUNT_HOLD);
@@ -437,14 +418,11 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 		}
 		if (cc->upper_ns - cc->lower_ns < COUNT_EDGE_RESOLUTION_NS) {
 			cc->left_ns = cc->upper_ns;
-			timepoint_ns now_left_ns = os_monotonic_get_ns();
-			if (cc->have_prev_left && now_left_ns - cc->prev_left_time_ns < U_TIME_1S_IN_NS * 30) {
-				count_calib_learn_drift(refinement, cc->left_ns - cc->prev_left_ns,
-				                        now_left_ns - cc->prev_left_time_ns, 1.0, "re-search");
-			}
-			cc->have_prev_left = true;
-			cc->prev_left_ns = cc->left_ns;
-			cc->prev_left_time_ns = now_left_ns;
+			/*
+			 * No drift is learned here: two searches can land a whole sweep step (blink + exposure) apart, which
+			 * on hardware read as +2340us in 3.5s (662ppm, against a real few ppm) and pushed the trim to its
+			 * limit, walking that controller's LEDs out of the window. Drift comes only from the hold.
+			 */
 			cc->lower_ns = cc->left_ns + (fw * 9) / 10;
 			cc->upper_ns = cc->left_ns + (fw * 11) / 10;
 			cc->state = COUNT_CALIB_RIGHT_EDGE;
@@ -537,31 +515,52 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 }
 
 /*!
- * Keeps the blink centred in the window. Nothing measured the drift before (15-30us/s on hardware, from the
- * controller clock estimate's rate error), so the lock would slide out within a minute. Every few seconds the
- * blink's count is measured at the centre and then just inside each window edge for a few frames; if one side drops
- * well below the centre the centre is moved away from it, and the corrections build a slow drift rate that moves the
- * centre between probes while the controller is in view.
+ * Keeps the blink centred in the window, measuring only this controller's LEDs.
  *
- * Probing takes the calibration token, so it never overlaps the other controller calibrating or probing, and sides are
- * judged against the centre count rather than the calibration's threshold: the other controller's lit LEDs are in
- * every count (on hardware that made sides read as on, or an unrelated toggle read as drift, and a drift rate built
- * from those, -65us/s against a real ~10us/s, walked the lock out of the window).
+ * Geometry, blink B (1500us) and exposure E (~1060us measured): with o the blink start relative to the exposure start,
+ * the LEDs show for o in (-B, E), the window W = B + E (2559us measured), and they're fully exposed only for o within
+ * +-(B - E)/2 (~220us) of the centre. A probe tests the visibility at centre +- (W/2 - margin), just inside each
+ * measured edge: while the centre is right within the margin both sides are visible, and once it's off by more, the
+ * side it moved away from goes dark. (Probing at centre +- ((W - B)/2 - 100us), as before, sat where ~80% of the
+ * exposure is still lit, so it only noticed ~0.5-0.85ms of error, close to losing the LEDs at W/2 ~1280us.)
+ *
+ * Each probe reads the count at the centre, at both sides, and with this controller's LEDs off, and judges each by its
+ * difference from the off reading, the same "more than 3 blobs" the calibration's edges were found with. The probe holds
+ * the calibration token, so the other controller's LEDs don't change meanwhile and cancel out with lamps and
+ * reflections. (Comparing raw counts let the other controller's lit LEDs make a controller whose LEDs had drifted out
+ * look centred.)
+ *
+ * Drift: if the window moves at rate r against the untrimmed mapping, the phase applied over the hold, the sum of the
+ * corrections plus the integral of the trim, is P(t) ~= r t, so r = P / T with an error under step / T. It is only
+ * used once T >= 10s (error <= 10ppm) and only if |r| <= 50ppm: the controller clocks measure -3 to +47ppm against the
+ * host, so anything beyond is a misreading and the trim is left alone.
  */
+#define COUNT_HOLD_EDGE_MARGIN_NS (U_TIME_1US_IN_NS * 150)
+#define COUNT_HOLD_DRIFT_MIN_T_NS (U_TIME_1S_IN_NS * 10)
+#define COUNT_HOLD_DRIFT_MAX (50e-6)
+//! Probes in a row with this controller's LEDs not seen at the centre before calibrating again.
+#define COUNT_HOLD_UNSEEN_PROBES 3
+
+static void
+count_hold_integrate_trim(struct t_led_sync_refinement *refinement, timepoint_ns now_ns)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	cc->hold_trim_integral_ns += cc->skew * (double)(now_ns - cc->hold_trim_last_ns);
+	cc->hold_trim_last_ns = now_ns;
+}
+
 static void
 handle_count_hold(struct t_led_sync_refinement *refinement)
 {
 	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
 	timepoint_ns now_ns = os_monotonic_get_ns();
 
-	time_duration_ns probe_ns = (cc->hold_window_ns - refinement->current_blink_duration_ns) / 2 -
-	                            COUNT_HOLD_PROBE_MARGIN_NS;
-	if (probe_ns < COUNT_HOLD_PROBE_MARGIN_NS) {
-		probe_ns = COUNT_HOLD_PROBE_MARGIN_NS;
+	time_duration_ns probe_ns = cc->hold_window_ns / 2 - COUNT_HOLD_EDGE_MARGIN_NS;
+	if (probe_ns < COUNT_HOLD_EDGE_MARGIN_NS) {
+		probe_ns = COUNT_HOLD_EDGE_MARGIN_NS;
 	}
 
 	if (cc->hold_sub == 0) {
-		// The drift is trimmed out of the free-running cycle's period, the centre only moves on corrections.
 		bool unseen = refinement->frames_since_last_visually_seen > 60;
 		time_duration_ns since_probe_ns = now_ns - cc->hold_last_probe_ns;
 		if (since_probe_ns >= COUNT_HOLD_PROBE_NS || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS)) {
@@ -585,54 +584,94 @@ handle_count_hold(struct t_led_sync_refinement *refinement)
 		return;
 	}
 
-	if (cc->hold_sub == 1) {
+	switch (cc->hold_sub) {
+	case 1:
 		cc->hold_centre_mean = mean;
 		cc->hold_sub = 2;
 		count_calib_set_offset(refinement, cc->hold_centre_ns - probe_ns);
 		return;
-	}
-	if (cc->hold_sub == 2) {
+	case 2:
 		cc->hold_left_mean = mean;
 		cc->hold_sub = 3;
 		count_calib_set_offset(refinement, cc->hold_centre_ns + probe_ns);
 		return;
+	case 3:
+		cc->hold_right_mean_tmp = mean;
+		cc->hold_sub = 4;
+		count_calib_set_leds_off(refinement);
+		cc->frames = 0;
+		cc->sum = 0;
+		return;
+	default: break;
 	}
 
-	const float c = cc->hold_centre_mean;
-	bool in_view = c > cc->threshold;
-	// A side whose count drops below 3/4 of the centre's has an exposure edge in it.
-	bool left_on = cc->hold_left_mean >= 0.75f * c;
-	bool right_on = mean >= 0.75f * c;
-	double dt_s = (double)(now_ns - cc->hold_last_probe_ns) / U_TIME_1S_IN_NS;
+	// Sub 4: this controller's LEDs off.
+	cc->hold_off_mean = mean;
+	const float off = mean;
+	const float c = cc->hold_centre_mean - off;
+	const float l = cc->hold_left_mean - off;
+	const float r = cc->hold_right_mean_tmp - off;
+	const bool in_view = c > COUNT_THRESHOLD_MARGIN;
+	const bool left_on = l > COUNT_THRESHOLD_MARGIN;
+	const bool right_on = r > COUNT_THRESHOLD_MARGIN;
+
 	int e = 0;
-	if (in_view && !left_on && right_on) {
-		e = 1; // The window moved later.
-	} else if (in_view && left_on && !right_on) {
-		e = -1; // The window moved earlier.
+	const char *verdict = "not in view";
+	if (in_view) {
+		if (left_on && right_on) {
+			verdict = "centred";
+		} else if (!left_on && right_on) {
+			e = 1; // The left edge passed the left probe: the window moved later.
+			verdict = "moved later";
+		} else if (left_on && !right_on) {
+			e = -1; // The window moved earlier.
+			verdict = "moved earlier";
+		} else {
+			verdict = "both edges dark"; // Narrower than measured (partly covered?), no correction.
+		}
 	}
+
+	count_hold_integrate_trim(refinement, now_ns);
 	if (e != 0) {
 		cc->hold_centre_ns += e * COUNT_HOLD_STEP_NS;
+		cc->hold_corrections_sum_ns += e * (double)COUNT_HOLD_STEP_NS;
 		cc->hold_corrections++;
-		if (dt_s > 1.0) {
-			// Each correction is drift the trim didn't cancel; fold part of it in.
-			count_calib_learn_drift(refinement, e * COUNT_HOLD_STEP_NS,
-			                        (time_duration_ns)(dt_s * U_TIME_1S_IN_NS), 0.5, "hold probe");
+	}
+
+	time_duration_ns t_ns = now_ns - cc->hold_start_ns;
+	if (in_view && t_ns >= COUNT_HOLD_DRIFT_MIN_T_NS) {
+		double rate = (cc->hold_corrections_sum_ns + cc->hold_trim_integral_ns) / (double)t_ns;
+		if (rate >= -COUNT_HOLD_DRIFT_MAX && rate <= COUNT_HOLD_DRIFT_MAX) {
+			cc->skew = rate;
+		} else {
+			LOG_DEBUG(refinement, "Count hold drift estimate %+.1fppm is implausible, trim left at %+.1fppm",
+			          rate * 1e6, cc->skew * 1e6);
 		}
-		cc->hold_drift_ns_per_s = cc->skew * 1e9;
+	}
+
+	if (in_view) {
+		cc->hold_unseen_probes = 0;
+	} else {
+		cc->hold_unseen_probes++;
 	}
 	cc->hold_in_view = in_view;
+
 	LOG_DEBUG(refinement,
-	          "Count hold probe: centre %.1f left %.1f right %.1f blobs -> %s, centre %" PRId64
-	          "us, cycle trim %+.1fppm, %u corrections",
-	          c, cc->hold_left_mean, mean,
-	          !in_view ? "not in view"
-	                   : (e > 0 ? "moved later" : (e < 0 ? "moved earlier" : "centred")),
-	          (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), cc->skew * 1e6,
-	          cc->hold_corrections);
+	          "Count hold probe: centre %+.1f left %+.1f right %+.1f blobs over %.1f off -> %s, centre %" PRId64
+	          "us, cycle trim %+.1fppm, %u corrections in %.0fs",
+	          c, l, r, off, verdict, (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), cc->skew * 1e6,
+	          cc->hold_corrections, (double)t_ns / U_TIME_1S_IN_NS);
 
 	count_calib_release_token(refinement);
 	cc->hold_last_probe_ns = now_ns;
 	cc->hold_last_apply_ns = now_ns;
 	cc->hold_sub = 0;
+
+	if (cc->hold_unseen_probes >= COUNT_HOLD_UNSEEN_PROBES) {
+		// This controller's own LEDs gone at the centre for several probes: find the window again.
+		LOG_INFO(refinement, "Count hold lost the LEDs for %u probes, calibrating again", cc->hold_unseen_probes);
+		set_phase_locked(refinement, T_LED_SYNC_PHASE_FIND_INITIAL_OFFSET);
+		return;
+	}
 	count_calib_set_offset(refinement, cc->hold_centre_ns);
 }
