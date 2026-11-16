@@ -69,6 +69,7 @@ grep -E "Count hold probe" "$LOG" | tail -2 | sed -E 's/.*Count hold probe: /  h
 grep -E "LED clock map" "$LOG" | tail -2 | sed -E 's/.*LED clock map: /  clock map: /' | cut -c1-140
 grep -E "Count calibration state" "$LOG" | tail -3 | sed -E 's/.*Count calibration /  last step: /' | cut -c1-140
 grep -E "LED command round trip" "$LOG" | tail -2 | sed -E 's/.*LED command round trip: /  LED command round trip: /' | cut -c1-120
+grep -E "IMU clock: " "$LOG" | tail -2 | sed -E 's/.*IMU clock: /  IMU clock: /' | cut -c1-170
 grep -E "\] Clock: " "$LOG" | tail -2 | sed -E 's/.*Clock: /  controller clock: /' | cut -c1-160
 
 echo
