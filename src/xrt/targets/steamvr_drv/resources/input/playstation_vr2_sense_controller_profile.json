@@ -5,7 +5,6 @@
   "resource_root": "monado",
   "driver_name": "monado",
   "remapping": "{monado}/input/playstation_vr2_sense_controller_remapping.json",
-  "compatibility_mode_controller_type": "oculus_touch",
   "input_bindingui_mode": "controller_handed",
   "should_show_binding_errors": true,
   "input_bindingui_left": {

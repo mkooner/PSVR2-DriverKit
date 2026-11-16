@@ -73,6 +73,7 @@
 // clang-format on
 
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_default_brightness, "PSVR2_DEFAULT_BRIGHTNESS", 1.0f)
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_refresh_hz, "PSVR2_REFRESH_HZ", 89.91f)
 
 DEBUG_GET_ONCE_LOG_OPTION(psvr2_log, "PSVR2_LOG", U_LOGGING_WARN)
 
@@ -808,15 +809,13 @@ led_xfer_cb(struct libusb_transfer *xfer)
 			hmd->ld_offset_steady_since_ns = now_ns;
 		} else {
 			hmd->ld_offset_ns += CLAMP(d, -max_slew_ns, max_slew_ns);
-			if (d > U_TIME_1US_IN_NS * 100 || d < -U_TIME_1US_IN_NS * 100) {
-				hmd->ld_offset_steady_since_ns = now_ns;
-			}
 		}
 		/*
-		 * Camera frames go to the tracker and LED sync only once the offset has stayed within 0.1ms of the tracker
-		 * for 1s: the tracker's own estimate also moves while it fills (02:03: 31ms off at start, 11.5ms at 2s, 3ms
-		 * at 6s). Once only, so a later hiccup can't stop tracking; at most 8s after the offset became valid, in
-		 * case the tracker is noisier than seen.
+		 * Camera frames go to the tracker and LED sync only once the offset hasn't had to re-latch (more than 0.3ms
+		 * off) for 1s: the tracker's own estimate also moves while it fills (02:03: 31ms off at start, 11.5ms at
+		 * 2s, 3ms at 6s). Requiring it within 0.1ms of the tracker instead never held (12:06: hit the 8s limit), the
+		 * tracker's frame-to-frame noise is larger than that, and delayed tracking 8s. Once only, so a later hiccup
+		 * can't stop tracking; at most 8s after the offset became valid.
 		 */
 		if (!hmd->ld_clock_settled && hmd->ld_offset_valid &&
 		    (now_ns - hmd->ld_offset_steady_since_ns >= (timepoint_ns)U_TIME_1S_IN_NS ||
@@ -1776,7 +1775,14 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 
 	// Set up display details
 	// refresh rate
-	hmd->base.hmd->screens[0].nominal_frame_interval_ns = time_s_to_ns(1.0f / 120.0f);
+	/*
+	 * SteamVR's compositor runs the PS VR2 panel in its 4000x2040@89.91Hz mode (it matches a desired 90Hz; the
+	 * 119.88Hz mode is also offered), but this said 120Hz, which SteamVR takes as Prop_DisplayFrequency for its frame
+	 * timing and pose prediction: every frame's head pose was predicted for the wrong moment (8.3 vs 11.1ms frames),
+	 * judder while turning. PSVR2_REFRESH_HZ sets it, matching the mode the compositor uses.
+	 */
+	hmd->base.hmd->screens[0].nominal_frame_interval_ns =
+	    time_s_to_ns(1.0f / debug_get_float_option_psvr2_refresh_hz());
 	hmd->base.compute_distortion = psvr2_compute_distortion;
 
 	struct xrt_hmd_parts *parts = hmd->base.hmd;
