@@ -89,6 +89,37 @@ static const time_duration_ns gray_code_jumps_ns[] = {
     U_TIME_1US_IN_NS * 750,  // 111
 };
 
+//! Queue the pending gray code jump if the LED command slot is free, true if it went out.
+static bool
+gray_try_send_pending_jump(struct t_led_sync_refinement *refinement)
+{
+	if (!refinement->decode_gray.has_pending_jump) {
+		return false;
+	}
+
+	if (!advance_clock_offset_pssense_locked(refinement, refinement->decode_gray.pending_jump_ns)) {
+		// Another LED command is still waiting for the driver, try again next tick instead of dropping it.
+		refinement->decode_gray.jumps_delayed_ticks++;
+		return false;
+	}
+
+	refinement->decode_gray.has_pending_jump = false;
+	refinement->decode_gray.awaiting_jump_apply = true;
+	refinement->decode_gray.jumps_sent++;
+	LOG_DEBUG(refinement, "Gray code jump of %" PRId64 "us sent to the driver (sent %u, delayed ticks %u)",
+	          (int64_t)(refinement->decode_gray.pending_jump_ns / U_TIME_1US_IN_NS),
+	          refinement->decode_gray.jumps_sent, refinement->decode_gray.jumps_delayed_ticks);
+	return true;
+}
+
+//! Whether decoding should wait: a jump is in flight, or the code buffer still holds frames from before it.
+static bool
+gray_decode_settling(struct t_led_sync_refinement *refinement)
+{
+	return refinement->decode_gray.has_pending_jump || refinement->decode_gray.awaiting_jump_apply ||
+	       refinement->leds_seen.cur_sequence_id < refinement->decode_gray.settle_until_sequence_id;
+}
+
 static void
 handle_successful_gray_decode(struct t_led_sync_refinement *refinement, uint16_t gray_code)
 {
@@ -109,9 +140,21 @@ handle_successful_gray_decode(struct t_led_sync_refinement *refinement, uint16_t
 	LOG_DEBUG(refinement, "Accepting gray code %x after %d identical matches, moving %" PRIi64 "us", gray_code,
 	          refinement->decode_gray.matching_decodes, (jump_amount_ns / 1000L));
 
-	bool success = advance_clock_offset_pssense_locked(refinement, jump_amount_ns);
-	// @todo should we have a "busy" recovery strategy here?
-	(void)success;
+	// Raw evidence for the accepted code: the 11-bit values and each bit's brightness, oldest first.
+	for (int led = 0; led < T_LED_SYNC_SELECTED_LEDS; led++) {
+		const float *b = refinement->decode_gray.last_brightnesses[led];
+		LOG_DEBUG(refinement,
+		          "Gray code bits LED %d: value %03x brightness %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f | %.0f %.0f "
+		          "%.0f",
+		          led, refinement->decode_gray.last_decoded_values[led], b[10], b[9], b[8], b[7], b[6], b[5], b[4],
+		          b[3], b[2], b[1], b[0]);
+	}
+
+	// Previously a jump that found another LED command waiting was silently dropped, while the decoder carried
+	// on as if it had moved. Keep it until it goes out, and decode again only from frames after it applied.
+	refinement->decode_gray.has_pending_jump = true;
+	refinement->decode_gray.pending_jump_ns = jump_amount_ns;
+	gray_try_send_pending_jump(refinement);
 }
 
 static void
@@ -276,7 +319,7 @@ handle_decode_gray_constellation_sample(struct t_led_sync_refinement *refinement
 
 	// We have enough info in theory
 	// @todo this should be an actual "num samples" check
-	if (refinement->leds_seen.cur_sequence_id > T_LED_SYNC_GRAY_CODE_SIZE_BITS) {
+	if (refinement->leds_seen.cur_sequence_id > T_LED_SYNC_GRAY_CODE_SIZE_BITS && !gray_decode_settling(refinement)) {
 		uint16_t decoded_values[T_LED_SYNC_SELECTED_LEDS] = {0};
 
 		for (int led = 0; led < T_LED_SYNC_SELECTED_LEDS; led++) {
@@ -338,11 +381,16 @@ handle_decode_gray_constellation_sample(struct t_led_sync_refinement *refinement
 				}
 
 				bool bit = brightnesses[age] > threshold;
+				refinement->decode_gray.last_brightnesses[led][age] = brightnesses[age];
 
 				LOG_GRAY_SPEW(refinement, "brightness[%d][%d]: %f", led, age, brightnesses[age]);
 
 				decoded_values[led] |= (bit ? 1 : 0) << (T_LED_SYNC_GRAY_CODE_SIZE_BITS - 1);
 			}
+		}
+
+		for (int led = 0; led < T_LED_SYNC_SELECTED_LEDS; led++) {
+			refinement->decode_gray.last_decoded_values[led] = decoded_values[led];
 		}
 
 		if (decoded_values[0] == decoded_values[1]) {
@@ -802,15 +850,33 @@ handle_decode_gray_tick(struct t_led_sync_refinement *refinement)
 		refinement->decode_gray.attempt_start_ns = os_monotonic_get_ns();
 	}
 
+	// A pending gray code jump goes out before anything else takes the LED command slot.
+	gray_try_send_pending_jump(refinement);
+
+	if (refinement->decode_gray.awaiting_jump_apply && refinement->sample_applied) {
+		refinement->decode_gray.awaiting_jump_apply = false;
+		refinement->decode_gray.jumps_applied++;
+		// Refill the whole code buffer with frames from after the jump before decoding again.
+		refinement->decode_gray.settle_until_sequence_id =
+		    refinement->leds_seen.cur_sequence_id + T_LED_SYNC_GRAY_CODE_SIZE_BITS + 2;
+		refinement->decode_gray.matching_decodes = 0;
+		// The jump moved us, give this position a fresh decode attempt before the recovery jump.
+		refinement->decode_gray.attempt_start_ns = os_monotonic_get_ns();
+		LOG_DEBUG(refinement, "Gray code jump applied (%u applied), decoding from frame %" PRIu64,
+		          refinement->decode_gray.jumps_applied, refinement->decode_gray.settle_until_sequence_id);
+	}
+
 	// Every 10 sequence events reanchor the period
-	if (refinement->last_exposure_sequence_id > refinement->delta_sync.anchor_sequence_id &&
+	if (!refinement->decode_gray.has_pending_jump && !refinement->decode_gray.awaiting_jump_apply &&
+	    refinement->last_exposure_sequence_id > refinement->delta_sync.anchor_sequence_id &&
 	    refinement->last_exposure_sequence_id - refinement->delta_sync.anchor_sequence_id > 10) {
 		delta_sync_reanchor(refinement, true);
 		bool applied = advance_clock_offset_pssense_locked(refinement, 0);
 		(void)applied; // ignore errors, it's fine
 	}
 
-	if (!refinement->decode_gray.applied_gray_start) {
+	if (!refinement->decode_gray.applied_gray_start || refinement->decode_gray.has_pending_jump ||
+	    refinement->decode_gray.awaiting_jump_apply) {
 		return;
 	}
 

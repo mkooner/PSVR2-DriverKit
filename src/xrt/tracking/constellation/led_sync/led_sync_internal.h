@@ -351,6 +351,13 @@ set_phase_locked(struct t_led_sync_refinement *refinement, enum t_led_sync_phase
 		refinement->decode_gray.decoded_gray_code = 0;
 		refinement->decode_gray.last_accepted_gray_code_ns = os_monotonic_get_ns();
 		refinement->decode_gray.attempt_start_ns = refinement->decode_gray.last_accepted_gray_code_ns;
+		refinement->decode_gray.has_pending_jump = false;
+		refinement->decode_gray.pending_jump_ns = 0;
+		refinement->decode_gray.awaiting_jump_apply = false;
+		refinement->decode_gray.settle_until_sequence_id = 0;
+		refinement->decode_gray.jumps_sent = 0;
+		refinement->decode_gray.jumps_delayed_ticks = 0;
+		refinement->decode_gray.jumps_applied = 0;
 
 		break;
 	}

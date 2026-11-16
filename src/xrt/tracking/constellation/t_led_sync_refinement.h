@@ -378,6 +378,19 @@ struct t_led_sync_refinement
 		timepoint_ns last_accepted_gray_code_ns;
 		//! When the current decode attempt started, either entering the phase or the last recovery jump.
 		timepoint_ns attempt_start_ns;
+
+		//! An accepted jump that couldn't be queued yet (another LED command was still waiting), retried.
+		bool has_pending_jump;
+		time_duration_ns pending_jump_ns;
+		//! A jump was queued, waiting for the driver to report it applied.
+		bool awaiting_jump_apply;
+		//! Don't decode until this sequence id, so the code buffer only holds frames from after the last jump.
+		uint64_t settle_until_sequence_id;
+		//! Brightness per bit (oldest first) and decoded value per selected LED, of the last decode, for logs.
+		float last_brightnesses[T_LED_SYNC_SELECTED_LEDS][T_LED_SYNC_GRAY_CODE_SIZE_BITS];
+		uint16_t last_decoded_values[T_LED_SYNC_SELECTED_LEDS];
+		//! Jump bookkeeping, logged with each accepted code.
+		uint32_t jumps_sent, jumps_delayed_ticks, jumps_applied;
 	} decode_gray;
 
 	struct
