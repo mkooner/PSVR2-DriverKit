@@ -64,6 +64,7 @@ for pat in "Count calibration starting" "Count calibration restarting" "searchin
 	printf '  %-42s %s\n' "$pat" "$(grep -c -E "$pat" "$LOG" 2>/dev/null || true)"
 done
 grep -E "Count calibration (done|restarting)" "$LOG" | tail -4 | sed -E 's/.*Count calibration/  /' | cut -c1-200
+grep -E "Count drift from" "$LOG" | tail -3 | sed -E 's/.*Count drift from /  drift: /' | cut -c1-150
 grep -E "Count hold probe" "$LOG" | tail -2 | sed -E 's/.*Count hold probe: /  hold: /' | cut -c1-160
 grep -E "LED clock map" "$LOG" | tail -2 | sed -E 's/.*LED clock map: /  clock map: /' | cut -c1-140
 grep -E "Count calibration state" "$LOG" | tail -3 | sed -E 's/.*Count calibration /  last step: /' | cut -c1-140
