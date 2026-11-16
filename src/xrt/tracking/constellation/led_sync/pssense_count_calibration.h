@@ -61,7 +61,14 @@ enum count_calib_state
 	COUNT_CALIB_CONFIRM_LEFT_INNER,
 	COUNT_CALIB_CONFIRM_RIGHT_OUTER,
 	COUNT_CALIB_CONFIRM_RIGHT_INNER,
+	//! Visibility check with the LEDs lit regardless of timing, after sweeps that saw nothing.
+	COUNT_CALIB_DIAG_ON,
 };
+
+//! Give up confirming and use the best window found after this long, the hold's probes centre it from there.
+#define COUNT_CALIB_TIME_LIMIT_NS (U_TIME_1S_IN_NS * 20)
+//! Empty sweeps in a row before the LEDs-always-on visibility check.
+#define COUNT_CALIB_EMPTY_SWEEPS_DIAG 2
 
 //! The refinement currently calibrating, only one may at a time.
 static _Atomic(struct t_led_sync_refinement *) count_calib_owner = NULL;
@@ -171,6 +178,9 @@ count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_n
 static void
 count_calib_restart(struct t_led_sync_refinement *refinement, const char *why);
 
+static void
+count_calib_finish(struct t_led_sync_refinement *refinement);
+
 /*!
  * A confirmation failed: the window was found moments ago, so search again just before it instead of sweeping the
  * whole frame and handing over the token. Falls back to a full restart after a few tries.
@@ -179,10 +189,20 @@ static void
 count_calib_research(struct t_led_sync_refinement *refinement, const char *why)
 {
 	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	/*
+	 * The edges were found and the window is as wide as it should be: rather than chase the confirmations while it
+	 * drifts, accept it after one retry. The hold's probes correct the centre within seconds.
+	 */
+	if (cc->pass_plausible && cc->local_retries >= 1) {
+		LOG_INFO(refinement, "Count calibration accepting the window without confirmation (%s)", why);
+		count_calib_finish(refinement);
+		return;
+	}
 	if (++cc->local_retries > 3) {
 		count_calib_restart(refinement, why);
 		return;
 	}
+	cc->pass_plausible = false;
 	LOG_DEBUG(refinement, "Count calibration searching again near the window (%s), retry %u", why,
 	          cc->local_retries);
 	time_duration_ns start_ns = cc->left_ns - cc->full_window_ns;
@@ -222,6 +242,10 @@ count_calib_enter(struct t_led_sync_refinement *refinement)
 	refinement->count_calib.paused = false;
 	refinement->count_calib.anchored = false;
 	refinement->count_calib.have_prev_left = false;
+	refinement->count_calib.started_ns = 0;
+	refinement->count_calib.have_plausible = false;
+	refinement->count_calib.pass_plausible = false;
+	refinement->count_calib.empty_sweeps = 0;
 	refinement->count_calib.frames = 0;
 	refinement->count_calib.sum = 0;
 	count_calib_set_leds_off(refinement);
@@ -281,6 +305,9 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	         (int64_t)(centre_ns / U_TIME_1US_IN_NS));
 
 	cc->local_retries = 0;
+	cc->started_ns = 0;
+	cc->have_plausible = false;
+	cc->pass_plausible = false;
 	cc->have_known_left = true;
 	cc->known_left_ns = cc->left_ns;
 	cc->hold_centre_ns = centre_ns;
@@ -330,7 +357,21 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 		          (int64_t)(start_ns / U_TIME_1US_IN_NS));
 		cc->state = COUNT_CALIB_FIND_ON;
 		cc->swept_ns = 0;
+		if (cc->started_ns == 0) {
+			cc->started_ns = os_monotonic_get_ns();
+		}
+		cc->pass_plausible = false;
 		count_calib_set_offset(refinement, start_ns);
+		return;
+	}
+
+	// Time limit: finish with the best window seen rather than keep the controller untracked.
+	if (cc->have_plausible && os_monotonic_get_ns() - cc->started_ns > COUNT_CALIB_TIME_LIMIT_NS &&
+	    cc->frames == 0 && !cc->off_phase) {
+		LOG_INFO(refinement, "Count calibration time limit reached, using the best window found");
+		cc->left_ns = cc->plausible_left_ns;
+		cc->right_ns = cc->plausible_right_ns;
+		count_calib_finish(refinement);
 		return;
 	}
 
@@ -361,11 +402,24 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 
 	case COUNT_CALIB_FIND_ON:
 		if (on) {
+			cc->empty_sweeps = 0;
 			cc->upper_ns = cc->offset_ns;
 			cc->lower_ns = cc->offset_ns - fw;
 			cc->state = COUNT_CALIB_LEFT_EDGE;
 			count_calib_set_offset(refinement, (cc->lower_ns + cc->upper_ns) / 2);
 		} else if ((cc->swept_ns += fw / 2) >= refinement->exposure_interval_ns) {
+			if (++cc->empty_sweeps >= COUNT_CALIB_EMPTY_SWEEPS_DIAG) {
+				// Are the LEDs visible at all? Light them regardless of timing and compare with off.
+				cc->empty_sweeps = 0;
+				cc->state = COUNT_CALIB_DIAG_ON;
+				cc->frames = 0;
+				cc->sum = 0;
+				cc->off_phase = false;
+				struct t_led_sync_sample_pssense_data data = {.leds = {0xFF, 0xFF, 0xFF, 0xFF}};
+				set_offset_duration_pssense(refinement, 0, cc->offset_ns, refinement->current_blink_duration_ns,
+				                            T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_ON, data);
+				break;
+			}
 			// Out of view most likely: don't keep flashing across the headset's own exposures.
 			cc->retry_after_ns = os_monotonic_get_ns() + U_TIME_1S_IN_NS * 3;
 			count_calib_restart(refinement, "LEDs not seen at any offset, controller out of view?");
@@ -406,6 +460,13 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 		}
 		if (cc->upper_ns - cc->lower_ns < COUNT_EDGE_RESOLUTION_NS) {
 			cc->right_ns = cc->lower_ns;
+			time_duration_ns width_ns = cc->right_ns - cc->left_ns;
+			cc->pass_plausible = width_ns > (fw * 7) / 10 && width_ns < (fw * 3) / 2;
+			if (cc->pass_plausible) {
+				cc->have_plausible = true;
+				cc->plausible_left_ns = cc->left_ns;
+				cc->plausible_right_ns = cc->right_ns;
+			}
 			cc->state = COUNT_CALIB_CONFIRM_LEFT_OUTER;
 			count_calib_set_offset(refinement, cc->left_ns - COUNT_CONFIRM_NS);
 		} else {
@@ -446,6 +507,29 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 			break;
 		}
 		count_calib_finish(refinement);
+		break;
+
+	case COUNT_CALIB_DIAG_ON:
+		if (on) {
+			// Visible, so the timing is what's wrong: re-latch the driver's mapping and sweep again.
+			LOG_INFO(refinement,
+			         "Count calibration: LEDs visible when always on (%.1f vs %.1f blobs) but not at any "
+			         "timing, re-latching the clock mapping",
+			         cc->on_mean, cc->baseline);
+			cc->have_known_left = false;
+			count_calib_restart(refinement, "re-latching the clock mapping");
+			// Windows found so far were in the old mapping.
+			cc->have_plausible = false;
+			cc->started_ns = 0;
+			refinement->sample_for_driver.reset_clock_map = true;
+		} else {
+			LOG_INFO(refinement,
+			         "Count calibration: LEDs not visible even always on (%.1f vs %.1f blobs), controller out "
+			         "of the cameras' view or covered",
+			         cc->on_mean, cc->baseline);
+			cc->retry_after_ns = os_monotonic_get_ns() + U_TIME_1S_IN_NS * 3;
+			count_calib_restart(refinement, "controller not visible");
+		}
 		break;
 
 	default: count_calib_restart(refinement, "bad state"); break;

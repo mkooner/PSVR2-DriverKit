@@ -123,6 +123,8 @@ enum t_led_sync_sample_pssense_mode
 	T_LED_SYNC_SAMPLE_PSSENSE_MODE_STABLE,
 	//! All LEDs off, for the blob count baseline of the count calibration.
 	T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_OFF,
+	//! All LEDs lit regardless of timing, for the count calibration's visibility check.
+	T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_ON,
 };
 
 struct t_led_sync_sample_pssense_data
@@ -154,6 +156,8 @@ struct t_led_sync_sample
 
 	//! The LED cycle period in device ns, already trimmed for the skew. 0 lets the driver use its own estimate.
 	double cycle_period_ns;
+	//! Count calibration: re-latch the driver's host -> controller LED mapping from its clock tracking.
+	bool reset_clock_map;
 
 	//! The latency offset to apply to fudge the blink to line up as best as possible with the exposure.
 	time_duration_ns fudge_offset_ns;
@@ -350,6 +354,16 @@ struct t_led_sync_refinement
 		time_duration_ns known_left_ns;
 		time_duration_ns swept_ns;
 		timepoint_ns retry_after_ns;
+
+		//! When this calibration started (from the token), for the time limit.
+		timepoint_ns started_ns;
+		//! Sweeps in a row that saw nothing.
+		uint32_t empty_sweeps;
+		//! The latest window with a plausible width, from any pass of this calibration.
+		bool have_plausible;
+		time_duration_ns plausible_left_ns, plausible_right_ns;
+		//! The edges of this pass are plausible, a failed confirmation can accept them.
+		bool pass_plausible;
 
 		//! Hold: the centre, measured window, probing state and drift correction.
 		time_duration_ns hold_centre_ns, hold_window_ns;

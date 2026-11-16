@@ -1691,6 +1691,12 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 			case T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_OFF:
 				pssense->tracking.sync_phase = LED_SYNC_PHASE_LED_ALL_OFF;
 				break;
+			case T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_ON:
+				pssense->tracking.sync_phase = LED_SYNC_PHASE_LED_ALL_ON;
+				break;
+			}
+			if (pssense->tracking.latest_led_sync_sample.reset_clock_map) {
+				pssense->tracking.led_map_valid = false;
 			}
 		}
 
