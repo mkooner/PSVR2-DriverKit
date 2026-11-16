@@ -232,6 +232,15 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 			bits = __le32_to_cpu(bits);
 			memcpy(&r.v[j], &bits, sizeof(float));
 		}
+		/*
+		 * The block stores the matrix in the other order from xrt_matrix_3x3's: replaying 2621 hardware solves
+		 * through this code (psvr2-test/analysis) the transposed mount, with the relations as stored (below), brings
+		 * the median disagreement between cameras 0 and 1 about the same controller from 43.9cm to 3.6cm, faces them
+		 * +-15 deg outward (the bottom pair is 30.6 deg apart, PSVR2-Documentation) instead of lopsided and 25-30 deg
+		 * up, puts the controllers 94% below and 100% in front of the head, and halves the tilt disagreement with the
+		 * controllers' IMUs (9.6/14.2 -> 4.9/7.7 deg).
+		 */
+		math_matrix_3x3_transpose(&r, &r);
 		struct xrt_quat q_r;
 		math_quat_from_matrix_3x3(&r, &q_r);
 		float n = sqrtf(q_r.x * q_r.x + q_r.y * q_r.y + q_r.z * q_r.z + q_r.w * q_r.w);
@@ -275,8 +284,8 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 	struct xrt_matrix_4x4 scratch;
 	for (int i = 0; i < block->camera_relation_count; i++) {
 		struct calibration_camera_relation *relation = &relations[i];
+		// Used as stored, see the mount above (the transpose here was half of the 43.9cm camera disagreement).
 		struct xrt_matrix_3x3 orientation = __le_matrix_3x3_to_cpu(relation->orientation);
-		math_matrix_3x3_transpose(&orientation, &orientation);
 		struct xrt_vec3 translation = __levec3_to_cpu(relation->translation);
 		math_matrix_4x4_isometry_from_rt(&orientation, &translation, &scratch);
 
