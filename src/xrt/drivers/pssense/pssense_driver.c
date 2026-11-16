@@ -62,6 +62,13 @@ DEBUG_GET_ONCE_LOG_OPTION(pssense_log, "PSSENSE_LOG", U_LOGGING_INFO)
 DEBUG_GET_ONCE_BOOL_OPTION(pssense_pc_polling_rate, "PSSENSE_SET_PC_POLLING_RATE", true)
 DEBUG_GET_ONCE_BOOL_OPTION(pssense_advanced_led_sync, "PSSENSE_ADVANCED_LED_SYNC", true)
 
+/*!
+ * Longest time the constellation tracker's prediction may run without a fresh optical fix before its position is
+ * held. Between fixes the tracker double-integrates the accelerometer, so any bias or misalignment makes the
+ * controller run away quadratically ("flies off into the distance"). Orientation keeps coming from the tracker.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(pssense_max_prediction_ms, "PSSENSE_MAX_PREDICTION_MS", 150)
+
 //! With nothing new to send, output reports still go out this often (~30Hz) as a keepalive.
 #define PSSENSE_KEEPALIVE_NS (U_TIME_1MS_IN_NS * 33)
 
@@ -219,6 +226,12 @@ struct pssense_device
 
 		//! Rate limit for the "OUT" debug log of what clients are given.
 		timepoint_ns last_out_log_ns;
+
+		//! Timestamp of the last sample the constellation tracker solved optically (0 until the first one).
+		timepoint_ns last_optical_fix_ns;
+		//! Held position (tracker space) while the prediction is stale, and whether we're holding.
+		bool holding_position;
+		uint32_t holds_started;
 		struct t_constellation_tracker *constellation_tracker;
 		t_constellation_device_id_t constellation_device_id;
 		struct xrt_imu_sink *constellation_imu_sink;
@@ -1024,8 +1037,38 @@ pssense_get_constellation_pose(struct pssense_device *pssense,
 
 	if ((out_relation->relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0 &&
 	    (out_relation->relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) != 0) {
-		pssense->tracking.have_last_optical_position = true;
-		pssense->tracking.last_optical_position = out_relation->pose.position;
+		const time_duration_ns max_prediction_ns =
+		    (time_duration_ns)debug_get_num_option_pssense_max_prediction_ms() * U_TIME_1MS_IN_NS;
+		const bool fresh = pssense->tracking.last_optical_fix_ns != 0 &&
+		                   at_timestamp_ns - pssense->tracking.last_optical_fix_ns <= max_prediction_ns;
+
+		if (fresh || max_prediction_ns <= 0) {
+			// Recent optical fix: the fused pose is trustworthy, remember where it was.
+			pssense->tracking.have_last_optical_position = true;
+			pssense->tracking.last_optical_position = out_relation->pose.position;
+			if (pssense->tracking.holding_position) {
+				pssense->tracking.holding_position = false;
+				PSSENSE_DEBUG(pssense, "Optical fix again, releasing held position");
+			}
+			return;
+		}
+
+		// Stale: keep the tracker's orientation, hold position where it was last backed by an optical fix.
+		if (!pssense->tracking.holding_position) {
+			pssense->tracking.holding_position = true;
+			pssense->tracking.holds_started++;
+			PSSENSE_DEBUG(pssense, "No optical fix for %" PRId64 "ms, holding position (hold #%u)",
+			              (int64_t)((at_timestamp_ns - pssense->tracking.last_optical_fix_ns) / U_TIME_1MS_IN_NS),
+			              pssense->tracking.holds_started);
+		}
+		if (pssense->tracking.have_last_optical_position) {
+			out_relation->pose.position = pssense->tracking.last_optical_position;
+		}
+		out_relation->linear_velocity = (struct xrt_vec3)XRT_VEC3_ZERO;
+		out_relation->relation_flags = (enum xrt_space_relation_flags)(
+		    (out_relation->relation_flags & ~(XRT_SPACE_RELATION_POSITION_TRACKED_BIT |
+		                                      XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT)) |
+		    XRT_SPACE_RELATION_POSITION_VALID_BIT);
 		return;
 	}
 
@@ -1467,6 +1510,14 @@ pssense_push_constellation_tracker_sample(struct t_constellation_tracker_device 
 
 	// Forward to LED sync
 	t_led_sync_push_constellation_sample(&pssense->tracking.led_sync_refinement, sample);
+
+	if (sample->has_world_pose) {
+		os_thread_helper_lock(&pssense->controller_thread);
+		if (sample->timestamp_ns > pssense->tracking.last_optical_fix_ns) {
+			pssense->tracking.last_optical_fix_ns = sample->timestamp_ns;
+		}
+		os_thread_helper_unlock(&pssense->controller_thread);
+	}
 
 	/*
 	 * For calibrating the headset camera mount offline: the optical pose next to the IMU orientation at the same
