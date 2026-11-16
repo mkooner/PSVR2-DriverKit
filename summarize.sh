@@ -43,6 +43,16 @@ for pat in "Skipping .* Bluetooth simple report" "Failed to send output report" 
 done
 
 echo
+echo "== LED sync BG phase (last summaries)"
+grep -E "BG stats" "$LOG" | tail -4 | sed -E 's/.*BG stats/  BG/' | cut -c1-200
+
+echo
+echo "== What SteamVR got per controller (FINAL)"
+for h in 0 1; do
+	grep -E " FINAL [0-9]+ $h " "$LOG" | awk -v h=$h '{for(i=1;i<=NF;i++) if($i=="pos"){x=$(i+1);y=$(i+2);z=$(i+3)} f=$0; sub(/.*flags /,"",f); split(f,a," "); n++; d=sqrt(x*x+y*y+z*z); s+=d; if(d>3)far++; if(a[1]!="0")valid++} END{if(n) printf "  hand %d: %d samples, %d with flags, mean distance from origin %.2f m, >3 m: %d\n", h, n, valid, s/n, far}'
+done
+
+echo
 echo "== Undecoded headset data (VD entries, possibly play area)"
 grep -E "Unknown VD entry type" "$LOG" | sed -E 's/.*Unknown VD entry type/  type/' | sort | uniq -c | head -8
 
