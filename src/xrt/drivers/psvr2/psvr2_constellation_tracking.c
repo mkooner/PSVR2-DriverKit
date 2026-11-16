@@ -32,6 +32,15 @@
  */
 DEBUG_GET_ONCE_OPTION(psvr2_cam0_mount, "PSVR2_CAM0_MOUNT", NULL)
 
+/*
+ * Camera rig position relative to the head pose origin, "x y z" in cm (head frame: x right, y up, -z forward), added to
+ * every camera. Sony's driver takes the camera positions from its own config (PSVR2Toolkit hmd_device_hooks.cpp,
+ * cam0Cfg->position), not from the calibration block, so camera 0 sits at the head origin by default. Measure it with
+ * psvr2-test/analysis/rig_offset.py (controller resting in view while the head turns); the 00:04 run had only 3
+ * usable windows and gave an implausible 36cm, so there is no data-backed default yet.
+ */
+DEBUG_GET_ONCE_OPTION(psvr2_cam_rig_offset, "PSVR2_CAM_RIG_OFFSET", NULL)
+
 /*!
  * Offset in the calibration block of camera 0's camera-to-head rotation (row-major 3x3 floats); camera 1's is at
  * 0x7dc. PSVR2Toolkit reads the same offsets from Sony's driver and builds SteamVR's camera-to-head transform as
@@ -311,6 +320,13 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 			parent_id = parent_ids[parent_id];
 		}
 		math_pose_from_isometry(&result, &mosaic->cameras[i].pose_in_origin);
+		const char *rig = debug_get_option_psvr2_cam_rig_offset();
+		float rx = 0, ry = 0, rz = 0;
+		if (rig != NULL && sscanf(rig, "%f %f %f", &rx, &ry, &rz) == 3) {
+			mosaic->cameras[i].pose_in_origin.position.x += rx / 100.0f;
+			mosaic->cameras[i].pose_in_origin.position.y += ry / 100.0f;
+			mosaic->cameras[i].pose_in_origin.position.z += rz / 100.0f;
+		}
 		PSVR2_DEBUG(hmd, "camera %zu pose position: (%f, %f, %f)", i,
 		            mosaic->cameras[i].pose_in_origin.position.x, mosaic->cameras[i].pose_in_origin.position.y,
 		            mosaic->cameras[i].pose_in_origin.position.z);
