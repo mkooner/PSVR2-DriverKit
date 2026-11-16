@@ -386,7 +386,12 @@ smooth_exposure_timestamp(struct t_led_sync_refinement *refinement,
 		tl->last_log_ns = event->timestamp_ns;
 	}
 
-	return (timepoint_ns)tl->exposure_ns;
+	/*
+	 * Only measured: the smoothed estimate lagged the real period at the start (its period gain is slow), which
+	 * showed up as a steady one-sided re-anchor drift. Drivers are expected to deliver steady timestamps (PS VR2
+	 * passes the camera's hardware cadence through), so use them as is.
+	 */
+	return event->timestamp_ns;
 }
 
 static void

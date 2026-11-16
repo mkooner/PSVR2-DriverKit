@@ -292,6 +292,13 @@ struct psvr2_hmd
 	 * ignores the USB latency spread.
 	 */
 	struct m_clock_windowed_skew_tracker *ld_clock;
+	/*!
+	 * VTS -> host offset applied to LD timestamps, slew limited toward @ref ld_clock so the camera's hardware frame
+	 * cadence (steady to 0.5us) reaches LED sync unchanged while the offset still follows real clock skew. The
+	 * tracker alone took ~15s to settle (1.5ms rms early), and LED sync ran on those timestamps.
+	 */
+	bool ld_offset_valid;
+	time_duration_ns ld_offset_ns;
 
 	/* Tracking state */
 	struct m_relation_history *slam_relation_history;

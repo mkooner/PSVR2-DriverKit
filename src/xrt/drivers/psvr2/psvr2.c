@@ -776,11 +776,20 @@ led_xfer_cb(struct libusb_transfer *xfer)
 	os_mutex_lock(&hmd->data_lock);
 	int32_t ld_vts_delta_us = (int32_t)(payload->header.timestamp - hmd->last_imu_vts_us);
 	timepoint_ns ld_vts_ns = hmd->last_imu_vts_ns + (timepoint_ns)ld_vts_delta_us * U_TIME_1US_IN_NS;
-	timepoint_ns ld_timestamp_ns = ld_vts_ns + hmd->hw2mono_vts;
+	time_duration_ns target_offset_ns = hmd->hw2mono_vts;
 	timepoint_ns ld_tracked_ns;
 	if (hmd->ld_clock != NULL && m_clock_windowed_skew_tracker_to_local(hmd->ld_clock, ld_vts_ns, &ld_tracked_ns)) {
-		ld_timestamp_ns = ld_tracked_ns;
+		target_offset_ns = ld_tracked_ns - ld_vts_ns;
 	}
+	// 2us per frame (~120ppm) covers any real clock skew, and is far below LED sync's resolution.
+	const time_duration_ns max_slew_ns = U_TIME_1US_IN_NS * 2;
+	if (!hmd->ld_offset_valid) {
+		hmd->ld_offset_ns = target_offset_ns;
+		hmd->ld_offset_valid = true;
+	} else {
+		hmd->ld_offset_ns += CLAMP(target_offset_ns - hmd->ld_offset_ns, -max_slew_ns, max_slew_ns);
+	}
+	timepoint_ns ld_timestamp_ns = ld_vts_ns + hmd->ld_offset_ns;
 	bool clock_ready = hmd->timestamp_samples >= TIMESTAMP_SAMPLES;
 	os_mutex_unlock(&hmd->data_lock);
 
