@@ -357,6 +357,9 @@ struct pssense_device
 		uint8_t vibration_mode;
 
 		uint64_t vibration_end_timestamp_ns;
+		//! The vibration the last report carried.
+		uint8_t last_sent_vibration_amplitude;
+		uint8_t last_sent_vibration_mode;
 
 		bool send_trigger_feedback;
 		enum pssense_adaptive_trigger_mode trigger_feedback_mode;
@@ -860,6 +863,8 @@ pssense_set_output_report_settings_locked(struct pssense_device *pssense,
 	if (pssense->output.send_vibration && do_vibration) {
 		settings->flag1 |= OUTPUT_SETTINGS_ENABLE_VIBRATION_BITS | pssense->output.vibration_mode;
 		settings->vibration_amplitude = pssense->output.vibration_amplitude;
+		pssense->output.last_sent_vibration_amplitude = pssense->output.vibration_amplitude;
+		pssense->output.last_sent_vibration_mode = pssense->output.vibration_mode;
 		pssense->output.send_vibration = pssense->output.vibration_amplitude > 0;
 	}
 
@@ -1060,9 +1065,19 @@ pssense_run_thread(void *ptr)
 					b.cycle_position_absolute = 0;
 					led_changed = memcmp(&a, &b, sizeof(a)) != 0;
 				}
-				bool needed = pssense->usb || now < pssense->output.pcm_active_until_ns ||
-				              pssense->output.send_vibration || pssense->output.send_trigger_feedback ||
-				              carried_led_sample || pssense->tracking.led_sync_sample_needs_marking ||
+				/*
+				 * A vibration only needs a report when it changes; send_vibration stays set for as long as
+				 * it plays, which kept both controllers at the rate cap. Waiting to mark an LED sync sample
+				 * applied needs any report (the keepalive does), not one every slot.
+				 */
+				bool vibration_changed =
+				    pssense->output.send_vibration &&
+				    (pssense->output.vibration_amplitude != pssense->output.last_sent_vibration_amplitude ||
+				     pssense->output.vibration_mode != pssense->output.last_sent_vibration_mode ||
+				     now >= (timepoint_ns)pssense->output.vibration_end_timestamp_ns);
+				bool needed = pssense->usb || now < pssense->output.pcm_active_until_ns || vibration_changed ||
+				              pssense->output.send_trigger_feedback ||
+				              carried_led_sample ||
 				              led_changed || (now - pssense->output.last_send_ns) >= PSSENSE_KEEPALIVE_NS;
 
 				/*
@@ -1191,6 +1206,18 @@ pssense_get_imu_fusion_pose(struct pssense_device *pssense,
 	if (!pssense_host_ts_to_device(pssense, at_timestamp_ns, &device_ts)) {
 		(*out_relation) = (struct xrt_space_relation){0};
 		return;
+	}
+
+	/*
+	 * Don't extrapolate the orientation far past the newest IMU sample: with the host -> controller clock off,
+	 * or reports arriving late over Bluetooth, the history predicted the last angular velocity for hundreds of
+	 * milliseconds, and the controller spun.
+	 */
+	int64_t latest_ns = 0;
+	struct xrt_space_relation latest_rel;
+	if (m_relation_history_get_latest(pssense->tracking.imu_relation_history, &latest_ns, &latest_rel) &&
+	    device_ts > latest_ns + (int64_t)U_TIME_1MS_IN_NS * 30) {
+		device_ts = latest_ns + (int64_t)U_TIME_1MS_IN_NS * 30;
 	}
 
 	m_relation_history_get(pssense->tracking.imu_relation_history, device_ts, out_relation);
@@ -2389,7 +2416,19 @@ pssense_create(struct xrt_prober *xp,
 		PSSENSE_ERROR(pssense, "PC polling rate requested, but got error when attempting to apply.");
 	}
 
-	if (!pssense_get_calibration_data(pssense)) {
+	/*
+	 * Over Bluetooth the feature read can fail transiently (-1 on hardware, for one controller, while both were
+	 * connecting), which dropped that controller for the whole session. Retry for a few seconds first.
+	 */
+	bool got_calibration = false;
+	for (int attempt = 0; attempt < 15 && !got_calibration; attempt++) {
+		if (attempt > 0) {
+			PSSENSE_WARN(pssense, "Retrying calibration read (attempt %d)", attempt + 1);
+			os_nanosleep(U_TIME_1MS_IN_NS * 200);
+		}
+		got_calibration = pssense_get_calibration_data(pssense);
+	}
+	if (!got_calibration) {
 		PSSENSE_ERROR(pssense, "Failed to retrieve calibration data");
 		pssense_device_destroy(&pssense->base);
 		return NULL;
