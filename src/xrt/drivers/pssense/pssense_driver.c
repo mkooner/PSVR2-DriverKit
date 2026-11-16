@@ -85,6 +85,18 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR
 //! With nothing new to send, output reports still go out this often (~30Hz) as a keepalive.
 #define PSSENSE_KEEPALIVE_NS (U_TIME_1MS_IN_NS * 33)
 
+/*
+ * Bluetooth output report rate cap, per controller, when no PCM haptics are playing. Each report is a full PS5 format
+ * report, and sending them as fast as the loop runs (~94Hz, e.g. while an LED sync sample waits to be marked as
+ * applied) overflowed bluetoothd's socket ("BT socket write error: Resource temporarily unavailable (11)"), right
+ * before the controller dropped off Bluetooth. Sony's driver and PSVR2Toolkit throttle the same way, skipping sends
+ * while earlier ones are still queued. Anything pending (LED sync sample, vibration, LED settings) goes out in the next
+ * allowed report. 0 disables the cap.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(pssense_bt_min_send_interval_ms, "PSSENSE_BT_MIN_SEND_INTERVAL_MS", 20)
+//! How long to stop sending after a failed output report, to let the Bluetooth link drain.
+#define PSSENSE_SEND_FAIL_BACKOFF_NS (U_TIME_1MS_IN_NS * 100)
+
 /*!
  * Indices where each input is in the input list.
  */
@@ -298,6 +310,15 @@ struct pssense_device
 		//! When the last output report went out, and the LED settings it carried.
 		timepoint_ns last_send_ns;
 		struct pssense_led_settings last_sent_led_settings;
+		//! No sends before this, set after a failed send.
+		timepoint_ns backoff_until_ns;
+		//! Send stats, logged every few seconds: reports sent/failed, sends held by the rate cap, and why
+		//! reports were sent.
+		struct
+		{
+			uint32_t sent, failed, held, led_sample, marking, keepalive, haptics, led_changed;
+			timepoint_ns last_log_ns;
+		} stats;
 
 		bool send_vibration;
 		uint8_t vibration_amplitude;
@@ -963,13 +984,46 @@ pssense_run_thread(void *ptr)
 				              carried_led_sample || pssense->tracking.led_sync_sample_needs_marking ||
 				              led_changed || (now - pssense->output.last_send_ns) >= PSSENSE_KEEPALIVE_NS;
 
+				/*
+				 * Rate cap for Bluetooth: PCM haptics need the full rate, everything else waits for the
+				 * next allowed slot (the pending flags stay set, so nothing is lost, only merged).
+				 */
+				const time_duration_ns min_interval_ns =
+				    (time_duration_ns)debug_get_num_option_pssense_bt_min_send_interval_ms() *
+				    U_TIME_1MS_IN_NS;
+				bool pcm_active = now < pssense->output.pcm_active_until_ns;
+				bool rate_ok = pssense->usb ||
+				               (now >= pssense->output.backoff_until_ns &&
+				                (pcm_active || now - pssense->output.last_send_ns >= min_interval_ns));
+				if (needed && !rate_ok) {
+					pssense->output.stats.held++;
+					needed = false;
+				}
+				if (needed) {
+					pssense->output.stats.led_sample += carried_led_sample ? 1 : 0;
+					pssense->output.stats.marking +=
+					    pssense->tracking.led_sync_sample_needs_marking ? 1 : 0;
+					pssense->output.stats.haptics += (pcm_active || pssense->output.send_vibration ||
+					                                  pssense->output.send_trigger_feedback)
+					                                     ? 1
+					                                     : 0;
+					pssense->output.stats.led_changed += led_changed ? 1 : 0;
+					pssense->output.stats.keepalive +=
+					    (now - pssense->output.last_send_ns) >= PSSENSE_KEEPALIVE_NS ? 1 : 0;
+				}
+
 				int send_result = 0;
 				if (needed) {
 					send_result = pssense_send_output_report_locked(pssense);
 					if (send_result >= 0) {
+						pssense->output.stats.sent++;
 						pssense->output.last_send_ns = now;
 						pssense->output.last_sent_led_settings = pssense->tracking.led_settings;
-					} else if (carried_led_sample) {
+					} else {
+						pssense->output.stats.failed++;
+						pssense->output.backoff_until_ns = now + PSSENSE_SEND_FAIL_BACKOFF_NS;
+					}
+					if (send_result < 0 && carried_led_sample) {
 						// The LED sync sample in this report never reached the controller, send it
 						// again rather than letting it be marked as applied.
 						pssense->tracking.led_sync_sample_needs_marking = false;
@@ -990,6 +1044,23 @@ pssense_run_thread(void *ptr)
 						              failed_sends);
 					}
 					failed_sends = 0;
+				}
+
+				if (now - pssense->output.stats.last_log_ns >= U_TIME_1S_IN_NS * 5) {
+					double secs = (double)(now - pssense->output.stats.last_log_ns) / U_TIME_1S_IN_NS;
+					if (pssense->output.stats.last_log_ns != 0) {
+						PSSENSE_DEBUG(pssense,
+						              "Send stats: %.1f reports/s, %u sent, %u failed, %u held by the rate "
+						              "cap; reasons: LED sample %u, marking %u, keepalive %u, haptics %u, "
+						              "LED settings %u",
+						              pssense->output.stats.sent / secs, pssense->output.stats.sent,
+						              pssense->output.stats.failed, pssense->output.stats.held,
+						              pssense->output.stats.led_sample, pssense->output.stats.marking,
+						              pssense->output.stats.keepalive, pssense->output.stats.haptics,
+						              pssense->output.stats.led_changed);
+					}
+					memset(&pssense->output.stats, 0, sizeof(pssense->output.stats));
+					pssense->output.stats.last_log_ns = now;
 				}
 
 				next_output_ns = next_output_ns + pcm_haptics_period_ns;
