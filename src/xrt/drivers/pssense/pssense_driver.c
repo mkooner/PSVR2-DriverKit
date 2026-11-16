@@ -189,6 +189,8 @@ struct pssense_device
 	bool usb;
 	struct h_hid_device *hid;
 	struct os_thread_helper controller_thread;
+	//! The read thread stopped on an error (controller disconnected or turned off), protected by controller_thread.
+	bool disconnected;
 
 	struct
 	{
@@ -1011,6 +1013,16 @@ pssense_run_thread(void *ptr)
 		}
 
 		os_thread_helper_lock(&pssense->controller_thread);
+	}
+
+	if (result < 0) {
+		/*
+		 * No more input will arrive, so the last pose can't be updated. Without this the stale fusion state
+		 * kept being predicted forward with its last angular velocity, a controller spinning in place.
+		 */
+		pssense->disconnected = true;
+		PSSENSE_ERROR(pssense, "Controller disconnected (read thread stopped: %d), reporting it untracked",
+		              result);
 	}
 
 	os_thread_helper_unlock(&pssense->controller_thread);
@@ -1852,12 +1864,20 @@ pssense_get_tracked_pose(struct xrt_device *xdev,
 	struct xrt_space_relation *rel = m_relation_chain_reserve(&xrc);
 
 	os_thread_helper_lock(&pssense->controller_thread);
-	if (pssense->tracking.use_constellation) {
+	bool disconnected = pssense->disconnected;
+	if (disconnected) {
+		*rel = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
+	} else if (pssense->tracking.use_constellation) {
 		pssense_get_constellation_pose(pssense, at_timestamp_ns, rel);
 	} else {
 		pssense_get_imu_fusion_pose(pssense, at_timestamp_ns, rel);
 	}
 	os_thread_helper_unlock(&pssense->controller_thread);
+
+	if (disconnected) {
+		*out_relation = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
+		return XRT_SUCCESS;
+	}
 
 	m_relation_chain_resolve(&xrc, out_relation);
 
