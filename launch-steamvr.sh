@@ -172,6 +172,11 @@ fi
 if [ "${ROOM_FORGET:-0}" = 1 ]; then
 	rm -f "$HOME/.config/monado/ovrd_room.json" && echo "  ROOM_FORGET=1: deleted the saved room anchor"
 fi
+# RECORD_SLAM=1: record every raw SLAM record from the headset (for finding its tracking-lost state)
+if [ "${RECORD_SLAM:-0}" = 1 ]; then
+	export PSVR2_RECORD_SLAM_RAW="$LOGDIR/slamraw-$STAMP.pv2c"
+	echo "  RECORD_SLAM=1: raw SLAM records to $PSVR2_RECORD_SLAM_RAW"
+fi
 # HAND_TRACKING=1: optical hand tracking from the bottom cameras (Mercury). Hands appear as Index-style controllers
 # with skeletons when the Sense controllers are off (turn them off first); pinch = trigger. Right hand only so far.
 if [ "${HAND_TRACKING:-0}" = 1 ]; then
