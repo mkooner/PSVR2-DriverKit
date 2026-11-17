@@ -16,3 +16,8 @@ hands/detect_probe
 hands/rectify_probe
 ctreplay/ct_replay
 clock/clock_sim
+clock/ld_settle_sim
+imu/refuse
+imu/*.o
+ledsync/calib_sim
+ledsync/*.o

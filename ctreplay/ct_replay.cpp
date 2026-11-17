@@ -38,6 +38,10 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <atomic>
+extern "C" {
+#include "t_blob_background.h"
+}
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -128,6 +132,22 @@ struct ReplayDevice
 	std::mutex lock; // the tracker's camera threads report concurrently in --realtime
 	std::vector<Fix> fixes;
 };
+
+/*!
+ * --synced-from-live: the recordings don't store the live LED sync state, so a device counts as synced while the live
+ * tracker matched any of its LEDs in the last second (g_live_seen_ns, filled as frames are fed).
+ */
+static bool g_synced_from_live = false;
+static std::atomic<int64_t> g_live_seen_ns[XRT_CONSTELLATION_MAX_DEVICES];
+static std::atomic<int64_t> g_feed_ns{0};
+
+bool
+device_led_synced(t_constellation_tracker_device *dev)
+{
+	auto *d = (ReplayDevice *)dev;
+	int64_t seen = g_live_seen_ns[d->index % XRT_CONSTELLATION_MAX_DEVICES].load();
+	return seen != 0 && g_feed_ns.load() - seen < 1000000000LL;
+}
 
 void
 device_push_sample(t_constellation_tracker_device *dev, t_constellation_tracker_sample *sample)
@@ -230,16 +250,39 @@ main(int argc, char **argv)
 	double max_seconds = 1e9;
 	bool realtime = false;
 	bool gate_lag = false; // --gate-imu-lag: the IMU gates see the same lagged IMU as the fusion (live) // --realtime: the tracker's own threads, frames fed at the recorded pace (live timing)
+	const char *head_rot_record = nullptr;
+	// --background: drop background blobs with the background map (t_blob_background) before the tracker.
+	t_blob_background *bg_map = nullptr;
+	uint64_t bg_blobs_in = 0, bg_blobs_out = 0, bg_removed = 0, bg_led_removed = 0, bg_live_leds = 0;
+	std::vector<double> bg_us;
+	bool bg_only = false;
+	xrt_quat head_rot = XRT_QUAT_IDENTITY;
 	int64_t imu_lag_ns = 0; // --imu-lag-ms: IMU samples reach the tracker this much after their timestamp (Bluetooth)
 	for (int i = 5; i < argc; i++) {
 		if (!strcmp(argv[i], "--max-seconds"))
 			max_seconds = atof(argv[i + 1]);
+		else if (!strcmp(argv[i], "--synced-from-live"))
+			g_synced_from_live = true;
+		else if (!strcmp(argv[i], "--background"))
+			bg_map = t_blob_background_create();
+		else if (!strcmp(argv[i], "--bg-only")) {
+			// Background map statistics only, no tracking (fast, for tuning).
+			bg_map = t_blob_background_create();
+			bg_only = true;
+		}
 		else if (!strcmp(argv[i], "--realtime"))
 			realtime = true;
 		else if (!strcmp(argv[i], "--gate-imu-lag"))
 			gate_lag = true;
 		else if (!strcmp(argv[i], "--imu-lag-ms"))
 			imu_lag_ns = (int64_t)(atof(argv[i + 1]) * 1e6);
+		else if (!strcmp(argv[i], "--head-rot") && i + 2 < argc) {
+			// --head-rot <record.csv> qx,qy,qz,qw: test a camera mount change, every camera pose becomes
+			// head * E * head^-1 * recorded (E in the head frame, head poses from the record file's O lines).
+			head_rot_record = argv[i + 1];
+			sscanf(argv[i + 2], "%f,%f,%f,%f", &head_rot.x, &head_rot.y, &head_rot.z, &head_rot.w);
+			math_quat_normalize(&head_rot);
+		}
 	}
 
 	if (gate_lag)
@@ -255,6 +298,41 @@ main(int argc, char **argv)
 		return a.timestamp_ns < b.timestamp_ns;
 	});
 	const size_t ncam = reader.mosaics[0].camera_calibrations.size();
+
+	if (head_rot_record != nullptr) {
+		std::map<int64_t, xrt_pose> head;
+		FILE *rf = fopen(head_rot_record, "r");
+		char line[512];
+		while (rf && fgets(line, sizeof(line), rf)) {
+			long long t;
+			xrt_pose p;
+			if (sscanf(line, "O,%lld,%f,%f,%f,%f,%f,%f,%f", &t, &p.position.x, &p.position.y, &p.position.z,
+			           &p.orientation.x, &p.orientation.y, &p.orientation.z, &p.orientation.w) == 8)
+				head[t] = p;
+		}
+		if (rf)
+			fclose(rf);
+		size_t changed = 0, dropped = 0;
+		xrt_pose E = {head_rot, {0, 0, 0}};
+		for (auto &s : samples) {
+			if (!s.Txr_world_cam.has_value())
+				continue;
+			auto it = head.find(s.timestamp_ns);
+			if (it == head.end()) {
+				s.Txr_world_cam.reset();
+				dropped++;
+				continue;
+			}
+			xrt_pose hinv, a, b, c;
+			math_pose_invert(&it->second, &hinv);
+			math_pose_transform(&hinv, &*s.Txr_world_cam, &a); // camera in head
+			math_pose_transform(&E, &a, &b);
+			math_pose_transform(&it->second, &b, &c);
+			*s.Txr_world_cam = c;
+			changed++;
+		}
+		printf("--head-rot: %zu camera poses changed, %zu without a head pose dropped\n", changed, dropped);
+	}
 
 	// Camera poses in camera 0's frame, from a frame where every camera has a recorded pose.
 	std::vector<xrt_pose> pose_in_origin(ncam, (xrt_pose)XRT_POSE_IDENTITY);
@@ -278,6 +356,34 @@ main(int argc, char **argv)
 			fprintf(stderr, "no frame with all camera poses\n");
 			return 1;
 		}
+	}
+	if (getenv("CT_REPLAY_DUMP_BLOBS")) {
+		// Every blob: camera, frame time, blob id, distorted centre, size, for background audits.
+		for (auto &s : samples)
+			for (uint32_t i = 0; i < s.blob_count; i++) {
+				const t_blob &b = s.blobs[i];
+				printf("BLOB,%u,%lld,%u,%.1f,%.1f,%.2f,%.2f,%.1f,%d,%.5f,%.5f\n", s.camera_index,
+				       (long long)s.timestamp_ns, b.blob_id, b.center_distorted.x, b.center_distorted.y, b.size.x,
+				       b.size.y, b.brightness, (int)b.matched_device_id, b.center_homogenized.x,
+				       b.center_homogenized.y);
+			}
+		return 0;
+	}
+	if (getenv("CT_REPLAY_DUMP_BLOB_COUNTS")) {
+		// Per camera frame: time and blob count, for startup timelines (LED sync calibration shows as on/off counts).
+		for (auto &s : samples)
+			printf("BLOBS,%u,%lld,%u\n", s.camera_index, (long long)s.timestamp_ns, (unsigned)s.blob_count);
+		return 0;
+	}
+	if (getenv("CT_REPLAY_DUMP_CAM_POSES")) {
+		// Recorded camera world poses, to recover each camera's mount against the record file's head poses.
+		for (auto &s : samples)
+			if (s.Txr_world_cam.has_value())
+				printf("CAMPOSE,%u,%lld,%.6f,%.6f,%.6f,%.7f,%.7f,%.7f,%.7f\n", s.camera_index, (long long)s.timestamp_ns,
+				       s.Txr_world_cam->position.x, s.Txr_world_cam->position.y, s.Txr_world_cam->position.z,
+				       s.Txr_world_cam->orientation.x, s.Txr_world_cam->orientation.y,
+				       s.Txr_world_cam->orientation.z, s.Txr_world_cam->orientation.w);
+		return 0;
 	}
 	OriginSource origin;
 	origin.base.get_tracked_pose = origin_get;
@@ -404,6 +510,8 @@ main(int argc, char **argv)
 		d->imu = &imu[std::min<int>(d->index, 1)];
 		d->base.push_constellation_tracker_sample = device_push_sample;
 		d->base.get_imu_orientation = device_imu_orientation;
+		if (g_synced_from_live)
+			d->base.is_led_synced = device_led_synced;
 		t_constellation_tracker_device_params dp = {};
 		dp.led_model = dd.led_model;
 		/*
@@ -460,6 +568,10 @@ main(int argc, char **argv)
 			}
 		}
 		blobs.assign(s.blobs, s.blobs + s.blob_count);
+		// Live tracker's labels, before the replay's own replace them (to check no controller LED is dropped).
+		std::vector<bool> live_led(blobs.size());
+		for (size_t i = 0; i < blobs.size(); i++)
+			live_led[i] = blobs[i].matched_device_id != XRT_CONSTELLATION_INVALID_DEVICE_ID;
 		std::unique_lock<std::mutex> label_lock(bw.lock);
 		auto &cam_labels = bw.labels[s.camera_index];
 		for (auto &b : blobs) {
@@ -475,6 +587,34 @@ main(int argc, char **argv)
 			}
 		}
 		label_lock.unlock();
+		bg_blobs_in += blobs.size();
+		if (bg_map != nullptr && s.Txr_world_cam.has_value()) {
+			std::vector<uint8_t> is_bg(blobs.size() + 1);
+			int64_t q0 = os_monotonic_get_ns();
+			t_blob_background_process(bg_map, s.camera_index, s.timestamp_ns, &s.Txr_world_cam->orientation,
+			                          blobs.data(), (uint32_t)blobs.size(), (bool *)is_bg.data());
+			bg_us.push_back((os_monotonic_get_ns() - q0) / 1000.0);
+			size_t w = 0;
+			for (size_t i = 0; i < blobs.size(); i++) {
+				if (is_bg[i]) {
+					bg_removed++;
+					bg_led_removed += live_led[i] ? 1 : 0;
+					continue;
+				}
+				blobs[w++] = blobs[i];
+			}
+			blobs.resize(w);
+		}
+		bg_live_leds += std::count(live_led.begin(), live_led.end(), true);
+		g_feed_ns = s.timestamp_ns;
+		for (const auto &b : std::vector<t_blob>(s.blobs, s.blobs + s.blob_count))
+			if (b.matched_device_id >= 0 && b.matched_device_id < XRT_CONSTELLATION_MAX_DEVICES)
+				g_live_seen_ns[b.matched_device_id] = s.timestamp_ns;
+		bg_blobs_out += blobs.size();
+		if (bg_only) {
+			frames++;
+			continue;
+		}
 		t_blob_observation tbo = {};
 		tbo.source = &bw.base;
 		tbo.id = s.camera_index;
@@ -491,6 +631,19 @@ main(int argc, char **argv)
 
 	if (realtime)
 		os_nanosleep(500 * U_TIME_1MS_IN_NS); // let the threads finish the last frames
+	{
+		double bg_mean = 0, bg_max = 0;
+		for (double v : bg_us) {
+			bg_mean += v;
+			bg_max = std::max(bg_max, v);
+		}
+		printf("blobs to the tracker: %.1f per camera frame of %.1f (%s); live controller LED blobs dropped: %llu of %llu "
+		       "(%.2f%%); background map %.1f us per frame (max %.0f)\n",
+		       frames ? (double)bg_blobs_out / frames : 0.0, frames ? (double)bg_blobs_in / frames : 0.0,
+		       bg_map ? "background map on" : "off", (unsigned long long)bg_led_removed,
+		       (unsigned long long)bg_live_leds, bg_live_leds ? 100.0 * bg_led_removed / bg_live_leds : 0.0,
+		       bg_us.empty() ? 0.0 : bg_mean / bg_us.size(), bg_max);
+	}
 	for (auto *d : devs)
 		d->lock.lock(); // no more fixes while reporting (released by _exit)
 
