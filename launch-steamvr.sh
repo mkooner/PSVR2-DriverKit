@@ -172,6 +172,19 @@ fi
 if [ "${ROOM_FORGET:-0}" = 1 ]; then
 	rm -f "$HOME/.config/monado/ovrd_room.json" && echo "  ROOM_FORGET=1: deleted the saved room anchor"
 fi
+# HAND_TRACKING=1: optical hand tracking from the bottom cameras (Mercury). Hands appear as Index-style controllers
+# with skeletons when the Sense controllers are off (turn them off first); pinch = trigger. Right hand only so far.
+if [ "${HAND_TRACKING:-0}" = 1 ]; then
+	export PSVR2_HAND_TRACKING=1
+	echo "  HAND_TRACKING=1: bottom camera hand tracking on (Sense controllers off to use hands)"
+fi
+# RECORD_CAMERA=1: record the bottom camera pair continuously (30/s, ~30 MB/s) for the offline hand tracking prototype
+# (hands/hand_replay). RECORD_CAMERA_HZ changes the rate.
+if [ "${RECORD_CAMERA:-0}" = 1 ]; then
+	export PSVR2_RECORD_CAMERA="$LOGDIR/camera-$STAMP.pv2c"
+	export PSVR2_RECORD_CAMERA_HZ="${RECORD_CAMERA_HZ:-30}"
+	echo "  RECORD_CAMERA=1: camera transfers to $PSVR2_RECORD_CAMERA at up to ${PSVR2_RECORD_CAMERA_HZ}/s"
+fi
 # RECORD_IMAGES=1: save a pair of bottom camera images every 2 s (to judge a room relocalizer, ~1 MB each).
 if [ "${RECORD_IMAGES:-0}" = 1 ]; then
 	export PSVR2_RECORD_IMAGES="$LOGDIR/images-$STAMP"

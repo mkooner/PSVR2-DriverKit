@@ -9,3 +9,8 @@ analysis/harness/outline
 pose-sim/steamvr_sim
 pose-sim/carry_replay
 tools/vrposelog
+hands/hand_replay
+hands/*.o
+hands/driver_ht_replay
+hands/detect_probe
+hands/rectify_probe
