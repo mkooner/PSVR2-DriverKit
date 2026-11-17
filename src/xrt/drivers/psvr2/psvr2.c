@@ -89,6 +89,12 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_pos_tau, "PSVR2_POSE_POS_TAU", 0.03f)
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_floor_height, "PSVR2_FLOOR_HEIGHT", 1.6f)
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_recenter, "PSVR2_RECENTER", true)
+//! Carry the head position across mid-session SLAM resets (PSVR2_SLAM_CARRY=0 for the previous behaviour).
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_slam_carry, "PSVR2_SLAM_CARRY", true)
+//! Head position correction blend time (ms, 0 steps at each SLAM update), see pos_blend_ns.
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_blend_ms, "PSVR2_POSE_BLEND_MS", 17.0f)
+//! Head point distance in front of the neck pivot for the pose filter (metres, 0 disables), see pivot_offset.
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_head_pivot_m, "PSVR2_HEAD_PIVOT_M", 0.10f)
 /*
  * Tracking camera exposure time reported to LED sync, which centres the LED blink on exposure/2 (BG included).
  * Measured on hardware from the LED visibility edges found by the basic LED sync: 841us. Earlier, 0 centred the
@@ -627,7 +633,6 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	os_mutex_lock(&hmd->data_lock);
 
 	const struct xrt_quat old_pose_orientation = hmd->last_slam_pose.orientation;
-	const struct xrt_vec3 old_pose_position = hmd->last_slam_pose.position;
 
 	uint32_t last_slam_vts_us = hmd->last_slam_vts_us;
 	hmd->last_slam_vts_us = __le32_to_cpu(slam.vts_ts_us);
@@ -644,19 +649,30 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	hmd->last_slam_pose.orientation.z = __lef32_to_cpu(slam.orient[3]);
 
 	/*
-	 * SLAM reset: the raw position snaps back to the origin (within 1 mm, from at least 5 mm away; orientation
-	 * carries on). In recordings this happens in bursts during the first ~15 s and, with older builds, mid-session.
-	 * Carrying the position on across it was simulated (psvr2-test/analysis/slam_rebase_sim.py) and didn't help, so
-	 * it's only counted, for the SteamVR room calibration to know the world was replaced.
+	 * SLAM reset: the headset's SLAM re-originates its position, jumping back to (nearly) where this session's
+	 * tracking started; the orientation carries on. Detected as a step of at least 5 cm landing within 1 cm of
+	 * the origin (while walking the first sample after it has already moved a few mm, 18:11 run).
+	 *
+	 * After the first 20 s (SLAM settles with bursts of resets, carrying those over left offsets of up to 1.7 m in
+	 * replay) and at least 1 s after the previous reset (reset loops are drift, carrying them builds it up), the
+	 * position is carried over: an offset makes it continue from where the head was heading, so games and the
+	 * controllers (placed from the head pose) don't see the jump. Simulated on 8 recordings
+	 * (psvr2-test/analysis/slam_rebase_sim.py): the 18:11 run's largest jump 36 -> 6 cm, 03:02's 18.5 -> 1 cm,
+	 * no change where there were no mid-session resets. Resets not carried over replace the tracking world, which the
+	 * SteamVR room calibration has to know (psvr2_get_slam_reset_count).
 	 */
 	{
-		const struct xrt_vec3 *now_pos = &hmd->last_slam_pose.position;
-		float now_len = m_vec3_len(*now_pos);
-		float old_len = m_vec3_len(old_pose_position);
-		if (now_len < 0.001f && old_len > 0.005f) {
-			hmd->slam_reset_count++;
-			PSVR2_DEBUG(hmd, "SLAM reset %u: position snapped back to the origin from %.3f m", hmd->slam_reset_count,
-			            old_len);
+		enum psvr2_slam_carry_event event;
+		float jump_m;
+		hmd->last_slam_pose.position =
+		    psvr2_slam_carry_push(&hmd->slam_carry, vts_ns, &hmd->last_slam_pose.position, &event, &jump_m);
+		if (event != PSVR2_SLAM_CARRY_NONE) {
+			static const char *what[] = {
+			    "", "position carried over", "position carried over (reset loop, the room is dropped)",
+			    "not carried (PSVR2_SLAM_CARRY=0), tracking world replaced",
+			    "not carried (SLAM still settling), tracking world replaced"};
+			PSVR2_INFO(hmd, "SLAM reset (%.3f m jump, %.1f s in): %s", jump_m,
+			           time_ns_to_s(vts_ns - hmd->slam_carry.first_ts), what[event]);
 		}
 	}
 
@@ -1747,6 +1763,7 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	hmd->base.tracking_origin->initial_offset = (struct xrt_pose)XRT_POSE_IDENTITY;
 	hmd->base.tracking_origin->initial_offset.position.y = debug_get_float_option_psvr2_floor_height();
 	hmd->recenter_enabled = debug_get_bool_option_psvr2_recenter();
+	psvr2_slam_carry_init(&hmd->slam_carry, debug_get_bool_option_psvr2_slam_carry());
 
 	if (os_mutex_init(&hmd->data_lock) != 0) {
 		PSVR2_ERROR(hmd, "Failed to init data mutex!");
@@ -1796,6 +1813,8 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	psvr2_pose_filter_default_params(&pose_filter_params);
 	pose_filter_params.orient_tau_s = debug_get_float_option_psvr2_pose_orient_tau();
 	pose_filter_params.pos_tau_s = debug_get_float_option_psvr2_pose_pos_tau();
+	pose_filter_params.pivot_offset.z = -debug_get_float_option_psvr2_head_pivot_m();
+	pose_filter_params.pos_blend_ns = (time_duration_ns)(debug_get_float_option_psvr2_pose_blend_ms() * U_TIME_1MS_IN_NS);
 	psvr2_pose_filter_init(&hmd->pose_filter, &pose_filter_params);
 	// ~2s of IMU samples (2kHz)
 	hmd->ld_clock = m_clock_windowed_skew_tracker_alloc(4096);
@@ -1991,7 +2010,7 @@ psvr2_get_slam_reset_count(struct xrt_device *xdev)
 {
 	struct psvr2_hmd *hmd = psvr2_hmd(xdev);
 	os_mutex_lock(&hmd->data_lock);
-	uint32_t count = hmd->slam_reset_count;
+	uint32_t count = hmd->slam_carry.world_changes;
 	os_mutex_unlock(&hmd->data_lock);
 	return count;
 }

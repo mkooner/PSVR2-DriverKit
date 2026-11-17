@@ -87,6 +87,11 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_max_prediction_ms, "PSSENSE_MAX_PREDICTION_MS"
  * constant velocity while the optical fixes stayed at the hands, flagged as tracked throughout. 0 disables.
  */
 DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR_CM", 20)
+/*!
+ * Record each controller's IMU to <this>-L.csv / <this>-R.csv (rows: host_ns, imu_ns, gyro xyz rad/s, accel xyz m/s2,
+ * IMU orientation xyzw), to test bridging optical gaps with the accelerometer offline. Off when unset.
+ */
+DEBUG_GET_ONCE_OPTION(pssense_record_file, "PSSENSE_RECORD_FILE", NULL)
 
 //! With nothing new to send, output reports still go out this often (~30Hz) as a keepalive.
 /*
@@ -111,9 +116,20 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR
 #define PSSENSE_ALIGN_STALE_NS (U_TIME_1S_IN_NS)
 
 //! Display smoothing around optical loss/return, see pssense_tracking::last_tracked_vel.
-#define PSSENSE_SMOOTH_COAST_TAU_S 0.08f
+/*
+ * Coast through a lost optical fix on the last tracked velocity, decaying with this time constant. 150 ms: replayed
+ * on 189 optical gaps from 4 runs (psvr2-test/analysis/jitter/ctrl_gap_coast.py), the reappearance jump for 150-300 ms
+ * gaps fell from 7.6 to 6.3 cm median (under 1 m/s) and 12.4 to 10.5 cm (1-2 m/s) against the previous 80 ms; longer
+ * coasting overshot on gaps over 300 ms (hands turn around).
+ */
+#define PSSENSE_SMOOTH_COAST_TAU_S 0.15f
 #define PSSENSE_SMOOTH_BLEND_TAU_S 0.12f
-#define PSSENSE_SMOOTH_MAX_SPEED_M_S 2.0f
+/*
+ * Faster than this the tracked velocity is taken as a glitch and not coasted on. Was 2 m/s, which zeroed the coast
+ * exactly in fast swings, where optical fixes drop out most (gyro gate rejections at 2.4/s above 250 deg/s, 19:17 run),
+ * so the controller froze; hands don't reach 6 m/s.
+ */
+#define PSSENSE_SMOOTH_MAX_SPEED_M_S 6.0f
 
 /*
  * Bluetooth output report rate cap, per controller, when no PCM haptics are playing. Each report is a full PS5 format
@@ -235,6 +251,9 @@ struct pssense_device
 	bool usb;
 	struct h_hid_device *hid;
 	struct os_thread_helper controller_thread;
+
+	//! PSSENSE_RECORD_FILE: this controller's IMU recording, or NULL.
+	FILE *record_file;
 	//! The read thread stopped on an error (controller disconnected or turned off), protected by controller_thread.
 	bool disconnected;
 
@@ -716,11 +735,34 @@ pssense_update_fusion(struct pssense_device *pssense)
 	m_imu_3dof_update(&pssense->tracking.fusion, pssense->timing.latest_imu_time_ns, &accel, &gyro);
 	pssense->tracking.pose.orientation = pssense->tracking.fusion.rot;
 
+	if (pssense->record_file != NULL) {
+		timepoint_ns host_ns = 0;
+		if (pssense_imu_ts_to_host(pssense, pssense->timing.latest_imu_time_ns, &host_ns)) {
+			const struct xrt_quat *q = &pssense->tracking.fusion.rot;
+			fprintf(pssense->record_file,
+			        "%" PRId64 ",%" PRId64 ",%.6f,%.6f,%.6f,%.5f,%.5f,%.5f,%.7f,%.7f,%.7f,%.7f\n", (int64_t)host_ns,
+			        (int64_t)pssense->timing.latest_imu_time_ns, gyro.x, gyro.y, gyro.z, accel.x, accel.y,
+			        accel.z, q->x, q->y, q->z, q->w);
+		}
+	}
+
+	/*
+	 * xrt_space_relation angular velocity is in the base (world) frame: m_relation_history_get extrapolates past the
+	 * newest sample with m_predict_relation, which turns it into the body frame, and the display path and SteamVR
+	 * read it as world too. The body-frame gyro stored here before was rotated about the wrong axis whenever a camera
+	 * frame was newer than the newest IMU sample (Bluetooth delivers IMU ~16 ms late): replayed on the 19:27 run's
+	 * IMU recording, a lookup 15 ms past the data at 300-600 deg/s was off 6.0 deg median (8.7 p90), 0.6 (1.0)
+	 * with the world-frame rate (psvr2-test/analysis/jitter/ctrl_imu_extrap.py), feeding the gyro and gravity gates
+	 * that rejected good optical fixes during fast swings.
+	 */
+	struct xrt_vec3 angular_velocity_world;
+	math_quat_rotate_vec3(&pssense->tracking.pose.orientation, &gyro, &angular_velocity_world);
+
 	struct xrt_space_relation space_relation = {
 	    .pose = pssense->tracking.pose,
 	    .relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
 	                      XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT,
-	    .angular_velocity = gyro,
+	    .angular_velocity = angular_velocity_world,
 	};
 	m_relation_history_push(pssense->tracking.imu_relation_history, &space_relation,
 	                        pssense->timing.latest_imu_time_ns);
@@ -1859,6 +1901,10 @@ pssense_node_destroy(struct xrt_frame_node *node)
 	}
 
 	m_imu_3dof_close(&pssense->tracking.fusion);
+	if (pssense->record_file != NULL) {
+		fclose(pssense->record_file);
+		pssense->record_file = NULL;
+	}
 
 	if (pssense->hid != NULL) {
 		h_hid_destroy(pssense->hid);
@@ -2709,6 +2755,19 @@ pssense_create(struct xrt_prober *xp,
 		PSSENSE_ERROR(pssense, "Unable to determine controller type");
 		pssense_device_destroy(&pssense->base);
 		return NULL;
+	}
+
+	const char *record = debug_get_option_pssense_record_file();
+	if (record != NULL) {
+		char path[1024];
+		snprintf(path, sizeof(path), "%s-%s.csv", record, pssense->hand == XRT_HAND_LEFT ? "L" : "R");
+		pssense->record_file = fopen(path, "w");
+		if (pssense->record_file != NULL) {
+			fprintf(pssense->record_file, "# host_ns,imu_ns,gx,gy,gz,ax,ay,az,qx,qy,qz,qw\n");
+			PSSENSE_DEBUG(pssense, "Recording the IMU to %s", path);
+		} else {
+			PSSENSE_WARN(pssense, "PSSENSE_RECORD_FILE: can't write %s", path);
+		}
 	}
 
 	pssense->led_model.leds =

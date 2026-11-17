@@ -39,8 +39,9 @@ struct xrt_device *
 psvr2_hmd_create(struct xrt_prober_device *xpdev);
 
 /*!
- * How many times the headset's SLAM has re-originated its position this session (the tracking world's origin was
- * replaced). @p xdev must be a PS VR2 headset (XRT_DEVICE_PSVR2).
+ * How many times this session the headset's SLAM re-originated its position without the driver carrying the position
+ * over (during startup or in a reset loop), i.e. the tracking world's origin was replaced. @p xdev must be a PS VR2
+ * headset (XRT_DEVICE_PSVR2).
  *
  * @ingroup drv_psvr2
  */

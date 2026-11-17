@@ -52,6 +52,23 @@ struct psvr2_pose_filter_params
 	time_duration_ns pos_reset_gap_ns;
 	//! Never extrapolate further than this past the latest data.
 	time_duration_ns max_extrapolation_ns;
+	/*!
+	 * Offset from a pivot (the neck) to the tracked head point, in the head frame (metres). Position is filtered as
+	 * the pivot (SLAM position - R * pivot_offset), which moves slowly, and R(t) * pivot_offset is added back from
+	 * the 2 kHz orientation, so head turns move the position at the gyro rate instead of in 60 Hz SLAM steps. Zero
+	 * disables it.
+	 */
+	struct xrt_vec3 pivot_offset;
+	/*!
+	 * A SLAM position further than pos_snap_m from the prediction is only taken if the next one agrees with it
+	 * (within 3 cm, allowing for motion); a lone jump is skipped (the prediction carries on). Off: snap at once.
+	 */
+	bool pos_confirm_jumps;
+	/*!
+	 * Blend each position correction in over this long instead of stepping at the SLAM update (0: step). The
+	 * output stays continuous when a SLAM position arrives; the correction is fully in after this time.
+	 */
+	time_duration_ns pos_blend_ns;
 };
 
 //! What one SLAM update did, for logging/tuning.
@@ -63,6 +80,8 @@ struct psvr2_pose_filter_update
 	float orient_error_rad;
 	//! Position residual against the filter's prediction, before correcting.
 	float pos_residual_m;
+	//! A lone position jump was skipped, waiting for confirmation (pos_confirm_jumps).
+	bool position_skipped;
 };
 
 struct psvr2_pose_filter
@@ -71,6 +90,16 @@ struct psvr2_pose_filter
 
 	bool have_orientation;
 	bool have_position;
+
+	//! pos_blend_ns: what the output was above the new estimate when the correction started, fading to 0.
+	struct xrt_vec3 blend_offset;
+	timepoint_ns blend_start;
+
+	//! A position jump waiting for the next SLAM position to confirm it (pos_confirm_jumps).
+	bool have_pending;
+	struct xrt_vec3 pending;
+	timepoint_ns pending_ts;
+	uint32_t jumps_skipped;
 
 	//! Orientation integrated up to @ref orient_ts.
 	struct xrt_quat orientation;
@@ -116,6 +145,56 @@ psvr2_pose_filter_push_slam(struct psvr2_pose_filter *f,
 //! Get the filtered pose at @p at_ts. Returns false until both a SLAM pose and gyro data have arrived.
 bool
 psvr2_pose_filter_get(const struct psvr2_pose_filter *f, timepoint_ns at_ts, struct xrt_space_relation *out_relation);
+
+/*!
+ * Carries the head position across the headset's SLAM resets (see psvr2_slam_carry_push).
+ */
+struct psvr2_slam_carry
+{
+	bool enabled;
+	//! Added to the raw SLAM position so it continues across carried-over resets.
+	struct xrt_vec3 rebase;
+	struct xrt_vec3 raw_prev;
+	//! Where this session's tracking started: the headset re-originates here.
+	struct xrt_vec3 start;
+	bool have_raw;
+	timepoint_ns first_ts;
+	timepoint_ns last_reset_ts;
+	//! The last two output positions and times, newest first.
+	struct xrt_vec3 pos[2];
+	timepoint_ns ts[2];
+	uint32_t count;
+	//! Resets that replaced the tracking world (not carried), and carried ones.
+	uint32_t world_changes;
+	uint32_t carried;
+};
+
+enum psvr2_slam_carry_event
+{
+	PSVR2_SLAM_CARRY_NONE,
+	PSVR2_SLAM_CARRY_CARRIED,
+	//! Carried, but less than 1 s after the previous reset: counted as a world change too.
+	PSVR2_SLAM_CARRY_CARRIED_LOOP,
+	PSVR2_SLAM_CARRY_NOT_CARRIED_DISABLED,
+	PSVR2_SLAM_CARRY_NOT_CARRIED_SETTLING,
+};
+
+void
+psvr2_slam_carry_init(struct psvr2_slam_carry *c, bool enabled);
+
+/*!
+ * One SLAM position (headset clock @p ts). A reset is a step of at least 5 cm landing within 1 cm of where this
+ * session's tracking started (the headset re-originates there; orientation carries on). After the first 20 s it is
+ * carried over: the output continues from where the position was heading (last two outputs, speed clamped to 2 m/s).
+ * Resets during the first 20 s, and loops (under 1 s after the previous reset, carried anyway), count as world changes.
+ * Returns the position to use, @p out_event says what happened.
+ */
+struct xrt_vec3
+psvr2_slam_carry_push(struct psvr2_slam_carry *c,
+                      timepoint_ns ts,
+                      const struct xrt_vec3 *raw,
+                      enum psvr2_slam_carry_event *out_event,
+                      float *out_jump_m);
 
 #ifdef __cplusplus
 }

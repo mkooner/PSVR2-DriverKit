@@ -217,11 +217,8 @@ struct psvr2_hmd
 	uint32_t last_slam_vts_us;      //< Last slam timestamp, in microseconds
 	struct xrt_pose last_slam_pose; //< Last SLAM pose reading
 
-	/*!
-	 * Times the headset's SLAM re-originated its position (the raw position snapped back to the origin; the
-	 * orientation carries on). Each one replaces the tracking world's origin, see psvr2_get_slam_reset_count.
-	 */
-	uint32_t slam_reset_count;
+	//! Carries the position across mid-session SLAM resets; its world_changes are psvr2_get_slam_reset_count.
+	struct psvr2_slam_carry slam_carry;
 
 	//! PSVR2_RECORD_IMAGES: when images were last saved.
 	int64_t last_image_record_ns;

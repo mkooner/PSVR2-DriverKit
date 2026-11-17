@@ -95,6 +95,12 @@ DEBUG_GET_ONCE_BOOL_OPTION(ovrd_psvr2_sony_icons, "OVRD_PSVR2_SONY_ICONS", false
  */
 DEBUG_GET_ONCE_BOOL_OPTION(ovrd_room, "OVRD_ROOM", true)
 
+/*!
+ * Seconds from vsync to photons reported to SteamVR (Prop_SecondsFromVsyncToPhotons_Float), which sets how far ahead
+ * SteamVR extrapolates the head pose: the next vsync plus this. Negative: the default for the headset, see below.
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_vsync_to_photons_s, "OVRD_VSYNC_TO_PHOTONS_S", -1.0f)
+
 #define MODELNUM_LEN (XRT_DEVICE_NAME_LEN + 9) // "[Monado] "
 
 
@@ -1707,8 +1713,16 @@ class CDeviceDriver_Monado : public vr::ITrackedDeviceServerDriver, public vr::I
 public:
 	CDeviceDriver_Monado(struct xrt_instance *xinst, struct xrt_device *xdev) : m_xdev(xdev)
 	{
-		//! @todo latency
-		m_flSecondsFromVsyncToPhotons = 0.011f;
+		/*
+		 * PS VR2: Sony's driver reports 0.00136 s for this panel (read through SteamVR with psvr2-test's vrposelog,
+		 * 2026-11-16). With the previous guess of 0.011 SteamVR extrapolated 22 ms ahead instead of Sony's 12.4 ms,
+		 * which in replay nearly doubled the visible jitter of fast head turns (0.79 vs 0.48 deg/frame p90).
+		 */
+		float vsync_to_photons = debug_get_float_option_ovrd_vsync_to_photons_s();
+		if (vsync_to_photons < 0.0f) {
+			vsync_to_photons = m_xdev->name == XRT_DEVICE_PSVR2 ? 0.00136f : 0.011f; //! @todo others: measure
+		}
+		m_flSecondsFromVsyncToPhotons = vsync_to_photons;
 
 		float ns = (float)m_xdev->hmd->screens->nominal_frame_interval_ns;
 		m_flDisplayFrequency = 1.f / ns * 1000.f * 1000.f * 1000.f;
