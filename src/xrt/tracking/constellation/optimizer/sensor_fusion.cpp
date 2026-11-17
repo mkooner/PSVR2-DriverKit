@@ -41,6 +41,21 @@ namespace {
 
 DEBUG_GET_ONCE_LOG_OPTION(sensor_fusion_log, "T_CONSTELLATION_SENSOR_FUSION_LOG", U_LOGGING_WARN)
 DEBUG_GET_ONCE_BOOL_OPTION(sensor_fusion_enable_rerun, "T_CONSTELLATION_SENSOR_FUSION_RERUN_ENABLE", false)
+/*!
+ * Compute each solve's pose covariance. Only the Rerun visualizer reads it (also computed when that is enabled); a
+ * dense SVD per solve, it was a third of the fusion's time (0.76 of 2.2 ms per solve in a PS VR2 replay), and a failed
+ * computation reset the fusion.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(sensor_fusion_covariance, "T_CONSTELLATION_FUSION_COVARIANCE", false)
+//! Linear solver: 0 sparse normal Cholesky (Eigen), 1 dense normal Cholesky, 2 dense QR (no faster in replays).
+DEBUG_GET_ONCE_NUM_OPTION(sensor_fusion_linear_solver, "T_CONSTELLATION_FUSION_LINEAR_SOLVER", 0)
+/*!
+ * Solver threads when not deterministic (0 = hardware threads - 2, the previous default). Each solve is small (3
+ * keyframes): on a 24-thread PC, in a real-time replay of a PS VR2 session, 22 threads cost 48.8 s of CPU (6.6 s of
+ * it system time) for 82 s of data at 1.20 ms per solve, 2 threads 38.1 s at 1.16 ms, 1 thread 34.2 s at 1.37 ms,
+ * with the same tracking.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(sensor_fusion_threads, "T_CONSTELLATION_FUSION_THREADS", 2)
 #ifdef XRT_FEATURE_RERUN
 DEBUG_GET_ONCE_BOOL_OPTION(sensor_fusion_rerun_spawn, "T_CONSTELLATION_SENSOR_FUSION_RERUN_SPAWN", true)
 #endif // XRT_FEATURE_RERUN
@@ -1964,6 +1979,13 @@ struct SensorFusionProblem
 			map_vec3_f64(solved.accel_scale) = bias.accel_scale;
 		}
 
+		if (!debug_get_bool_option_sensor_fusion_covariance() && !debug_get_bool_option_sensor_fusion_enable_rerun()) {
+			for (uint32_t age = 0; age < snapshot.num_keyframes; age++) {
+				snapshot.keyframes[age].device.covariance.setZero();
+			}
+			return true;
+		}
+
 		ceres::Covariance::Options cov_options{};
 		cov_options.num_threads = 1; //! @todo measure if this is needed
 		cov_options.null_space_rank = -1;
@@ -3305,7 +3327,11 @@ SensorFusion::tickLocked(bool have_new_input)
 	 * The problem is block sparse: a keyframe only touches it's observations, IMU preintegration,
 	 * keyframe intrinsics/extrinsics, and the world gravity.
 	 */
-	options.linear_solver_type = ceres::LinearSolverType::SPARSE_NORMAL_CHOLESKY;
+	switch (debug_get_num_option_sensor_fusion_linear_solver()) {
+	case 1: options.linear_solver_type = ceres::LinearSolverType::DENSE_NORMAL_CHOLESKY; break;
+	case 2: options.linear_solver_type = ceres::LinearSolverType::DENSE_QR; break;
+	default: options.linear_solver_type = ceres::LinearSolverType::SPARSE_NORMAL_CHOLESKY; break;
+	}
 	// We require Eigen's sparse backend, see root CMakeLists.txt which enforces we have this backend.
 	options.sparse_linear_algebra_library_type = ceres::SparseLinearAlgebraLibraryType::EIGEN_SPARSE;
 	options.minimizer_progress_to_stdout = false;
@@ -3319,7 +3345,10 @@ SensorFusion::tickLocked(bool have_new_input)
 	 * @todo This math fails when multiple fusion instances are running, fix that.
 	 */
 	options.num_threads =
-	    this->deterministic ? 1 : MAX(1, static_cast<int>(std::thread::hardware_concurrency()) - 2);
+	    this->deterministic ? 1
+	    : debug_get_num_option_sensor_fusion_threads() > 0
+	        ? (int)debug_get_num_option_sensor_fusion_threads()
+	        : MAX(1, static_cast<int>(std::thread::hardware_concurrency()) - 2);
 
 	// @todo Tune the solve exit tolerances to actual numbers.
 
@@ -3347,7 +3376,8 @@ SensorFusion::tickLocked(bool have_new_input)
 		return;
 	}
 
-	if (!this->problem->fillSnapshotLocked(this)) {
+	bool snap_ok = this->problem->fillSnapshotLocked(this);
+	if (!snap_ok) {
 		this->flushAllKeyframeTracesLocked(CONSTELLATION_FUSION_SOLVE_FAILED,
 		                                   os_monotonic_get_ns() - tick_start_ns);
 		this->resetLocked();

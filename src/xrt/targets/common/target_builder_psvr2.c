@@ -14,6 +14,8 @@
 #include "xrt/xrt_system.h"
 
 #include "util/u_debug.h"
+
+#include <stdlib.h>
 #include "util/u_misc.h"
 #include "util/u_logging.h"
 #include "util/u_trace_marker.h"
@@ -156,6 +158,19 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 	struct xrt_prober_device *head_xpdev =
 	    u_builder_find_prober_device(xpdevs, xpdev_count, PSVR2_VID, PSVR2_PID, XRT_BUS_TYPE_USB);
 	if (head_xpdev != NULL) {
+		// No hand tracking while Sense controllers are connected (switched off, they aren't, and hands are used).
+		bool have_sense = false;
+#ifdef XRT_BUILD_DRIVER_PSSENSE
+		have_sense = u_builder_find_prober_device(xpdevs, xpdev_count, PSSENSE_VID, PSSENSE_PID_LEFT,
+		                                          XRT_BUS_TYPE_ANY) != NULL ||
+		             u_builder_find_prober_device(xpdevs, xpdev_count, PSSENSE_VID, PSSENSE_PID_RIGHT,
+		                                          XRT_BUS_TYPE_ANY) != NULL;
+#endif
+		psvr2_hand_tracking_set_allowed(!have_sense);
+		if (have_sense && getenv("PSVR2_HAND_TRACKING") != NULL) {
+			U_LOG_IFL_I(pb->log_level,
+			            "Sense controllers connected: hand tracking stays off (turn them off to use hands)");
+		}
 		head_xdev = psvr2_hmd_create(head_xpdev);
 		if (head_xdev == NULL) {
 			PSVR2_ERROR(psvr2_builder(xb), "PSVR2 HMD device creation failed");
@@ -237,6 +252,9 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 	}
 	((struct psvr2_hmd *)head_xdev)->pssense_left = left_xdev;
 	((struct psvr2_hmd *)head_xdev)->pssense_right = right_xdev;
+	if (left_xdev != NULL || right_xdev != NULL) {
+		psvr2_hmd_controllers_attached(head_xdev);
+	}
 #endif
 
 	xret = xrt_prober_unlock_list(xp, &xpdevs);

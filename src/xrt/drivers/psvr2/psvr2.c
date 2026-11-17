@@ -181,6 +181,8 @@ psvr2_hmd_destroy(struct xrt_device *xdev)
 	 * source are deliberately left alive with it rather than freed under it.
 	 */
 	os_mutex_destroy(&hmd->data_lock);
+	os_mutex_destroy(&hmd->calib_lock);
+	free(hmd->calib_block);
 	u_device_free(&hmd->base);
 }
 
@@ -1167,7 +1169,16 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 				break;
 			}
 			case GEN_DATA_CALIBRATION_BLOCK: {
+				os_mutex_lock(&hmd->calib_lock);
+				if (hmd->calib_block == NULL) {
+					hmd->calib_block = malloc(entry->size);
+					if (hmd->calib_block != NULL) {
+						memcpy(hmd->calib_block, buf + entry->offset, entry->size);
+						hmd->calib_block_size = entry->size;
+					}
+				}
 				psvr2_parse_gen_calibration_block(hmd, buf + entry->offset, entry->size);
+				os_mutex_unlock(&hmd->calib_lock);
 				// PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
 				break;
 			}
@@ -1812,11 +1823,34 @@ psvr2_end_feature(struct xrt_device *xdev, enum xrt_device_feature_type type)
 	return XRT_SUCCESS;
 }
 
+void
+psvr2_hmd_controllers_attached(struct xrt_device *hmd_xdev)
+{
+	struct psvr2_hmd *hmd = (struct psvr2_hmd *)hmd_xdev;
+	// If the calibration block came before the controllers were attached, create the LED tracker from it now; if it
+	// comes later, the USB thread does (both under calib_lock, the parse returns once the tracker exists).
+	os_mutex_lock(&hmd->calib_lock);
+	if (hmd->calib_block != NULL && hmd->led_tracker == NULL) {
+		PSVR2_INFO(hmd, "Creating the LED tracker from the calibration block received before the controllers");
+		psvr2_parse_gen_calibration_block(hmd, hmd->calib_block, hmd->calib_block_size);
+	}
+	os_mutex_unlock(&hmd->calib_lock);
+}
+
+//! Cleared by the builder when Sense controllers are connected (psvr2_hand_tracking_set_allowed).
+static bool hand_tracking_allowed = true;
+
+void
+psvr2_hand_tracking_set_allowed(bool allowed)
+{
+	hand_tracking_allowed = allowed;
+}
+
 bool
 psvr2_hand_tracking_enabled(void)
 {
 #ifdef XRT_BUILD_DRIVER_HANDTRACKING
-	return debug_get_bool_option_psvr2_hand_tracking();
+	return hand_tracking_allowed && debug_get_bool_option_psvr2_hand_tracking();
 #else
 	return false;
 #endif
@@ -1906,6 +1940,10 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 
 	if (os_mutex_init(&hmd->data_lock) != 0) {
 		PSVR2_ERROR(hmd, "Failed to init data mutex!");
+		goto cleanup;
+	}
+	if (os_mutex_init(&hmd->calib_lock) != 0) {
+		PSVR2_ERROR(hmd, "Failed to init calibration mutex!");
 		goto cleanup;
 	}
 

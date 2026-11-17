@@ -420,142 +420,55 @@ check_led_against_model_subset(struct correspondence_search *cs,
 	}
 
 	for (int i = 0; i < valid; i++) {
-		struct xrt_pose pose;
-		struct xrt_vec3 checkpos, checkdir;
-
-		// Construct quat and trans for this pose
-		quat_from_rotation_matrix(&pose.orientation, Rs[i]);
-
-		pose.position.x = Ts[i][0];
-		pose.position.y = Ts[i][1];
-		pose.position.z = Ts[i][2];
-
-		if (pose.position.z < CLOSEST_ACCEPTABLE_POSE_M || pose.position.z > FARTHEST_ACCEPTABLE_POSE_M) {
-			CS_FULL_DEBUG(cs,
-			              "model %d failed to find a valid P3P solution for LED %d %d %d (%d) and blob %d "
-			              "%d %d (%d) - pose out of range Z @ %f metres",
-			              mi->id, model_leds[0]->id, model_leds[1]->id, model_leds[2]->id,
-			              model_leds[3]->id, blobs[0]->blob->blob_id, blobs[1]->blob->blob_id,
-			              blobs[2]->blob->blob_id, blobs[3]->blob->blob_id, pose.position.z);
-
+		/*
+		 * The cheap checks straight from lambdatwist's row-major R and T (x_cam = R x + T), building the quaternion
+		 * only for a candidate that passes them: most fail, and the quaternion conversion, normalisation and
+		 * quaternion rotations per candidate were most of this function's time (27% of the tracker in a replay).
+		 */
+		const double *R = Rs[i];
+		const double *T = Ts[i];
+		if (T[2] < CLOSEST_ACCEPTABLE_POSE_M || T[2] > FARTHEST_ACCEPTABLE_POSE_M) {
 			// The object is unlikely to be < 5cm or > 15m from the camera
 			continue;
 		}
 
-#if 1
-		math_quat_normalize(&pose.orientation);
-#else
-		// The quaternion produced should already be normalised, but sometimes it's not!
-		l = math_quat_len(&pose.orientation);
-		assert(l > 0.9999 && l < 1.0001);
-#endif
-
-		bool checks_failed = false;
-		struct xrt_vec3 tmp;
-
-		for (int p = 0; p < 3; p++) {
-			struct xrt_vec3 tmpblob;
-
-			// This pose must yield a projection of the anchor point, or something is really wrong
-			math_quat_rotate_vec3(&pose.orientation, &model_leds[p]->position, &checkpos);
-			math_vec3_accum(&pose.position, &checkpos);
-
-			// And should be camera facing in this pose
-			math_quat_rotate_vec3(&pose.orientation, &model_leds[p]->normal, &checkdir);
-			math_vec3_normalize(&checkpos);
-
-			double facing_dot = m_vec3_dot(checkpos, checkdir);
-
-			// Require only that the anchor LED not be actively facing away from the camera
-			// (that it's at worst perpendicular). Controller LEDs can be visible at that angle
-			if (facing_dot > 0.0) {
-				CS_FULL_DEBUG(cs,
-				              "model %d failed to find a valid P3P solution for LED %d %d %d (%d) and "
-				              "blob %d %d %d (%d) - LED not facing camera (dot %f)",
-				              mi->id, model_leds[0]->id, model_leds[1]->id, model_leds[2]->id,
-				              model_leds[3]->id, blobs[0]->blob->blob_id, blobs[1]->blob->blob_id,
-				              blobs[2]->blob->blob_id, blobs[3]->blob->blob_id, facing_dot);
-
-				// LED not facing the camera -> invalid pose
-				checks_failed = true;
-				break;
-			}
-
-			tmpblob.x = blobs[p]->point_homog[0];
-			tmpblob.y = blobs[p]->point_homog[1];
-			tmpblob.z = blobs[p]->point_homog[2];
-
-			// Calculate the image plane projection of the anchor LED position and check it's within 2.5mm
-			// of where it should be, to catch spurious failures in lambdatwist
-			math_vec3_scalar_mul(1.0 / checkpos.z, &checkpos);
-			tmp = m_vec3_sub(checkpos, tmpblob);
-			float l_sq = m_vec3_len_sqrd(tmp);
-			if (l_sq > ANCHOR_LED_MAX_DISTANCE_M_SQ) {
-				CS_FULL_DEBUG(cs,
-				              "Error pose candidate orient %f %f %f %f pos %f %f %f "
-				              "LED %d @ %f %f %f projected to %f %f %f (err %f)",
-				              pose.orientation.x, pose.orientation.y, pose.orientation.z,
-				              pose.orientation.w, pose.position.x, pose.position.y, pose.position.z, p,
-				              tmpblob.x, tmpblob.y, tmpblob.z, checkpos.x, checkpos.y, checkpos.z, l);
-				checks_failed = true;
-				break; // @todo: Figure out why this happened
-			}
-
-#if CHECK_ALL_PROJECTIONS
-			struct xrt_vec2 reprojected;
-
-			project_led_point(&model_leds[p]->position, &pose, cs->calib, &reprojected);
-			double xdiff = reprojected.x - blobs[p]->blob->center_undistorted.x;
-			double ydiff = reprojected.y - blobs[p]->blob->center_undistorted.y;
-
-			CS_DEBUG(cs, "Blob %d @ %f,%f should match LED %d projection %f %f (err %f)", p,
-			         blobs[p]->blob->center_undistorted.x, blobs[p]->blob->center_undistorted.y,
-			         model_leds[p]->id, reprojected.x, reprojected.y, sqrt(xdiff * xdiff + ydiff * ydiff));
-#else
-			break;
-#endif
+		// Anchor LED: camera facing (at worst perpendicular) and projecting onto its blob (within 2.5mm).
+		const struct xrt_vec3 *ap = &model_leds[0]->position;
+		const struct xrt_vec3 *an = &model_leds[0]->normal;
+		double cx = R[0] * ap->x + R[1] * ap->y + R[2] * ap->z + T[0];
+		double cy = R[3] * ap->x + R[4] * ap->y + R[5] * ap->z + T[1];
+		double cz = R[6] * ap->x + R[7] * ap->y + R[8] * ap->z + T[2];
+		double nx = R[0] * an->x + R[1] * an->y + R[2] * an->z;
+		double ny = R[3] * an->x + R[4] * an->y + R[5] * an->z;
+		double nz = R[6] * an->x + R[7] * an->y + R[8] * an->z;
+		if (cx * nx + cy * ny + cz * nz > 0.0) {
+			continue; // LED not facing the camera -> invalid pose
 		}
-
-		if (checks_failed) {
+		if (cz <= 0.0) {
 			continue;
 		}
+		double ex = cx / cz - y1[0] / y1[2], ey = cy / cz - y1[1] / y1[2];
+		if (ex * ex + ey * ey > ANCHOR_LED_MAX_DISTANCE_M_SQ) {
+			continue; // @todo: Figure out why lambdatwist gives these
+		}
 
-		// Check against the 4th point to check the proposed P3P solution
-		math_quat_rotate_vec3(&pose.orientation, xcheck, &checkpos);
-		math_vec3_accum(&pose.position, &checkpos);
-		math_vec3_scalar_mul(1.0 / checkpos.z, &checkpos);
-
-		// Subtract projected point from undistorted 4th reference point to check error
-		struct xrt_vec3 checkblob;
-		checkblob.x = blobs[3]->point_homog[0];
-		checkblob.y = blobs[3]->point_homog[1];
-		checkblob.z = blobs[3]->point_homog[2];
-
-		tmp = m_vec3_sub(checkpos, checkblob);
-		float distance = m_vec3_len(tmp);
-
-#if 0
-		// Convert back to pixels for the debug output
-		math_vec3_scalar_mul(cs->calib->calib.fx, &checkpos);
-		math_vec3_scalar_mul(cs->calib->calib.fx, &checkblob);
-
-		CS_DEBUG(cs, "model %u pose candidate orient %f %f %f %f pos %f %f %f", mi->id, pose.orientation.x,
-		         pose.orientation.y, pose.orientation.z, pose.orientation.w, pose.position.x, pose.position.y,
-		         pose.position.z);
-		CS_DEBUG(cs, "4th point @ %f %f offset %f (undistorted) pixels from %f %f (blob_size %f)", checkpos.x,
-		         checkpos.y, distance * cs->calib->calib.fx, checkblob.x, checkblob.y,
-		         blobs[3]->max_dist * cs->calib->calib.fx);
-
-#endif
-		// Check that the 4th point projected to within its blob
+		// The 4th point must project within its blob.
+		double qx = R[0] * xcheck->x + R[1] * xcheck->y + R[2] * xcheck->z + T[0];
+		double qy = R[3] * xcheck->x + R[4] * xcheck->y + R[5] * xcheck->z + T[1];
+		double qz = R[6] * xcheck->x + R[7] * xcheck->y + R[8] * xcheck->z + T[2];
+		if (qz <= 0.0) {
+			continue;
+		}
+		const double *b4 = blobs[3]->point_homog;
+		double dx4 = qx / qz - b4[0] / b4[2], dy4 = qy / qz - b4[1] / b4[2];
+		double distance = sqrt(dx4 * dx4 + dy4 * dy4);
 		if (distance <= blobs[3]->max_dist) {
-			CS_FULL_DEBUG(
-			    cs,
-			    "model %d found a valid P3P solution for LED %d %d %d (%d) and blob %d %d %d (%d) - "
-			    "4th point projected within blob (err %f <= %f)",
-			    mi->id, model_leds[0]->id, model_leds[1]->id, model_leds[2]->id, model_leds[3]->id,
-			    blobs[0]->blob->blob_id, blobs[1]->blob->blob_id, blobs[2]->blob->blob_id,
-			    blobs[3]->blob->blob_id, distance, blobs[3]->max_dist);
+			struct xrt_pose pose;
+			quat_from_rotation_matrix(&pose.orientation, (double *)R);
+			math_quat_normalize(&pose.orientation);
+			pose.position.x = T[0];
+			pose.position.y = T[1];
+			pose.position.z = T[2];
 
 			if (correspondence_search_project_pose(cs, model, &pose, mi, depth) || 1) {
 #if 0

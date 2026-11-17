@@ -142,9 +142,13 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 		return;
 	}
 
-	// For some reason this gets triggered twice, we only really want to configure this once. Parsed even without
-	// controllers: hand tracking needs the bottom cameras' calibration and poses too.
-	if (hmd->calibration_parsed || hmd->led_tracker != NULL) {
+	/*
+	 * The block arrives twice at startup, and the first time the builder often hasn't attached the controllers yet.
+	 * It's parsed even then (hand tracking needs the bottom cameras), but only counts as done once the LED tracker
+	 * exists: marking it done on the first arrival left the second one ignored and the controllers never tracked
+	 * (22:53 run: block parsed once before the controllers were attached, no LED tracker, no optical fix all run).
+	 */
+	if (hmd->led_tracker != NULL) {
 		return;
 	}
 
@@ -357,7 +361,6 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 		            mosaic->cameras[i].pose_in_origin.position.z);
 	}
 
-	hmd->calibration_parsed = true;
 	if (mosaic->num_cameras >= 2) {
 		psvr2_hmd_offer_hand_tracking_cameras(
 		    hmd, (struct t_camera_calibration[2]){mosaic->cameras[0].calibration, mosaic->cameras[1].calibration},

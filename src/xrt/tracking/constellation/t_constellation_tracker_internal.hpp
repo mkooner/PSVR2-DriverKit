@@ -317,6 +317,9 @@ public: // Methods (t_constellation_tracker.cpp)
 	              t_constellation_tracker_trace_log_solve_type solve_type);
 
 	bool
+	tryDevicePriorSnap(Device *device, CameraSample &sample, DeviceState &device_state, const xrt_space_relation &prior);
+
+	bool
 	tryDeviceBlobRecovery(Device *device,
 	                      CameraSample &sample,
 	                      DeviceState &device_state,
@@ -401,6 +404,21 @@ public: // Fields
 
 	//! Devices are disabled by default, and the constellation tracker must choose to enable them.
 	std::atomic<bool> enabled{false};
+
+	/*!
+	 * Learned "up" in the device IMU's world frame (T_CONSTELLATION_IMU_UP_LEARN), which the IMU up checks use instead
+	 * of +Y: the device's IMU-only orientation tilts during vigorous motion (00:06 run: 12 -> 73 deg from the optical up
+	 * within 15 s), and past the gate every correct pose was rejected. Updated from poses that passed the checks.
+	 */
+	std::mutex imu_up_lock;
+	xrt_vec3 imu_world_up{0.0f, 1.0f, 0.0f};
+
+	//! The IMU's up direction in the device frame for an IMU orientation, with the learned up.
+	xrt_vec3
+	imuUpInDevice(const xrt_quat &q_imu);
+	//! Move the learned up toward the up of an accepted optical pose.
+	void
+	learnImuUp(const xrt_quat &q_imu, const xrt_quat &q_optical);
 
 	//! This device's IMU index in the EuRoC recorder session, or -1 if it has none.
 	std::atomic<int32_t> euroc_imu_index{-1};

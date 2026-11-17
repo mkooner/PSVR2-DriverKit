@@ -226,8 +226,11 @@ struct psvr2_hmd
 	bool ht_cams_valid;
 	struct t_camera_calibration ht_cams[2];
 	struct xrt_pose ht_cam_poses[2];
-	//! The calibration block was parsed (it arrives twice).
-	bool calibration_parsed;
+
+	//! The calibration block, kept so the builder can create the LED tracker once it attached the controllers.
+	struct os_mutex calib_lock;
+	uint8_t *calib_block;
+	uint32_t calib_block_size;
 
 	//! Camera image transfer counts for the periodic "Camera stream" report (USB thread only).
 	struct

@@ -92,6 +92,14 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR
  * IMU orientation xyzw), to test bridging optical gaps with the accelerometer offline. Off when unset.
  */
 DEBUG_GET_ONCE_OPTION(pssense_record_file, "PSSENSE_RECORD_FILE", NULL)
+/*!
+ * Drive the host <-> controller clocks from the long-window estimate (pssense_clock_long.h). On the 94 s 23:22 run's
+ * raw clock samples, the 8 s estimate moved up to 82/42 us/s (p95, left/right) over 5 s windows, faster than the LED
+ * hold's ~33 us/s corrections, and both controllers' LEDs drifted out of the camera window (the right one was not
+ * found again); the long-window estimate's 54/6 us/s changes are slow enough for the hold to follow. The "Clock:" log
+ * line reports both estimates either way.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(pssense_clock_long, "PSSENSE_CLOCK_LONG", true)
 
 //! With nothing new to send, output reports still go out this often (~30Hz) as a keepalive.
 /*
@@ -520,6 +528,10 @@ pssense_add_clock_offset_sample_locked(struct pssense_device *pssense, timepoint
 {
 	struct pssense_clock *c = &pssense->timing.clock;
 	pssense_clock_push(c, local_ns, remote_ns);
+	if (pssense->record_file != NULL) {
+		// Raw clock samples for replaying clock estimators offline ('#' keeps them out of the IMU readers).
+		fprintf(pssense->record_file, "#C,%" PRId64 ",%" PRId64 "\n", (int64_t)local_ns, (int64_t)remote_ns);
+	}
 
 	time_duration_ns skew_ns;
 	if (pssense_clock_get_offset(c, &skew_ns)) {
@@ -529,10 +541,14 @@ pssense_add_clock_offset_sample_locked(struct pssense_device *pssense, timepoint
 			if (c->stats.last_log_ns != 0) {
 				PSSENSE_DEBUG(pssense,
 				              "Clock: offset moved %+" PRId64 "us in %.1fs, skew %+.1fppm, max Bluetooth delay "
-				              "%" PRId64 "us, %u resets",
+				              "%" PRId64 "us, %u resets; long-window estimate %s: offset %+" PRId64
+				              "us from the output, skew %+.1fppm, at %" PRId64 "ns",
 				              (int64_t)((skew_ns - c->stats.output_at_log) / U_TIME_1US_IN_NS),
 				              (double)(local_ns - c->stats.last_log_ns) / U_TIME_1S_IN_NS, c->b / 1000.0,
-				              (int64_t)(c->stats.max_delay_ns / U_TIME_1US_IN_NS), c->stats.resets);
+				              (int64_t)(c->stats.max_delay_ns / U_TIME_1US_IN_NS), c->stats.resets,
+				              c->use_long ? "in use" : "logged only",
+				              (int64_t)((c->lng.out - skew_ns) / U_TIME_1US_IN_NS), c->lng.skew / 1000.0,
+				              (int64_t)c->lng.out);
 			}
 			c->stats.output_at_log = skew_ns;
 			c->stats.max_delay_ns = 0;
@@ -2714,6 +2730,8 @@ pssense_create(struct xrt_prober *xp,
 	pssense->usb = xpdev->bus == XRT_BUS_TYPE_USB;
 
 	m_imu_3dof_init(&pssense->tracking.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
+	pssense->timing.clock.use_long = debug_get_bool_option_pssense_clock_long();
+	pssense->timing.imu_clock.use_long = debug_get_bool_option_pssense_clock_long();
 
 
 	m_relation_history_create(&pssense->tracking.imu_relation_history);
@@ -2763,7 +2781,8 @@ pssense_create(struct xrt_prober *xp,
 		snprintf(path, sizeof(path), "%s-%s.csv", record, pssense->hand == XRT_HAND_LEFT ? "L" : "R");
 		pssense->record_file = fopen(path, "w");
 		if (pssense->record_file != NULL) {
-			fprintf(pssense->record_file, "# host_ns,imu_ns,gx,gy,gz,ax,ay,az,qx,qy,qz,qw\n");
+			fprintf(pssense->record_file, "# host_ns,imu_ns,gx,gy,gz,ax,ay,az,qx,qy,qz,qw\n"
+			                              "# #C,host_rx_ns,controller_ns: raw clock samples\n");
 			PSSENSE_DEBUG(pssense, "Recording the IMU to %s", path);
 		} else {
 			PSSENSE_WARN(pssense, "PSSENSE_RECORD_FILE: can't write %s", path);

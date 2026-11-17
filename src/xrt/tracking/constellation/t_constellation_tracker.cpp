@@ -28,6 +28,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <vector>
 #include <limits>
 #include <string>
 #include <cstring>
@@ -40,6 +41,42 @@ DEBUG_GET_ONCE_LOG_OPTION(constellation_tracker_log, "CONSTELLATION_TRACKER_LOG"
 DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_gravity_gate_deg, "T_CONSTELLATION_GRAVITY_GATE_DEG", 35.0f)
 // See the gyro gate in Camera::pushPose; 0 turns it off.
 DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_gyro_gate_deg, "T_CONSTELLATION_GYRO_GATE_DEG", 15.0f)
+/*!
+ * After a solve, how long the slow search leaves a device to the fast one (ms). Was 150: replaying the 19:34 PS VR2
+ * run (psvr2-test/ctreplay), 50 cut the time in optical gaps from 45/53% to 35/33% (left/right controller), 0 to
+ * 33/30%, with no position jumps or gravity gate failures; 50 costs about the same CPU as 150, 0 about 30% more.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(constellation_tracker_slow_skip_ms, "T_CONSTELLATION_SLOW_SKIP_MS", 50)
+//! How long shallow searches must have failed before a deep search (ms), see processSampleSlow.
+DEBUG_GET_ONCE_NUM_OPTION(constellation_tracker_deep_delay_ms, "T_CONSTELLATION_DEEP_DELAY_MS", 1000)
+//! Above this rotation rate (deg/s), the fast path skips blob recovery and wipes the blob associations.
+DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_blob_recovery_max_dps, "T_CONSTELLATION_BLOB_RECOVERY_MAX_DPS", 360.0f)
+/*!
+ * Fast path: when the prior doesn't match, find the image shift that lines its LEDs up with blobs and solve from those.
+ * Replays of 3 PS VR2 sessions (psvr2-test/ctreplay, real-time, live IMU lag): losses over 150 ms 43/60/87 -> 20/22/36,
+ * time without a fix about halved, no extra CPU; with the blob recovery prior gate, no single-frame spikes.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(constellation_tracker_prior_snap, "T_CONSTELLATION_PRIOR_SNAP", true)
+//! 1: solve through the blob recovery (trusts any RANSAC solve over 4 blobs); 2: require an unambiguous shift and a
+//! good match. Mode 2 was a guard against "spikes" that turned out to be the replay mixing two cameras' poses.
+DEBUG_GET_ONCE_NUM_OPTION(constellation_tracker_prior_snap_mode, "T_CONSTELLATION_PRIOR_SNAP_MODE", 1)
+//! Mode 1: the snapped pose must be this close to the prior (m, deg); good snaps were within 2 cm / 6.7 deg (p90).
+DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_prior_snap_max_m, "T_CONSTELLATION_PRIOR_SNAP_MAX_M", 0.05f)
+DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_prior_snap_max_deg, "T_CONSTELLATION_PRIOR_SNAP_MAX_DEG", 15.0f)
+//! Blob recovery: reject a solve further than the snap limits from the prior (when there is one).
+DEBUG_GET_ONCE_BOOL_OPTION(constellation_tracker_blob_recovery_prior_gate, "T_CONSTELLATION_BLOB_RECOVERY_PRIOR_GATE", true)
+/*!
+ * Learn each device IMU's tilt error from accepted poses and use it in the IMU up checks (gain per accepted pose, 0
+ * off). The PS VR2 controllers' IMU-only up drifted 12 -> 73 deg from the optical one in vigorous play (00:06 run) and
+ * the 35 deg gate then rejected every correct pose: the right controller froze for ~35 s with its LEDs in view.
+ * Replayed with 0.05: that window 4% -> 82% of frames with a fix, time without a fix 31/41% -> 17/18% (00:06) and
+ * 25/21% -> 17/11% (23:22), unchanged on calmer runs, no single-frame spikes.
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_imu_up_learn, "T_CONSTELLATION_IMU_UP_LEARN", 0.05f)
+//! Largest prior image error the snap searches (undistorted px).
+DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_prior_snap_radius_px, "T_CONSTELLATION_PRIOR_SNAP_RADIUS_PX", 60.0f)
+//! Run the prior-seeded shallow correspondence search in the fast path when the prior itself didn't match.
+DEBUG_GET_ONCE_BOOL_OPTION(constellation_tracker_fast_prior_search, "T_CONSTELLATION_FAST_PRIOR_SEARCH", false)
 DEBUG_GET_ONCE_OPTION(constellation_tracker_data_recorder_output, "CONSTELLATION_TRACKER_DATA_RECORDER_OUTPUT", "")
 
 // Unconditionally present to allow warning that the feature is not enabled.
@@ -456,6 +493,206 @@ Camera::tryDevicePose(Device *device,
 	return false;
 }
 
+/*!
+ * The prior is usually a few degrees / cm off when the fast path fails (median 5 deg / 2 cm, 12-25 px, at any speed on
+ * the 23:01 run replay), and in about half of those frames one image shift lines most of its LEDs up with blobs. Find
+ * the shift with the most LEDs on a blob, label those blobs and let the blob recovery (RANSAC-PnP from the prior, then
+ * the usual pose checks) solve from them. Labels it set are removed again if that fails.
+ */
+bool
+Camera::tryDevicePriorSnap(Device *device, CameraSample &sample, DeviceState &device_state, const xrt_space_relation &prior)
+{
+	pose_metrics_blob_match_info info;
+	pose_metrics_match_pose_to_blobs(&prior.pose, sample.blobs, sample.blob_count, &device->params.led_model,
+	                                 device->id, &this->model, &info);
+	if (info.num_visible_leds < 4) {
+		return false;
+	}
+
+	const float radius = debug_get_float_option_constellation_tracker_prior_snap_radius_px();
+	// Candidate blobs: not claimed by another device.
+	std::array<int, XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME> cand{};
+	int nc = 0;
+	for (uint32_t b = 0; b < sample.blob_count && nc < (int)cand.size(); b++) {
+		const t_blob &blob = sample.blobs[b];
+		if (blob.matched_device_id == XRT_CONSTELLATION_INVALID_DEVICE_ID || blob.matched_device_id == device->id) {
+			cand[nc++] = (int)b;
+		}
+	}
+	if (nc < 4) {
+		return false;
+	}
+
+	// Shift votes: every (LED, blob) pair within the radius proposes blob - LED; count LEDs with a blob near each.
+	// Shift candidates with their support, to pick the best and check it's unambiguous.
+	struct cand_shift
+	{
+		xrt_vec2 shift;
+		int support;
+	};
+	std::vector<cand_shift> shifts;
+	int best_support = 0;
+	xrt_vec2 best_shift = {0, 0};
+	for (int l = 0; l < info.num_visible_leds; l++) {
+		const xrt_vec2 lp = info.visible_leds[l].pos_px_undistorted;
+		for (int c = 0; c < nc; c++) {
+			const xrt_vec2 bp = sample.blobs[cand[c]].center_undistorted;
+			xrt_vec2 shift = {bp.x - lp.x, bp.y - lp.y};
+			if (shift.x * shift.x + shift.y * shift.y > radius * radius) {
+				continue;
+			}
+			int support = 0;
+			for (int l2 = 0; l2 < info.num_visible_leds; l2++) {
+				const xrt_vec2 q = {info.visible_leds[l2].pos_px_undistorted.x + shift.x,
+				                    info.visible_leds[l2].pos_px_undistorted.y + shift.y};
+				float tol = fmaxf(4.0f, (float)info.visible_leds[l2].led_radius_px_undistorted * 1.5f);
+				for (int c2 = 0; c2 < nc; c2++) {
+					const xrt_vec2 b2 = sample.blobs[cand[c2]].center_undistorted;
+					if ((b2.x - q.x) * (b2.x - q.x) + (b2.y - q.y) * (b2.y - q.y) <= tol * tol) {
+						support++;
+						break;
+					}
+				}
+			}
+			shifts.push_back({shift, support});
+			if (support > best_support) {
+				best_support = support;
+				best_shift = shift;
+			}
+		}
+	}
+	/*
+	 * Unambiguous only: a shift one LED spacing off can line up nearly as many LEDs (the ring is regular), and solving
+	 * from it gave single-frame 9-16 cm spikes that pass every pose check. Require 5 LEDs and 2 more than any clearly
+	 * different shift.
+	 */
+	const bool strict = debug_get_num_option_constellation_tracker_prior_snap_mode() == 2;
+	if (best_support < (strict ? 5 : 4)) {
+		return false;
+	}
+	int second = 0;
+	for (const auto &cs : shifts) {
+		float dx = cs.shift.x - best_shift.x, dy = cs.shift.y - best_shift.y;
+		if (dx * dx + dy * dy > 8.0f * 8.0f && cs.support > second) {
+			second = cs.support;
+		}
+	}
+	if (strict && best_support - second < 2) {
+		return false;
+	}
+
+	// Label: each LED takes the nearest free blob within its tolerance after the shift.
+	for (int c = 0; c < nc; c++) {
+		t_blob &blob = sample.blobs[cand[c]];
+		blob.matched_device_id = XRT_CONSTELLATION_INVALID_DEVICE_ID;
+		blob.matched_device_led_id = XRT_CONSTELLATION_INVALID_LED_ID;
+	}
+	int labelled = 0;
+	for (int l = 0; l < info.num_visible_leds; l++) {
+		const xrt_vec2 q = {info.visible_leds[l].pos_px_undistorted.x + best_shift.x,
+		                    info.visible_leds[l].pos_px_undistorted.y + best_shift.y};
+		float tol = fmaxf(4.0f, (float)info.visible_leds[l].led_radius_px_undistorted * 1.5f);
+		int best = -1;
+		float best_d = tol * tol;
+		for (int c = 0; c < nc; c++) {
+			const t_blob &blob = sample.blobs[cand[c]];
+			if (blob.matched_device_id != XRT_CONSTELLATION_INVALID_DEVICE_ID) {
+				continue;
+			}
+			float d = (blob.center_undistorted.x - q.x) * (blob.center_undistorted.x - q.x) +
+			          (blob.center_undistorted.y - q.y) * (blob.center_undistorted.y - q.y);
+			if (d <= best_d) {
+				best_d = d;
+				best = cand[c];
+			}
+		}
+		if (best >= 0) {
+			sample.blobs[best].matched_device_id = device->id;
+			sample.blobs[best].matched_device_led_id = info.visible_leds[l].led->id;
+			labelled++;
+		}
+	}
+
+	if (!strict && labelled >= 4) {
+		/*
+		 * As the blob recovery (RANSAC-PnP from the prior, trusted with over 4 blobs or a good match), plus a limit
+		 * on how far the solve may move from the prior: the replays' good snaps stayed within 2 cm / 6.7 deg (p90),
+		 * the rare single-frame spikes landed 9-16 cm from the previous fix.
+		 */
+		xrt_pose solved;
+		if (optimizePose(this->tracker->log_level, this->tracker->deterministic, this->model, prior.pose,
+		                 sample.blobs, sample.blob_count, &device->params.led_model, device->id, solved)) {
+			xrt_vec3 d = solved.position;
+			math_vec3_subtract(&prior.pose.position, &d);
+			xrt_quat inv, dq;
+			math_quat_invert(&prior.pose.orientation, &inv);
+			math_quat_rotate(&inv, &solved.orientation, &dq);
+			float rot_deg = RAD_TO_DEG(2.0f * acosf(fminf(1.0f, fabsf(dq.w))));
+			pose_metrics score;
+			bool ok = pose_metrics_evaluate_pose_with_prior(&score, &solved, true, &prior.pose,
+			                                                &device->prior_pos_error, &device->prior_rot_error,
+			                                                sample.blobs, sample.blob_count,
+			                                                &device->params.led_model, device->id, &this->model,
+			                                                NULL);
+			if (ok && (score.matched_blobs > 4 || POSE_HAS_FLAGS(&score, POSE_MATCH_GOOD)) &&
+			    m_vec3_len(d) <= debug_get_float_option_constellation_tracker_prior_snap_max_m() &&
+			    rot_deg <= debug_get_float_option_constellation_tracker_prior_snap_max_deg()) {
+				this->pushPose(sample, device_state, device, score, solved, true,
+				               CONSTELLATION_SOLVE_TYPE_BLOB_LABELS);
+				if (device_state.found_pose.has_value()) {
+					CT_DEBUG(this->tracker,
+					         "Prior snap for device %d: shift (%.0f, %.0f) px, %d labelled, %.3f m %.1f deg "
+					         "from the prior, solved",
+					         device->id, best_shift.x, best_shift.y, labelled, m_vec3_len(d), rot_deg);
+					return true;
+				}
+			}
+		}
+	}
+	if (strict && labelled >= 4) {
+		/*
+		 * Solve from the labels, but unlike the blob recovery (which trusts any RANSAC solve with more than 4 blobs)
+		 * require a good match against the prior: a shift one LED spacing off still RANSACs cleanly onto the wrong
+		 * LEDs, and trusting that gave single-frame 9-16 cm spikes on the replays (10 in 2 sessions).
+		 */
+		xrt_pose solved;
+		if (optimizePose(this->tracker->log_level, this->tracker->deterministic, this->model, prior.pose,
+		                 sample.blobs, sample.blob_count, &device->params.led_model, device->id, solved)) {
+			pose_metrics score;
+			// The fit alone: the prior's own error is what the snap bridges, so its agreement test can't be used.
+			bool ok = pose_metrics_evaluate_pose(&score, &solved, sample.blobs, sample.blob_count,
+			                                     &device->params.led_model, device->id, &this->model, NULL);
+			if (ok && POSE_HAS_FLAGS(&score, POSE_MATCH_GOOD)) {
+				this->pushPose(sample, device_state, device, score, solved, true,
+				               CONSTELLATION_SOLVE_TYPE_BLOB_LABELS);
+				if (device_state.found_pose.has_value()) {
+					xrt_vec3 d = solved.position;
+					math_vec3_subtract(&prior.pose.position, &d);
+					xrt_quat inv, dq;
+					math_quat_invert(&prior.pose.orientation, &inv);
+					math_quat_rotate(&inv, &solved.orientation, &dq);
+					CT_DEBUG(this->tracker,
+					         "Prior snap t %" PRId64 " device %d: shift (%.0f, %.0f) px, support %d vs %d, %d "
+					         "labelled, %u matched of %u visible, reproj %.2f, from prior %.3f m %.1f deg, z %.2f",
+					         sample.timestamp_ns, device->id, best_shift.x, best_shift.y, best_support, second,
+					         labelled, score.matched_blobs, score.visible_leds, score.reprojection_error,
+					         m_vec3_len(d), RAD_TO_DEG(2.0f * acosf(fminf(1.0f, fabsf(dq.w)))), solved.position.z);
+					return true;
+				}
+			}
+		}
+	}
+
+	for (int c = 0; c < nc; c++) {
+		t_blob &blob = sample.blobs[cand[c]];
+		if (blob.matched_device_id == device->id) {
+			blob.matched_device_id = XRT_CONSTELLATION_INVALID_DEVICE_ID;
+			blob.matched_device_led_id = XRT_CONSTELLATION_INVALID_LED_ID;
+		}
+	}
+	return false;
+}
+
 bool
 Camera::tryDeviceBlobRecovery(Device *device,
                               CameraSample &sample,
@@ -551,6 +788,27 @@ Camera::tryDeviceBlobRecovery(Device *device,
 	 *       were matched in the RANSAC run, otherwise RANSAC did not even run.
 	 */
 	constexpr bool kAlwaysTrustRansac = true;
+
+	/*
+	 * Labels carried from earlier frames (or set by the prior snap) are occasionally wrong, and RANSAC fits them
+	 * cleanly: with the snap on, all of the replays' single-frame 9-16 cm spikes were blob-label solves. A solve that
+	 * far from the prior isn't the device moving.
+	 */
+	if (debug_get_bool_option_constellation_tracker_blob_recovery_prior_gate() && Tcv_cam_device_prior.has_value()) {
+		const xrt_pose &pr = Tcv_cam_device_prior->pose;
+		xrt_vec3 d = Tcv_cam_device.position;
+		math_vec3_subtract(&pr.position, &d);
+		xrt_quat inv, dq;
+		math_quat_invert(&pr.orientation, &inv);
+		math_quat_rotate(&inv, &Tcv_cam_device.orientation, &dq);
+		float rot_deg = RAD_TO_DEG(2.0f * acosf(fminf(1.0f, fabsf(dq.w))));
+		if (m_vec3_len(d) > debug_get_float_option_constellation_tracker_prior_snap_max_m() ||
+		    rot_deg > debug_get_float_option_constellation_tracker_prior_snap_max_deg()) {
+			CT_DEBUG(tracker, "Blob recovery for device %d rejected: %.3f m / %.1f deg from the prior", device->id,
+			         m_vec3_len(d), rot_deg);
+			return false;
+		}
+	}
 
 	if ((kAlwaysTrustRansac && score.matched_blobs > 4) || POSE_HAS_FLAGS(&score, POSE_MATCH_GOOD)) {
 		CT_DEBUG(tracker, "Camera %p RANSAC-PnP recovered pose was good enough for device %d from %u blobs",
@@ -722,14 +980,18 @@ Camera::processSampleSlow(CameraSample &sample)
 					time_duration_ns time_since_solve_ns =
 					    sample.timestamp_ns - last_known_pose.timestamp_ns;
 
-					if (time_since_solve_ns < (U_TIME_1MS_IN_NS * 150LL)) {
+					if (time_since_solve_ns <
+					    (U_TIME_1MS_IN_NS * debug_get_num_option_constellation_tracker_slow_skip_ms())) {
 						// If the device has been seen in the last 150ms, don't try to brute
 						// force search it, hope that it will be seen by a fast solve in that
 						// time period.
 						device_state.solve_type =
 						    CONSTELLATION_SOLVE_TYPE_NO_SOLVE_FAST_SOLVED_RECENTLY;
 						continue;
-					} else if ((time_since_solve_ns < (U_TIME_1MS_IN_NS * 1000LL) ||
+					} else if (debug_get_num_option_constellation_tracker_deep_delay_ms() > 0 &&
+					           (time_since_solve_ns <
+					                (U_TIME_1MS_IN_NS *
+					                 debug_get_num_option_constellation_tracker_deep_delay_ms()) ||
 					            this->shallow_searches_failed.load() < 10) &&
 					           (search_flags & CS_FLAG_DEEP_SEARCH)) {
 						// Don't do a deep search until a shallow search has failed for one full
@@ -791,10 +1053,7 @@ Camera::processSampleSlow(CameraSample &sample)
 				xrt_pose Tcv_world_cam;
 				math_pose_convert_from_opencv(&Txr_world_cam.value(), &Tcv_world_cam);
 				get_pose_gravity_vector(Tcv_world_cam, up_in_camera);
-				xrt_quat inv;
-				xrt_vec3 world_up = XRT_VEC3_UNIT_Y;
-				math_quat_invert(&q_imu, &inv);
-				math_quat_rotate_vec3(&inv, &world_up, &imu_up_in_device);
+				imu_up_in_device = device->imuUpInDevice(q_imu);
 				have_imu_up = true;
 			}
 
@@ -939,7 +1198,8 @@ Camera::processSampleFast(CameraSample &sample)
 			// rotation every second, then skip blob recovery, and also wipe associations, that's too fast
 			// to keep sane blob associations.
 			if (m_vec3_len(Tcv_cam_device_predicted->linear_velocity) > 5 ||
-			    m_vec3_len(Tcv_cam_device_predicted->angular_velocity) > (M_PI * 2)) {
+			    m_vec3_len(Tcv_cam_device_predicted->angular_velocity) >
+			        DEG_TO_RAD(debug_get_float_option_constellation_tracker_blob_recovery_max_dps())) {
 				do_blob_recovery = false;
 			}
 		}
@@ -968,6 +1228,12 @@ Camera::processSampleFast(CameraSample &sample)
 			continue; // try the next device, we found a pose!
 		} else {
 			wipe_blob_associations = true;
+		}
+
+		if (debug_get_bool_option_constellation_tracker_prior_snap() && Tcv_cam_device_predicted.has_value() &&
+		    this->tryDevicePriorSnap(device, sample, device_state, Tcv_cam_device_predicted.value())) {
+			CT_DEBUG(tracker, "Fast processing for device %d succeeded with a prior snap", device->id);
+			continue;
 		}
 
 		// Try to get a last known pose
@@ -1001,6 +1267,51 @@ Camera::processSampleFast(CameraSample &sample)
 				if (b.matched_device_id == device->id) {
 					b.matched_device_led_id = XRT_CONSTELLATION_INVALID_LED_ID;
 					b.matched_device_id = XRT_CONSTELLATION_INVALID_DEVICE_ID;
+				}
+			}
+		}
+
+		/*
+		 * The prior didn't match directly, but it's usually close: when the slow search found these, the prior was
+		 * a median 5 deg / 2 cm off (12-25 px) at any speed (23:01 run replay). The slow search's prior-seeded
+		 * shallow search finds them; doing it here doesn't wait for the slow thread, which drops frames when busy.
+		 */
+		if (debug_get_bool_option_constellation_tracker_fast_prior_search() && Tcv_cam_device_predicted.has_value()) {
+			auto &cs = this->fast_processing_thread_data.cs;
+			correspondence_search_set_blobs(cs, sample.blobs, sample.blob_count);
+			xrt_pose Tcv_cam_device = Tcv_cam_device_predicted->pose;
+			correspondence_search_flags flags = (correspondence_search_flags)(
+			    CS_FLAG_SHALLOW_SEARCH | CS_FLAG_HAVE_POSE_PRIOR | CS_FLAG_STOP_FOR_STRONG_MATCH);
+			xrt_vec3 cv_gravity = {0.0, 1.0, 0.0};
+			xrt_vec3 up_in_camera = {0, 1, 0}, imu_up_in_device = {0, 1, 0};
+			bool have_imu_up = false;
+			if (Tcv_world_cam.has_value()) {
+				xrt_pose Tcv_world_cam_v = Tcv_world_cam.value();
+				if (device->gravity_error_rad < DEG_TO_RAD(25.f)) {
+					get_pose_gravity_vector(Tcv_world_cam_v, cv_gravity);
+					flags = (correspondence_search_flags)(flags | CS_FLAG_MATCH_GRAVITY);
+				}
+				xrt_quat q_imu;
+				if (tracker->gravity_gate_deg > 0.0f && device->device->get_imu_orientation != NULL &&
+				    device->device->get_imu_orientation(device->device, sample.timestamp_ns, &q_imu)) {
+					get_pose_gravity_vector(Tcv_world_cam_v, up_in_camera);
+					imu_up_in_device = device->imuUpInDevice(q_imu);
+					have_imu_up = true;
+				}
+			}
+			pose_metrics score;
+			if (correspondence_search_find_one_pose(cs, device->search_model, flags, &Tcv_cam_device,
+			                                        &device->prior_pos_error, &device->prior_rot_error,
+			                                        &cv_gravity, device->gravity_error_rad,
+			                                        have_imu_up ? &imu_up_in_device : NULL,
+			                                        have_imu_up ? &up_in_camera : NULL,
+			                                        DEG_TO_RAD(tracker->gravity_gate_deg), &score)) {
+				this->pushPose(sample, device_state, device, score, Tcv_cam_device, false,
+				               CONSTELLATION_SOLVE_TYPE_SHALLOW_CORRESPONDENCE_SEARCH);
+				if (device_state.found_pose.has_value()) {
+					CT_DEBUG(tracker, "Fast processing for device %d succeeded with a prior-seeded search",
+					         device->id);
+					continue;
 				}
 			}
 		}
@@ -1047,6 +1358,31 @@ Camera::pushPose(CameraSample &camera_sample,
 	ConstellationTracker *tracker = this->tracker;
 
 	uint32_t blobs_marked_before_update = num_blobs_for_device(camera_sample, device->id);
+
+	// Diagnostics: when the slow search had to find it, how far off was the prior the fast path tried?
+	if ((solve_type == CONSTELLATION_SOLVE_TYPE_SHALLOW_CORRESPONDENCE_SEARCH ||
+	     solve_type == CONSTELLATION_SOLVE_TYPE_DEEP_CORRESPONDENCE_SEARCH) &&
+	    device_state.Tcv_cam_device_predicted.has_value()) {
+		const xrt_pose &pr = device_state.Tcv_cam_device_predicted->pose;
+		xrt_quat inv, dq;
+		math_quat_invert(&pr.orientation, &inv);
+		math_quat_rotate(&inv, &Tcv_cam_device_initial.orientation, &dq);
+		float rot_deg = RAD_TO_DEG(2.0f * acosf(fminf(1.0f, fabsf(dq.w))));
+		xrt_vec3 d = Tcv_cam_device_initial.position;
+		math_vec3_subtract(&pr.position, &d);
+		// Image shift of the device centre between prior and solve, in focal lengths (x by f for pixels).
+		float z = fmaxf(0.05f, Tcv_cam_device_initial.position.z);
+		float shift = sqrtf((pr.position.x / fmaxf(0.05f, pr.position.z) - Tcv_cam_device_initial.position.x / z) *
+		                        (pr.position.x / fmaxf(0.05f, pr.position.z) - Tcv_cam_device_initial.position.x / z) +
+		                    (pr.position.y / fmaxf(0.05f, pr.position.z) - Tcv_cam_device_initial.position.y / z) *
+		                        (pr.position.y / fmaxf(0.05f, pr.position.z) - Tcv_cam_device_initial.position.y / z));
+		CT_DEBUG(tracker,
+		         "Prior vs slow solve for device %d: rot %.1f deg, pos %.3f m, image shift %.3f, prior speed %.2f m/s "
+		         "%.0f deg/s",
+		         device->id, rot_deg, m_vec3_len(d), shift,
+		         m_vec3_len(device_state.Tcv_cam_device_predicted->linear_velocity),
+		         RAD_TO_DEG(m_vec3_len(device_state.Tcv_cam_device_predicted->angular_velocity)));
+	}
 
 	// Match visible blobs to the pose we found
 	pose_metrics_blob_match_info blob_match_info;
@@ -1176,8 +1512,7 @@ Camera::pushPose(CameraSample &camera_sample,
 			xrt_quat q_inv;
 			math_quat_invert(&q_opt, &q_inv);
 			math_quat_rotate_vec3(&q_inv, &world_up, &optical_up);
-			math_quat_invert(&q_imu, &q_inv);
-			math_quat_rotate_vec3(&q_inv, &world_up, &imu_up);
+			imu_up = device->imuUpInDevice(q_imu);
 			float angle_deg = RAD_TO_DEG(acosf(CLAMP(m_vec3_dot(optical_up, imu_up), -1.0f, 1.0f)));
 			if (angle_deg > tracker->gravity_gate_deg) {
 				CT_DEBUG(tracker,
@@ -1237,6 +1572,8 @@ Camera::pushPose(CameraSample &camera_sample,
 			device->gyro_ref_optical = q_opt;
 			device->gyro_ref_imu = q_imu;
 		}
+		// Passed the IMU checks: let it pull the learned IMU up toward the optical one.
+		device->learnImuUp(q_imu, q_opt);
 	}
 
 	// Compute the metrics
@@ -1357,6 +1694,43 @@ DeviceLastPose::DeviceLastPose(xrt_pose Txr_world_device, xrt_pose Tcv_cam_devic
  * Device implementations
  *
  */
+
+xrt_vec3
+Device::imuUpInDevice(const xrt_quat &q_imu)
+{
+	xrt_vec3 up = XRT_VEC3_UNIT_Y;
+	if (debug_get_float_option_constellation_tracker_imu_up_learn() > 0.0f) {
+		std::lock_guard<std::mutex> g(this->imu_up_lock);
+		up = this->imu_world_up;
+	}
+	xrt_quat inv;
+	math_quat_invert(&q_imu, &inv);
+	xrt_vec3 out;
+	math_quat_rotate_vec3(&inv, &up, &out);
+	return out;
+}
+
+void
+Device::learnImuUp(const xrt_quat &q_imu, const xrt_quat &q_optical)
+{
+	const float gain = debug_get_float_option_constellation_tracker_imu_up_learn();
+	if (gain <= 0.0f) {
+		return;
+	}
+	// The optical up (world +Y) in the device frame, then into the IMU's world frame.
+	xrt_quat inv;
+	math_quat_invert(&q_optical, &inv);
+	xrt_vec3 world_up = XRT_VEC3_UNIT_Y, up_dev, up_imu_world;
+	math_quat_rotate_vec3(&inv, &world_up, &up_dev);
+	math_quat_rotate_vec3(&q_imu, &up_dev, &up_imu_world);
+	std::lock_guard<std::mutex> g(this->imu_up_lock);
+	xrt_vec3 u = this->imu_world_up;
+	u.x += gain * (up_imu_world.x - u.x);
+	u.y += gain * (up_imu_world.y - u.y);
+	u.z += gain * (up_imu_world.z - u.z);
+	math_vec3_normalize(&u);
+	this->imu_world_up = u;
+}
 
 Device::Device(ConstellationTracker *tracker,
                t_constellation_tracker_device_params *params,

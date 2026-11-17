@@ -28,6 +28,8 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "pssense_clock_long.h"
+
 
 #define PSSENSE_CLOCK_BUCKET_NS (U_TIME_1MS_IN_NS * 250)
 #define PSSENSE_CLOCK_NUM_BUCKETS 32
@@ -68,6 +70,10 @@ struct pssense_clock
 
 	uint32_t below_count;
 
+	//! PSSENSE_CLOCK_LONG: the long-window estimate (pssense_clock_long.h) drives the output instead. Kept by resets.
+	bool use_long;
+	struct pssense_clock_long lng;
+
 	//! Logged every few seconds.
 	struct
 	{
@@ -82,8 +88,10 @@ static inline void
 pssense_clock_reset(struct pssense_clock *c)
 {
 	uint32_t resets = c->stats.resets + 1;
+	bool use_long = c->use_long;
 	memset(c, 0, sizeof(*c));
 	c->stats.resets = resets;
+	c->use_long = use_long;
 }
 
 static inline void
@@ -232,7 +240,14 @@ pssense_clock_push(struct pssense_clock *c, timepoint_ns local_ns, timepoint_ns 
 	}
 	c->samples++;
 
+	pssense_clock_long_push(&c->lng, local_ns, remote_ns);
 	pssense_clock_fit(c, local_ns);
+	if (c->use_long && c->lng.have_out) {
+		c->output_offset = c->lng.out;
+		c->have_output = true;
+		c->b = c->lng.skew;
+		return;
+	}
 	time_duration_ns target = (time_duration_ns)c->a; // at ref = now
 
 	if (!c->have_output) {

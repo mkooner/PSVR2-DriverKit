@@ -53,6 +53,15 @@ struct t_timing_event_source *
 psvr2_hmd_get_timing_event_source(struct psvr2_hmd *hmd);
 
 /*!
+ * Tell the headset its Sense controllers are attached (pssense_left/right set): creates the LED tracker from an
+ * already received calibration block.
+ *
+ * @ingroup drv_psvr2
+ */
+void
+psvr2_hmd_controllers_attached(struct xrt_device *hmd_xdev);
+
+/*!
  * Whether optical hand tracking was asked for (PSVR2_HAND_TRACKING): the headset then streams the bottom camera
  * pair (camera mode 0x10) and the builder creates the hand tracking device.
  *
@@ -60,6 +69,15 @@ psvr2_hmd_get_timing_event_source(struct psvr2_hmd *hmd);
  */
 bool
 psvr2_hand_tracking_enabled(void);
+
+/*!
+ * Allow or forbid hand tracking, before the headset is created. The builder forbids it when Sense controllers are
+ * connected: they take the hand roles, and the cameras then stay in their usual mode.
+ *
+ * @ingroup drv_psvr2
+ */
+void
+psvr2_hand_tracking_set_allowed(bool allowed);
 
 /*!
  * Give the hand tracking device (psvr2_hand_tracking_create) to the headset, which feeds it camera images and, once
