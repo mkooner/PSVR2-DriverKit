@@ -62,6 +62,20 @@ int
 pssense_add_to_constellation_tracker(struct xrt_device *xdev, struct t_constellation_tracker *tracker);
 
 /*!
+ * The controller's outline as its LED positions in the grip pose's frame (the pose clients get for the grip input),
+ * so the lowest point of a resting controller can be found. Returns the number of points written.
+ *
+ * @param xdev          The PlayStation Sense controller device.
+ * @param out_points    Points, in meters, in the grip frame.
+ * @param max_points    Size of @p out_points.
+ * @param out_radius_m  Optional: the LEDs' radius (how far the shell reaches past each point).
+ *
+ * @ingroup drv_pssense
+ */
+size_t
+pssense_get_grip_outline(struct xrt_device *xdev, struct xrt_vec3 *out_points, size_t max_points, float *out_radius_m);
+
+/*!
  * @dir drivers/pssense
  *
  * @brief @ref drv_pssense files.

@@ -2435,6 +2435,56 @@ quat_from_x_rot(float x)
 	};
 }
 
+//! SteamVR's controller root -> LED model (the frame Sony's model is in).
+static struct xrt_pose
+pssense_T_steamvrroot_model(const struct pssense_device *pssense)
+{
+	float sx = pssense->hand == XRT_HAND_LEFT ? 1.0f : -1.0f;
+	return (struct xrt_pose){
+	    .orientation = quat_from_x_rot(DEG_TO_RAD(-39)),
+	    .position = {.x = -sx * .01432f, .y = .007713f, .z = .10399f},
+	};
+}
+
+//! SteamVR's controller root -> OpenXR grip pose.
+static struct xrt_pose
+pssense_T_steamvrroot_xrgrip(const struct pssense_device *pssense)
+{
+	float sx = pssense->hand == XRT_HAND_LEFT ? 1.0f : -1.0f;
+	return (struct xrt_pose){
+	    .orientation = quat_from_x_rot(DEG_TO_RAD(20.6)),
+	    .position = {.x = sx * .007, .y = -.00182941, .z = .1019482},
+	};
+}
+
+size_t
+pssense_get_grip_outline(struct xrt_device *xdev, struct xrt_vec3 *out_points, size_t max_points, float *out_radius_m)
+{
+	struct pssense_device *pssense = from_device(xdev);
+
+	// The grip pose is imu * inv(T_led_imu) * inv(model) * xrgrip (see pssense_get_tracked_pose), and the LED
+	// positions are stored in the IMU frame, so in the grip frame they are inv(xrgrip) * model * T_led_imu * led.
+	struct xrt_pose model = pssense_T_steamvrroot_model(pssense);
+	struct xrt_pose xrgrip = pssense_T_steamvrroot_xrgrip(pssense);
+	struct xrt_pose grip_root;
+	math_pose_invert(&xrgrip, &grip_root);
+	struct xrt_pose grip_model;
+	math_pose_transform(&grip_root, &model, &grip_model);
+	struct xrt_pose grip_imu;
+	math_pose_transform(&grip_model, &pssense->tracking.T_led_imu, &grip_imu);
+
+	size_t count = pssense->led_model.led_count < max_points ? pssense->led_model.led_count : max_points;
+	float radius = 0.0f;
+	for (size_t i = 0; i < count; i++) {
+		math_pose_transform_point(&grip_imu, &pssense->led_model.leds[i].position, &out_points[i]);
+		radius = fmaxf(radius, pssense->led_model.leds[i].radius_m);
+	}
+	if (out_radius_m != NULL) {
+		*out_radius_m = radius;
+	}
+	return count;
+}
+
 static xrt_result_t
 pssense_get_tracked_pose(struct xrt_device *xdev,
                          enum xrt_input_name name,
@@ -2451,14 +2501,8 @@ pssense_get_tracked_pose(struct xrt_device *xdev,
 	struct xrt_relation_chain xrc = {0};
 
 	float sx = pssense->hand == XRT_HAND_LEFT ? 1.0f : -1.0f;
-	struct xrt_pose T_steamvrroot_model = {
-	    .orientation = quat_from_x_rot(DEG_TO_RAD(-39)),
-	    .position = {.x = -sx * .01432f, .y = .007713f, .z = .10399f},
-	};
-	struct xrt_pose T_steamvrroot_xrgrip = {
-	    .orientation = quat_from_x_rot(DEG_TO_RAD(20.6)),
-	    .position = {.x = sx * .007, .y = -.00182941, .z = .1019482},
-	};
+	struct xrt_pose T_steamvrroot_model = pssense_T_steamvrroot_model(pssense);
+	struct xrt_pose T_steamvrroot_xrgrip = pssense_T_steamvrroot_xrgrip(pssense);
 	struct xrt_pose T_steamvrroot_xraim = {
 	    .orientation = quat_from_x_rot(DEG_TO_RAD(-39.4)),
 	    .position = {.x = sx * .007, .y = -.03894766, .z = .00949694},

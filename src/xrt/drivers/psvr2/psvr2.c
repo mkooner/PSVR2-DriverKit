@@ -55,6 +55,8 @@
 #include <inttypes.h>
 #include <libusb.h>
 
+// The implementation (u_sink_converter.c) is built with the precise BC4 decoder, so declare the same signature.
+#define BCDEC_BC4BC5_PRECISE
 #include "bcdec.h"
 
 #include "psvr2.h"
@@ -96,6 +98,11 @@ DEBUG_GET_ONCE_BOOL_OPTION(psvr2_recenter, "PSVR2_RECENTER", true)
 DEBUG_GET_ONCE_NUM_OPTION(psvr2_camera_exposure_us, "PSVR2_CAMERA_EXPOSURE_US", 840)
 // Path to record raw IMU and SLAM samples to (CSV), for replaying through the pose simulator.
 DEBUG_GET_ONCE_OPTION(psvr2_record_file, "PSVR2_RECORD_FILE", NULL)
+/*!
+ * Directory to save a pair of bottom camera images to every 2 s (PGM, 1000x1000), to judge whether they could
+ * drive a room relocalizer (are they exposed for the room, or dark like the LED frames?). Off when unset.
+ */
+DEBUG_GET_ONCE_OPTION(psvr2_record_images, "PSVR2_RECORD_IMAGES", NULL)
 
 static void
 psvr2_usb_stop(struct psvr2_hmd *hmd);
@@ -436,6 +443,42 @@ status_xfer_cb(struct libusb_transfer *xfer)
 	os_mutex_unlock(&hmd->data_lock);
 }
 
+/*!
+ * PSVR2_RECORD_IMAGES: decode the two BC4 images of a mode 10 transfer and write them as PGM, every 2 s. Opt-in
+ * diagnostics only: the write (2 x 1 MB) happens on the USB thread.
+ */
+static void
+psvr2_record_images(struct psvr2_hmd *hmd, const uint8_t *src, size_t img_size, int64_t now)
+{
+	const char *dir = debug_get_option_psvr2_record_images();
+	if (dir == NULL || now - hmd->last_image_record_ns < 2 * U_TIME_1S_IN_NS) {
+		return;
+	}
+	hmd->last_image_record_ns = now;
+
+	static uint8_t pixels[USB_CAM_MODE10_WIDTH * USB_CAM_MODE10_HEIGHT];
+	const size_t row_blocks = USB_CAM_MODE10_PIXEL_STRIDE / 4;
+	for (int i = 0; i < 2; i++) {
+		for (uint32_t by = 0; by < USB_CAM_MODE10_HEIGHT / 4; by++) {
+			for (uint32_t bx = 0; bx < USB_CAM_MODE10_WIDTH / 4; bx++) {
+				const uint8_t *block = src + (by * row_blocks + bx) * BCDEC_BC4_BLOCK_SIZE;
+				bcdec_bc4(block, pixels + (by * 4) * USB_CAM_MODE10_WIDTH + bx * 4, USB_CAM_MODE10_WIDTH, 0);
+			}
+		}
+		char path[512];
+		snprintf(path, sizeof(path), "%s/cam%d-%" PRId64 ".pgm", dir, i, now);
+		FILE *f = fopen(path, "wb");
+		if (f == NULL) {
+			PSVR2_WARN(hmd, "PSVR2_RECORD_IMAGES: can't write %s", path);
+			return;
+		}
+		fprintf(f, "P5\n%d %d\n255\n", USB_CAM_MODE10_WIDTH, USB_CAM_MODE10_HEIGHT);
+		fwrite(pixels, 1, sizeof(pixels), f);
+		fclose(f);
+		src += img_size + (BCDEC_BC4_BLOCK_SIZE * row_blocks * (24 / 4));
+	}
+}
+
 static void LIBUSB_CALL
 img_xfer_cb(struct libusb_transfer *xfer)
 {
@@ -459,6 +502,7 @@ img_xfer_cb(struct libusb_transfer *xfer)
 			    BCDEC_BC4_COMPRESSED_SIZE(USB_CAM_MODE10_PIXEL_STRIDE, USB_CAM_MODE10_HEIGHT);
 
 			int64_t now = os_monotonic_get_ns();
+			psvr2_record_images(hmd, src, img_size, now);
 			for (int i = 0; i < 2; i++) {
 				bool debug_active = u_sink_debug_is_active(&hmd->debug_sinks[i]);
 
@@ -583,6 +627,7 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	os_mutex_lock(&hmd->data_lock);
 
 	const struct xrt_quat old_pose_orientation = hmd->last_slam_pose.orientation;
+	const struct xrt_vec3 old_pose_position = hmd->last_slam_pose.position;
 
 	uint32_t last_slam_vts_us = hmd->last_slam_vts_us;
 	hmd->last_slam_vts_us = __le32_to_cpu(slam.vts_ts_us);
@@ -597,6 +642,23 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 	hmd->last_slam_pose.orientation.x = -__lef32_to_cpu(slam.orient[2]);
 	hmd->last_slam_pose.orientation.y = -__lef32_to_cpu(slam.orient[1]);
 	hmd->last_slam_pose.orientation.z = __lef32_to_cpu(slam.orient[3]);
+
+	/*
+	 * SLAM reset: the raw position snaps back to the origin (within 1 mm, from at least 5 mm away; orientation
+	 * carries on). In recordings this happens in bursts during the first ~15 s and, with older builds, mid-session.
+	 * Carrying the position on across it was simulated (psvr2-test/analysis/slam_rebase_sim.py) and didn't help, so
+	 * it's only counted, for the SteamVR room calibration to know the world was replaced.
+	 */
+	{
+		const struct xrt_vec3 *now_pos = &hmd->last_slam_pose.position;
+		float now_len = m_vec3_len(*now_pos);
+		float old_len = m_vec3_len(old_pose_position);
+		if (now_len < 0.001f && old_len > 0.005f) {
+			hmd->slam_reset_count++;
+			PSVR2_DEBUG(hmd, "SLAM reset %u: position snapped back to the origin from %.3f m", hmd->slam_reset_count,
+			            old_len);
+		}
+	}
 
 	// Always choose nearest quaternion to last slam pose. This prevents the motion estimation from thinking the
 	// device has rotated nearly 360 degrees when the SLAM tracker gives us the 2nd poled quaternion for the
@@ -1922,4 +1984,14 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 cleanup:
 	psvr2_hmd_destroy(&hmd->base);
 	return NULL;
+}
+
+uint32_t
+psvr2_get_slam_reset_count(struct xrt_device *xdev)
+{
+	struct psvr2_hmd *hmd = psvr2_hmd(xdev);
+	os_mutex_lock(&hmd->data_lock);
+	uint32_t count = hmd->slam_reset_count;
+	os_mutex_unlock(&hmd->data_lock);
+	return count;
 }

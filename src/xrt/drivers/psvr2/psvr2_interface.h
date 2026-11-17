@@ -38,6 +38,15 @@ struct psvr2_hmd;
 struct xrt_device *
 psvr2_hmd_create(struct xrt_prober_device *xpdev);
 
+/*!
+ * How many times the headset's SLAM has re-originated its position this session (the tracking world's origin was
+ * replaced). @p xdev must be a PS VR2 headset (XRT_DEVICE_PSVR2).
+ *
+ * @ingroup drv_psvr2
+ */
+uint32_t
+psvr2_get_slam_reset_count(struct xrt_device *xdev);
+
 
 struct t_timing_event_source *
 psvr2_hmd_get_timing_event_source(struct psvr2_hmd *hmd);
