@@ -14,6 +14,7 @@ add_library(
 	led_search_model.c
 	led_search_model.h
 	pose_metrics.c
+	t_blob_background.c
 	pose_metrics.h
 	t_constellation_tracker_dataset.cpp
 	t_constellation_tracker_dataset.hpp

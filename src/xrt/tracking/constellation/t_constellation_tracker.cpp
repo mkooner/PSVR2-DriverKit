@@ -71,6 +71,11 @@ DEBUG_GET_ONCE_BOOL_OPTION(constellation_tracker_blob_recovery_prior_gate, "T_CO
  * the 35 deg gate then rejected every correct pose: the right controller froze for ~35 s with its LEDs in view.
  * Replayed with 0.05: that window 4% -> 82% of frames with a fix, time without a fix 31/41% -> 17/18% (00:06) and
  * 25/21% -> 17/11% (23:22), unchanged on calmer runs, no single-frame spikes.
+ *
+ * A mitigation. The controllers' gyro bias is now removed at rest (pssense_imu_rest.h); the rest of the error is a
+ * ~30 deg pitch between the PS VR2 camera rig and gravity (controller gravity vs the tracker's up in every recording,
+ * headset SLAM level to 0.5 deg; compensated so far by PSSENSE_IMU_REF_CORRECTION_DEG) and the right controller's gyro
+ * cross-axis error (~2.3% X-Z). Remove once both are fixed at the source.
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_imu_up_learn, "T_CONSTELLATION_IMU_UP_LEARN", 0.05f)
 //! Largest prior image error the snap searches (undistorted px).
@@ -257,8 +262,22 @@ CameraSample::CameraSample(t_blob_observation &blobservation, Camera *camera)
 	this->id = blobservation.id;
 	this->sequence_id = blobservation.sequence_id;
 	this->timestamp_ns = blobservation.timestamp_ns;
-	memcpy(blobs, blobservation.blobs, sizeof(t_blob) * blobservation.num_blobs);
-	this->blob_count = blobservation.num_blobs;
+	/*
+	 * The only place blobs enter the tracker, so the bound holds for every array sized by
+	 * XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME behind it (the correspondence search's among them).
+	 */
+	uint32_t num_blobs = blobservation.num_blobs;
+	if (num_blobs > XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME) {
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			U_LOG_W("Camera frame with %u blobs, the tracker holds %u: using the first %u", num_blobs,
+			        (unsigned)XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME, (unsigned)XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME);
+		}
+		num_blobs = XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME;
+	}
+	memcpy(blobs, blobservation.blobs, sizeof(t_blob) * num_blobs);
+	this->blob_count = num_blobs;
 
 	// Get the camera pose
 	this->Txr_world_cam = camera->getWorldPose(blobservation.timestamp_ns);
@@ -938,6 +957,10 @@ Camera::processSampleSlow(CameraSample &sample)
 
 			// Device is not enabled.
 			if (!device->enabled.load()) {
+				continue;
+			}
+			// LEDs not synchronised to the exposures: a search can't find them, see is_led_synced.
+			if (device->device->is_led_synced != NULL && !device->device->is_led_synced(device->device)) {
 				continue;
 			}
 			bool shallow = pass == 0;

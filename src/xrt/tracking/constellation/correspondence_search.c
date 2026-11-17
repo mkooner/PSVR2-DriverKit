@@ -827,7 +827,13 @@ correspondence_search_set_blobs(struct correspondence_search *cs, struct t_blob 
 {
 	struct cs_image_point *blob_list[XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME];
 
-	assert(num_blobs <= XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME);
+	// blob_list and blob_neighbours hold at most this many; an assert alone is compiled out in release builds.
+	if (num_blobs > XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME) {
+		num_blobs = XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME;
+	}
+	if (num_blobs < 0) {
+		num_blobs = 0;
+	}
 
 	if (cs->points != NULL) {
 		free(cs->points);

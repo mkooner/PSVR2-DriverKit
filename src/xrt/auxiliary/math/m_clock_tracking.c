@@ -182,9 +182,19 @@ m_clock_windowed_skew_tracker_push(struct m_clock_windowed_skew_tracker *t,
 	/* Wrap around the window index */
 	t->current_window_pos = (t->current_window_pos + 1) % t->max_window_samples;
 
-	/* Update the moving average skew */
-	ssize_t w = t->current_window_samples;
-	t->current_skew = (t->current_min_skew + t->current_skew * (w - 1)) / w;
+	/*
+	 * Update the moving average skew. While the window fills, its minimum can only fall, so averaging it weighs the
+	 * worst early values most: a device whose first samples arrive as a backlog draining over a fraction of a second
+	 * (PS VR2: up to 650ms late, in steps under CLOCK_RESET_THRESHOLD) left the output 245ms off at 0.5s and 113ms off
+	 * with the window full, then the w-sample average took ~10s to get within 0.3ms. The minimum so far is the best
+	 * estimate then; the average only smooths the steps when the minimum's sample leaves a full window.
+	 */
+	if (t->current_window_samples < t->max_window_samples) {
+		t->current_skew = t->current_min_skew;
+	} else {
+		ssize_t w = t->current_window_samples;
+		t->current_skew = (t->current_min_skew + t->current_skew * (w - 1)) / w;
+	}
 	t->have_skew_estimate = true;
 }
 

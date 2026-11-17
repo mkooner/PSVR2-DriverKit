@@ -41,10 +41,12 @@
 #include "math/m_space.h"
 
 #include "pssense_clock.h"
+#include "pssense_imu_rest.h"
 #include "pssense_interface.h"
 #include "pssense_led_model.h"
 #include "pssense_protocol.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <errno.h>
 
@@ -87,6 +89,12 @@ DEBUG_GET_ONCE_NUM_OPTION(pssense_max_prediction_ms, "PSSENSE_MAX_PREDICTION_MS"
  * constant velocity while the optical fixes stayed at the hands, flagged as tracked throughout. 0 disables.
  */
 DEBUG_GET_ONCE_NUM_OPTION(pssense_fusion_max_error_cm, "PSSENSE_FUSION_MAX_ERROR_CM", 20)
+/*!
+ * Estimate the gyro bias whenever the controller rests, and level the 3DoF fusion on the first rest
+ * (pssense_imu_rest.h). Replayed through m_imu_3dof on three recordings, the controllers' up direction drifted
+ * 13 deg (left) a minute without it, 6 deg with it; the worst right-controller error 65 -> 44 deg.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(pssense_imu_rest, "PSSENSE_IMU_REST", true)
 /*!
  * Record each controller's IMU to <this>-L.csv / <this>-R.csv (rows: host_ns, imu_ns, gyro xyz rad/s, accel xyz m/s2,
  * IMU orientation xyzw), to test bridging optical gaps with the accelerometer offline. Off when unset.
@@ -255,6 +263,8 @@ struct pssense_device
 	struct t_timing_event_sink timing_event_sink;
 	struct t_constellation_tracker_led_model led_model;
 	struct t_constellation_tracker_device constellation_device;
+	//! The LEDs may be in the pictures (locked, or lit at a calibration test offset), see pssense_is_led_synced.
+	_Atomic bool led_synced;
 
 	bool usb;
 	struct h_hid_device *hid;
@@ -311,6 +321,8 @@ struct pssense_device
 	{
 		struct m_relation_history *imu_relation_history;
 		struct m_imu_3dof fusion;
+		//! Rest detection for the gyro bias and initial leveling.
+		struct pssense_imu_rest rest;
 		struct xrt_pose pose;
 
 		uint32_t received_frames;
@@ -371,8 +383,9 @@ struct pssense_device
 
 		/*!
 		 * Rotation from the 3DoF IMU fusion's world into the tracking world, learned from accepted optical poses:
-		 * align ~= optical orientation * IMU orientation^-1. The fusion's world is tilted 27-30 deg from gravity
-		 * and turned in yaw, differently per controller (02:03 / 01:47 runs), so showing the raw 3DoF orientation
+		 * align ~= optical orientation * IMU orientation^-1. The fusion's world is tilted 27-30 deg from the
+		 * tracking world (a pitch between the PS VR2 camera rig and gravity) and turned in yaw, differently per
+		 * controller (02:03 / 01:47 runs), so showing the raw 3DoF orientation
 		 * while optically lost turned the controller by a median 105 / 131 deg. Stable within a median 3.8 deg over
 		 * the session. Display only.
 		 */
@@ -748,6 +761,18 @@ pssense_update_fusion(struct pssense_device *pssense)
 	    .z = (pssense->state.accel_raw.z - pssense->calibration.accel_bias.z) * pssense->calibration.accel_scale.z,
 	};
 
+	if (debug_get_bool_option_pssense_imu_rest()) {
+		bool was_leveled = pssense->tracking.rest.leveled;
+		bool had_bias = pssense->tracking.rest.bias_valid;
+		if (pssense_imu_rest_push(&pssense->tracking.rest, &pssense->tracking.fusion,
+		                          (int64_t)pssense->timing.latest_imu_time_ns, &gyro, &accel) &&
+		    (!had_bias || !was_leveled)) {
+			const struct xrt_vec3 *b = &pssense->tracking.rest.bias;
+			PSSENSE_WARN(pssense, "At rest: gyro bias %.3f %.3f %.3f deg/s%s", RAD_TO_DEG(b->x),
+			             RAD_TO_DEG(b->y), RAD_TO_DEG(b->z), was_leveled ? "" : ", orientation leveled");
+		}
+	}
+
 	m_imu_3dof_update(&pssense->tracking.fusion, pssense->timing.latest_imu_time_ns, &accel, &gyro);
 	pssense->tracking.pose.orientation = pssense->tracking.fusion.rot;
 
@@ -771,8 +796,10 @@ pssense_update_fusion(struct pssense_device *pssense)
 	 * with the world-frame rate (psvr2-test/analysis/jitter/ctrl_imu_extrap.py), feeding the gyro and gravity gates
 	 * that rejected good optical fixes during fast swings.
 	 */
+	// Without the gyro bias the fusion integrated; the tracker's sink below gets the raw rate (it estimates its own).
+	struct xrt_vec3 gyro_unbiased = m_vec3_sub(gyro, pssense->tracking.fusion.gyro_bias.value);
 	struct xrt_vec3 angular_velocity_world;
-	math_quat_rotate_vec3(&pssense->tracking.pose.orientation, &gyro, &angular_velocity_world);
+	math_quat_rotate_vec3(&pssense->tracking.pose.orientation, &gyro_unbiased, &angular_velocity_world);
 
 	struct xrt_space_relation space_relation = {
 	    .pose = pssense->tracking.pose,
@@ -2002,6 +2029,7 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 		struct t_timing_event_camera_exposure_start led_sync_event = event->camera_exposure_start;
 		led_sync_event.frame_period_ns = pssense->tracking.average_exposure_interval_ns;
 		t_led_sync_push_timing_event(&pssense->tracking.led_sync_refinement, &led_sync_event);
+		atomic_store(&pssense->led_synced, t_led_sync_leds_may_be_lit(&pssense->tracking.led_sync_refinement));
 	}
 
 	os_thread_helper_lock(&pssense->controller_thread);
@@ -2210,6 +2238,13 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
  * time, for the tracker's gravity and gyro gates. Looked up exactly in the IMU history, without the latest-sample
  * clamp used for display, since the camera exposure is usually 10-30ms older than the newest IMU sample.
  */
+static bool
+pssense_is_led_synced(struct t_constellation_tracker_device *device)
+{
+	struct pssense_device *pssense = container_of(device, struct pssense_device, constellation_device);
+	return atomic_load(&pssense->led_synced);
+}
+
 static bool
 pssense_get_imu_orientation(struct t_constellation_tracker_device *device,
                             int64_t timestamp_ns,
@@ -2879,6 +2914,11 @@ pssense_create(struct xrt_prober *xp,
 	} else if (debug_get_bool_option_pssense_count_calibration()) {
 		sync_refinement_flags |= T_LED_SYNC_REFINEMENT_FLAGS_COUNT_CALIBRATION;
 		pssense->tracking.count_calibration = true;
+		/*
+		 * Only with count calibration, whose lock is what puts the LEDs in the pictures; the other LED sync modes
+		 * find their offset from the tracker's own poses, so they need the search while unlocked.
+		 */
+		pssense->constellation_device.is_led_synced = pssense_is_led_synced;
 	}
 
 	// @note We don't do blink duration refinement right now because that needs to eventually adjust the latency
@@ -2891,8 +2931,10 @@ pssense_create(struct xrt_prober *xp,
 	    .time_to_resync_ns = T_LED_SYNC_DEFAULT_RESYNC_TIME,
 	    // Frames after a sample is confirmed applied before measuring. 7 dated from when "applied" was marked
 	    // before the controller had the sample; now it's confirmed by the controller's echo (~10ms round trips),
-	    // and the count calibration's steps took ~0.35s each, giving the window time to drift.
-	    .settle_frames = 3,
+	    // and the controller blinks every frame, so the change shows within a frame of the echo. 2 (was 3): in
+	    // psvr2-test/ledsync/calib_sim both controllers hold after 3.7s instead of 4.4s, and it stays correct with
+	    // the change showing up to 1.5 frames after the echo.
+	    .settle_frames = 2,
 	    // 8ms latency cap, something a bit overboard for bluetooth but better than searching the whole range
 	    .latency_cap_ns = U_TIME_1MS_IN_NS * 8LL,
 	};

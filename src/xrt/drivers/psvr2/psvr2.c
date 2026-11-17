@@ -107,7 +107,17 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_head_pivot_m, "PSVR2_HEAD_PIVOT_M", 0.10f)
  * blink on the exposure start and a 500us guess put it too early, so the LEDs left the exposure during BG. The LD
  * header has a 1000 constant (float at byte 36, u16 at byte 48) that may be the nominal value. 0 = unknown.
  */
-DEBUG_GET_ONCE_NUM_OPTION(psvr2_camera_exposure_us, "PSVR2_CAMERA_EXPOSURE_US", 840)
+/*!
+ * Send the LED detector settings Sony's driver sends at start-up (reports 0x14 and 0x09, from a USB capture of the
+ * PlayStation VR2 App on 2026-11-17). Without them the headset keeps its defaults: the detector's settings, which it
+ * echoes in every LED detector frame header (bytes 24-63), read 128 / 1000 and 0x78 under our driver in every
+ * recording, and 85 / 500 and 0xb4 under Sony's. 500 is likely the exposure in us (half ours) and 0xb4 a higher
+ * detection threshold: short exposures are how constellation trackers keep room light out (Meta, Microsoft), and in
+ * bright rooms the defaults let 270-430 background blobs per frame through, more than LED sync and tracking can cope with.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_sony_ld_config, "PSVR2_SONY_LD_CONFIG", true)
+//! Exposure reported to LED sync (us); 500 with Sony's LED detector settings (above), 840 measured without.
+DEBUG_GET_ONCE_NUM_OPTION(psvr2_camera_exposure_us, "PSVR2_CAMERA_EXPOSURE_US", 0)
 // Path to record raw IMU and SLAM samples to (CSV), for replaying through the pose simulator.
 DEBUG_GET_ONCE_OPTION(psvr2_record_file, "PSVR2_RECORD_FILE", NULL)
 /*!
@@ -369,7 +379,17 @@ process_imu_record(struct psvr2_hmd *hmd, size_t index, struct imu_usb_record *i
 	const timepoint_ns now_imu = hmd->last_imu_ns;
 
 	m_clock_offset_a2b(IMU_FREQ, now_vts, estimated_sample_time, &hmd->hw2mono_vts);
-	if (hmd->ld_clock != NULL) {
+	/*
+	 * The first quarter second of the stream is a USB backlog whose sample times are estimated up to 6ms early
+	 * (11:45) or 650ms late (10:58), against +-0.1ms afterwards. The camera clock tracker kept such a minimum for its
+	 * whole 2s window and then crept toward the real offset, so camera frames waited 3-8s for it to settle; skip
+	 * the first 0.5s. The camera stream starts ~2.2s after the IMU, so this costs nothing.
+	 */
+	if (hmd->imu_stream_start_ns == 0) {
+		hmd->imu_stream_start_ns = estimated_sample_time;
+	}
+	if (hmd->ld_clock != NULL &&
+	    estimated_sample_time - hmd->imu_stream_start_ns >= (timepoint_ns)U_TIME_1MS_IN_NS * 500) {
 		m_clock_windowed_skew_tracker_push(hmd->ld_clock, estimated_sample_time, now_vts);
 	}
 	m_clock_offset_a2b(IMU_FREQ, now_imu, estimated_sample_time, &hmd->hw2mono_imu);
@@ -915,6 +935,18 @@ led_xfer_cb(struct libusb_transfer *xfer)
 	// @todo this is invalid on some arches, pointer may not be aligned.
 	struct ld_payload *payload = (struct ld_payload *)buffer;
 
+	// Once, a second in: did the headset take the LED detector settings? It echoes them in header bytes 24-63.
+	if (!hmd->ld_config_checked && debug_get_bool_option_psvr2_sony_ld_config() && hmd->ld_stats_frames >= 60) {
+		hmd->ld_config_checked = true;
+		const uint8_t *h = (const uint8_t *)&payload->header;
+		static const uint8_t want_09[4] = {0xb4, 0x20, 0x40, 0x20};
+		static const uint8_t want_14[8] = {0x00, 0x00, 0xaa, 0x42, 0x00, 0x00, 0xfa, 0x43}; // 85.0f, 500.0f
+		bool ok = memcmp(h + 24, want_09, 4) == 0 && memcmp(h + 32, want_14, 8) == 0;
+		PSVR2_INFO(hmd, "LED detector settings %s (header %02x %02x %02x %02x ... %02x %02x %02x %02x %02x %02x %02x %02x)",
+		           ok ? "applied" : "NOT applied", h[24], h[25], h[26], h[27], h[32], h[33], h[34], h[35], h[36], h[37],
+		           h[38], h[39]);
+	}
+
 	PSVR2_TRACE(hmd, "timestamp: %u, frame_counter: %u, unk3: %u", payload->header.timestamp,
 	            payload->header.frame_counter, payload->header.unk3);
 
@@ -961,18 +993,18 @@ led_xfer_cb(struct libusb_transfer *xfer)
 		}
 		/*
 		 * Camera frames go to the tracker and LED sync only once the offset hasn't had to re-latch (more than 0.3ms
-		 * off) for 1s: the tracker's own estimate also moves while it fills (02:03: 31ms off at start, 11.5ms at
+		 * off) for 0.5s (was 1s; with the startup backlog skipped it moves <0.1ms/s by then): the tracker's own estimate also moves while it fills (02:03: 31ms off at start, 11.5ms at
 		 * 2s, 3ms at 6s). Requiring it within 0.1ms of the tracker instead never held (12:06: hit the 8s limit), the
 		 * tracker's frame-to-frame noise is larger than that, and delayed tracking 8s. Once only, so a later hiccup
 		 * can't stop tracking; at most 8s after the offset became valid.
 		 */
 		if (!hmd->ld_clock_settled && hmd->ld_offset_valid &&
-		    (now_ns - hmd->ld_offset_steady_since_ns >= (timepoint_ns)U_TIME_1S_IN_NS ||
+		    (now_ns - hmd->ld_offset_steady_since_ns >= (timepoint_ns)U_TIME_1MS_IN_NS * 500 ||
 		     now_ns - hmd->ld_offset_valid_since_ns >= (timepoint_ns)U_TIME_1S_IN_NS * 8)) {
 			hmd->ld_clock_settled = true;
 			PSVR2_INFO(hmd, "Camera clock settled %.1fs after it became valid%s",
 			           (double)(now_ns - hmd->ld_offset_valid_since_ns) / 1e9,
-			           now_ns - hmd->ld_offset_steady_since_ns >= (timepoint_ns)U_TIME_1S_IN_NS
+			           now_ns - hmd->ld_offset_steady_since_ns >= (timepoint_ns)U_TIME_1MS_IN_NS * 500
 			               ? ""
 			               : " (time limit, still moving)");
 		}
@@ -1040,7 +1072,10 @@ led_xfer_cb(struct libusb_transfer *xfer)
 		                                                         U_TIME_1US_IN_NS / ld_frames_delta
 		                                                   : 0,
 		            .exposure_time_ns =
-		                (time_duration_ns)debug_get_num_option_psvr2_camera_exposure_us() * U_TIME_1US_IN_NS,
+		                (time_duration_ns)(debug_get_num_option_psvr2_camera_exposure_us() > 0
+		                                       ? debug_get_num_option_psvr2_camera_exposure_us()
+		                                       : (debug_get_bool_option_psvr2_sony_ld_config() ? 500 : 840)) *
+		                U_TIME_1US_IN_NS,
 		            // All blobs the headset detected this frame, for the PS Sense count calibration.
 		            .blob_count = (uint32_t)payload->cameras[0].num_leds + payload->cameras[1].num_leds +
 		                          payload->cameras[2].num_leds + payload->cameras[3].num_leds,
@@ -1349,6 +1384,30 @@ get_psvr2_control(struct psvr2_hmd *hmd, uint16_t report_id, uint8_t subcmd, uin
 	return true;
 }
 
+/*!
+ * As send_psvr2_control, with the setup packet's wValue given: Sony's driver sends every report with wValue 0 (the
+ * report ID is in the payload), ours puts the report ID there too; the LED detector settings are sent exactly as Sony
+ * does.
+ */
+static bool
+send_psvr2_control_value(
+    struct psvr2_hmd *hmd, uint16_t report_id, uint8_t subcmd, uint16_t w_value, uint8_t *pkt_data, uint32_t pkt_len)
+{
+	struct sie_ctrl_pkt pkt;
+	assert(pkt_len <= sizeof(pkt.data));
+	pkt.report_id = __cpu_to_le16(report_id);
+	pkt.subcmd = __cpu_to_le16(subcmd);
+	pkt.len = __cpu_to_le32(pkt_len);
+	memcpy(pkt.data, pkt_data, pkt_len);
+	int ret = libusb_control_transfer(hmd->dev, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_ENDPOINT, 0x9, w_value,
+	                                  0x0, (unsigned char *)&pkt, pkt_len + 8, 100);
+	if (ret < 0) {
+		PSVR2_ERROR(hmd, "Failed to send report id %u subcmd %u", report_id, subcmd);
+		return false;
+	}
+	return true;
+}
+
 bool
 send_psvr2_control(struct psvr2_hmd *hmd, uint16_t report_id, uint8_t subcmd, uint8_t *pkt_data, uint32_t pkt_len)
 {
@@ -1550,6 +1609,17 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 	hmd->camera_mode = hmd->camera_recorder != NULL || psvr2_hand_tracking_enabled() ? PSVR2_CAMERA_MODE_BOTTOM_SBS_BC4
 	                                                                               : PSVR2_CAMERA_MODE_10;
 	PSVR2_INFO(hmd, "Camera mode 0x%x", (unsigned)hmd->camera_mode);
+	if (debug_get_bool_option_psvr2_sony_ld_config()) {
+		// Byte for byte as Sony's driver sends them, in its order, before the camera mode.
+		uint8_t ld_14[16] = {0x55, 0x00, 0x00, 0x00, 0xf4, 0x01, 0x00, 0x00,
+		                     0x01, 0x00, 0x80, 0x24, 0x00, 0x00, 0x00, 0x00};
+		uint8_t ld_09[24] = {0xfe, 0x00, 0x00, 0x00, 0xfe, 0x00, 0x00, 0x00, 0xb4, 0x20, 0x40, 0x20,
+		                     0x80, 0x3c, 0xb4, 0x04, 0x0a, 0x20, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00};
+		bool ok14 = send_psvr2_control_value(hmd, 0x14, 1, 0, ld_14, sizeof(ld_14));
+		bool ok09 = send_psvr2_control_value(hmd, 0x09, 1, 0, ld_09, sizeof(ld_09));
+		PSVR2_INFO(hmd, "Sent Sony's LED detector settings (0x14 %s, 0x09 %s)", ok14 ? "ok" : "failed",
+		           ok09 ? "ok" : "failed");
+	}
 	psvr2_set_camera_mode(hmd, hmd->camera_mode);
 
 	for (int i = 0; i < NUM_CAM_XFERS; i++) {

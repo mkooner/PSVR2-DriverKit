@@ -335,6 +335,10 @@ struct psvr2_hmd
 	timepoint_ns ld_offset_valid_since_ns, ld_offset_steady_since_ns;
 	//! The offset has settled once after startup; camera frames reach the tracker and LED sync only after that.
 	bool ld_clock_settled;
+	//! The LED detector settings echo in the frame header was checked (see PSVR2_SONY_LD_CONFIG).
+	bool ld_config_checked;
+	//! Host time of the first IMU sample, to keep the stream's startup backlog out of the camera clock.
+	timepoint_ns imu_stream_start_ns;
 
 	/* Tracking state */
 	struct m_relation_history *slam_relation_history;

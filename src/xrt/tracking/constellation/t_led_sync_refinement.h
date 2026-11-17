@@ -319,6 +319,24 @@ struct t_led_sync_refinement
 		uint64_t count_sequence_id;
 		//! Counts accumulated since the last LED change settled.
 		uint32_t frames, sum;
+		//! Sum of squared counts this phase, for the frame-to-frame noise.
+		uint64_t sum_sq;
+		//! Variance of the phase means' difference, from frames without an LED change (see COUNT_NOISE_SIGMAS).
+		float noise_var;
+		//! The on-phase's frame variance, until the off phase completes.
+		float on_var;
+		//! Frame-to-frame count variance (blobs^2), and the frames each phase counts because of it.
+		float frame_var;
+		uint32_t phase_frames;
+		//! Repeats of the current step, and their summed on - off differences.
+		uint32_t repeats;
+		float repeat_sum;
+		/*!
+		 * The tracker's view of the step: the sequence IDs of the frames counted with the LEDs at the test offset,
+		 * and the most of this controller's blobs the tracker matched in one of them (see COUNT_TRACKER_MIN_LEDS).
+		 */
+		uint64_t on_from_seq, on_to_seq;
+		uint32_t trk_leds_max;
 		uint64_t last_counted_sequence_id;
 		float baseline, threshold;
 		//! Each step measures the LEDs at the offset, then off, and compares the two.
@@ -361,6 +379,8 @@ struct t_led_sync_refinement
 		uint32_t empty_sweeps;
 		//! The current edge search has read "off" at least once; the left one's result.
 		bool edge_seen_off, left_seen_off;
+		//! The right edge search read "on" at least once (else the controller was out of view during it).
+		bool edge_seen_on;
 		//! A failed confirmation is being read again before searching again.
 		bool confirm_reread;
 		//! The latest window with a plausible width, from any pass of this calibration.
@@ -590,6 +610,13 @@ t_led_sync_get_sample(struct t_led_sync_refinement *refinement, struct t_led_syn
  */
 bool
 t_led_sync_is_locked(struct t_led_sync_refinement *refinement);
+
+/*!
+ * Whether the device's LEDs may be in the camera pictures now: locked, or calibrating with them lit at a test offset
+ * (the tracker's view of those frames is part of the calibration, see COUNT_TRACKER_MIN_LEDS).
+ */
+bool
+t_led_sync_leds_may_be_lit(struct t_led_sync_refinement *refinement);
 
 void
 t_led_sync_mark_latest_sample_applied(struct t_led_sync_refinement *refinement, timepoint_ns apply_time_ns);

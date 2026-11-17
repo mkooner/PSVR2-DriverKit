@@ -22,7 +22,12 @@ struct t_constellation_tracker_trace_log;
 typedef int8_t t_constellation_device_id_t;
 typedef int8_t t_constellation_led_id_it;
 
-#define XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME 250
+/*!
+ * Most blobs per camera frame the tracker holds. 256: the PS VR2 headset reports up to 256 per camera
+ * (PSVR2_MAX_LEDS_PER_CAMERA), and in a bright room it sent 255 (12:59 and 13:23 runs); with 250 here the tracker wrote
+ * past its arrays ("stack smashing detected", SteamVR crashed). Sources with more are cut at the tracker's input.
+ */
+#define XRT_CONSTELLATION_MAX_BLOBS_PER_FRAME 256
 /*!
  * The maximum amount of devices the constellation tracker is able to track at once.
  *
@@ -441,6 +446,18 @@ struct t_constellation_tracker_device
 	bool (*get_imu_orientation)(struct t_constellation_tracker_device *connection,
 	                            int64_t timestamp_ns,
 	                            struct xrt_quat *out_orientation);
+
+	/*!
+	 * Optional (may be NULL, meaning always): whether the device's LEDs are currently synchronised to the camera
+	 * exposures. While they aren't (LED timing still being searched for), they are mostly not in the pictures and
+	 * the exhaustive correspondence search can only fail or match background blobs, so the tracker skips it for
+	 * this device; tracking from a recent pose still runs. On PS VR2 in a bright room (12:59) that search was 96%
+	 * of the tracker's time, 40ms per camera frame, for a controller whose LED timing never locked.
+	 *
+	 * Called from the tracker's threads; must be cheap and must not take locks the device holds while calling into
+	 * the tracker.
+	 */
+	bool (*is_led_synced)(struct t_constellation_tracker_device *connection);
 };
 
 /*!

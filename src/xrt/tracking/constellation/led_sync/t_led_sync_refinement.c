@@ -516,6 +516,10 @@ handle_constellation_sample_locked(struct t_led_sync_refinement *refinement,
 		count_hold_push_sample(refinement, sample);
 		break;
 	}
+	case T_LED_SYNC_PHASE_COUNT_CALIBRATE: {
+		count_calib_push_sample(refinement, sample);
+		break;
+	}
 	case T_LED_SYNC_PHASE_DECODE_GRAY: {
 		handle_decode_gray_constellation_sample(refinement, sample);
 		break;
@@ -737,6 +741,19 @@ t_led_sync_push_constellation_sample(struct t_led_sync_refinement *refinement,
 	os_mutex_lock(&refinement->lock);
 	handle_constellation_sample_locked(refinement, sample);
 	os_mutex_unlock(&refinement->lock);
+}
+
+bool
+t_led_sync_leds_may_be_lit(struct t_led_sync_refinement *refinement)
+{
+	assert(refinement->initialized);
+
+	os_mutex_lock(&refinement->lock);
+	bool lit = refinement->phase == T_LED_SYNC_PHASE_COUNT_HOLD || refinement->phase == T_LED_SYNC_PHASE_STABLE ||
+	           (refinement->phase == T_LED_SYNC_PHASE_COUNT_CALIBRATE && refinement->count_calib.owns_token &&
+	            refinement->count_calib.state >= COUNT_CALIB_FIND_ON && !refinement->count_calib.off_phase);
+	os_mutex_unlock(&refinement->lock);
+	return lit;
 }
 
 bool

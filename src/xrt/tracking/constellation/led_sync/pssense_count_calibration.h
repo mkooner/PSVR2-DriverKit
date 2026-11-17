@@ -30,10 +30,53 @@
 #define COUNT_FRAMES_PER_STEP 2
 //! Frames of blob counts for the LEDs-off baseline.
 #define COUNT_BASELINE_FRAMES 10
-//! Blobs above the baseline that mean the LEDs are visible, PSVR2Toolkit uses 3.
+//! Blobs above the baseline that mean the LEDs are visible, PSVR2Toolkit uses 3. The least threshold, see below.
 #define COUNT_THRESHOLD_MARGIN 3.0f
-//! Edge search resolution, as in PSVR2Toolkit.
-#define COUNT_EDGE_RESOLUTION_NS (U_TIME_1US_IN_NS * 25)
+/*!
+ * Noise-aware decisions. A step reads the LEDs on, then off, and the difference d of the two means is the LEDs plus
+ * noise. In a calm room the noise is under a blob and d is either ~0 or >= 10 (11:45: 61% within 3, 35% >= 10, 4%
+ * between); in a bright one the background changes from frame to frame (12:59: sd 5.9 blobs, 44% of steps between 3
+ * and 10, 8% at <= -10, which LEDs can't cause), and a fixed 3 blob threshold made those steps coin flips: wrong edges,
+ * wrong windows accepted, holds lost.
+ *
+ * The noise is measured from what can't contain the LEDs: the spread between frames of one phase (the LEDs don't
+ * change within it) and negative differences. "On" needs d above COUNT_NOISE_SIGMAS noise standard deviations (and the
+ * old 3 blobs); a d in between, or impossibly negative, repeats the step and averages, up to COUNT_MAX_REPEATS times,
+ * which shrinks the noise. A calm room keeps its threshold of 3 and its speed.
+ */
+#define COUNT_NOISE_SIGMAS 3.0f
+/*!
+ * The tracker's view as evidence: a step is "on" when the tracker matched at least this many of this controller's
+ * blobs in one of the frames with the LEDs at the test offset. Its matches are blobs on this controller's LED model
+ * (with the IMU checks), which a sunlit floor's spots don't make, unlike the blob count: in direct sun the count
+ * swung 30-80 blobs between a step's two halves while one controller held its window and tracked (12:59, 14:31). The
+ * count still decides when the tracker has nothing to say (before it first sees the controller, in a calm room).
+ */
+#define COUNT_TRACKER_MIN_LEDS 4
+/*!
+ * Frames each phase counts: enough that the difference of the two phase means varies by about COUNT_TARGET_SD blobs
+ * from frame noise, 2 in a calm room (frame sd ~1.5) up to COUNT_MAX_FRAMES_PER_PHASE in a bright one (12:59: ~6-8).
+ * A frame costs 17ms, repeating a step ~180ms (two LED changes and settles), so averaging within the phase is cheaper.
+ */
+#define COUNT_TARGET_SD 3.0f
+#define COUNT_MAX_FRAMES_PER_PHASE 10
+#define COUNT_MAX_REPEATS 3
+//! Noise variance (blobs^2) assumed before any is measured, and how fast the estimate follows.
+#define COUNT_NOISE_INITIAL_VAR 1.0f
+#define COUNT_NOISE_GAIN 0.2f
+/*!
+ * Edge search resolution. PSVR2Toolkit uses 25us; the window has 300-500us of room on each side of the 1.5ms blink and
+ * the hold centres it in 100us steps within seconds, so 100us saves ~4 steps (~0.7s) per calibration.
+ */
+#define COUNT_EDGE_RESOLUTION_NS (U_TIME_1US_IN_NS * 100)
+/*!
+ * Where the window's edges can be: the blink plus the camera's exposure, which the PS VR2 doesn't report (it sends a
+ * fixed setting) and which moved 606-1000us between and within sessions. The searches used to assume the setting
+ * (0.9-1.1x of blink + 840us): a 2106us window sat on that limit, and in simulation an exposure of 1150us never
+ * finished (psvr2-test/ledsync/calib_sim).
+ */
+#define COUNT_MIN_EXPOSURE_NS (U_TIME_1US_IN_NS * 300)
+#define COUNT_MAX_EXPOSURE_NS (U_TIME_1US_IN_NS * 1400)
 /*!
  * Edge confirmation distance. PSVR2Toolkit uses 50us, but on hardware the window drifted more than that between the
  * search and the confirmation (15-30us/s); the 1.5ms blink has ~500us of room in the ~2.5ms window anyway.
@@ -97,6 +140,7 @@ static _Atomic(struct t_led_sync_refinement *) count_calib_owner = NULL;
  */
 static _Atomic(struct t_led_sync_refinement *) count_probe_wanted = NULL;
 
+
 static bool
 count_calib_take_token(struct t_led_sync_refinement *refinement)
 {
@@ -158,6 +202,7 @@ count_calib_set_offset(struct t_led_sync_refinement *refinement, time_duration_n
 	cc->offset_ns = offset_ns;
 	cc->frames = 0;
 	cc->sum = 0;
+	cc->sum_sq = 0;
 	cc->off_phase = false;
 
 	count_calib_apply_trim(refinement);
@@ -199,13 +244,17 @@ count_calib_research(struct t_led_sync_refinement *refinement, const char *why)
 	cc->pass_plausible = false;
 	LOG_DEBUG(refinement, "Count calibration searching again near the window (%s), retry %u", why,
 	          cc->local_retries);
+	/*
+	 * Offsets are positions in a periodic blink cycle and may be negative (the left edge search goes below 0 whenever
+	 * the sweep found the window at its first step). Clamping this to 0 started the sweep after the window instead of
+	 * before it, so it went round the whole frame: 14 steps in the 10:58 run (left edge at -1773us).
+	 */
 	time_duration_ns start_ns = cc->left_ns - cc->full_window_ns;
-	if (start_ns < 0) {
-		start_ns = 0;
-	}
 	cc->state = COUNT_CALIB_FIND_ON;
 	cc->swept_ns = 0;
 	cc->pass_max_delta = 0;
+	cc->repeats = 0;
+	cc->repeat_sum = 0.0f;
 	count_calib_set_offset(refinement, start_ns);
 }
 
@@ -223,6 +272,7 @@ count_calib_restart(struct t_led_sync_refinement *refinement, const char *why)
 	refinement->count_calib.state = COUNT_CALIB_WAIT_TOKEN;
 	refinement->count_calib.frames = 0;
 	refinement->count_calib.sum = 0;
+	refinement->count_calib.sum_sq = 0;
 	count_calib_set_leds_off(refinement);
 }
 
@@ -243,6 +293,7 @@ count_calib_enter(struct t_led_sync_refinement *refinement)
 	refinement->count_calib.empty_sweeps = 0;
 	refinement->count_calib.frames = 0;
 	refinement->count_calib.sum = 0;
+	refinement->count_calib.sum_sq = 0;
 	count_calib_set_leds_off(refinement);
 }
 
@@ -274,13 +325,36 @@ count_calib_accumulate(struct t_led_sync_refinement *refinement, uint32_t needed
 	}
 	cc->last_counted_sequence_id = cc->count_sequence_id;
 	cc->sum += cc->last_count;
+	cc->sum_sq += (uint64_t)cc->last_count * cc->last_count;
 	cc->frames++;
+
+	// The frames the tracker's matches count for (the LEDs are at the test offset in the on phase).
+	if (!cc->off_phase) {
+		if (cc->frames == 1) {
+			cc->on_from_seq = cc->count_sequence_id;
+		}
+		cc->on_to_seq = cc->count_sequence_id;
+	}
 
 	if (cc->frames < needed) {
 		return false;
 	}
 	*out_mean = (float)cc->sum / (float)cc->frames;
 	return true;
+}
+
+//! A tracker sample for this controller while calibrating, see COUNT_TRACKER_MIN_LEDS.
+static void
+count_calib_push_sample(struct t_led_sync_refinement *refinement, const struct t_constellation_tracker_sample *sample)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	if (!sample->has_world_pose || cc->on_from_seq == 0 || sample->sequence_id < cc->on_from_seq ||
+	    sample->sequence_id > cc->on_to_seq) {
+		return;
+	}
+	if (sample->metrics.matched_blob_count > cc->trk_leds_max) {
+		cc->trk_leds_max = sample->metrics.matched_blob_count;
+	}
 }
 
 static void
@@ -292,12 +366,13 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	time_duration_ns window_ns = cc->right_ns - cc->left_ns;
 	LOG_INFO(refinement,
 	         "Count calibration done: visible from %" PRId64 "us to %" PRId64 "us (window %" PRId64
-	         "us, blink %" PRId64 "us, so exposure ~%" PRId64 "us), holding at %" PRId64 "us",
+	         "us, blink %" PRId64 "us, so exposure ~%" PRId64 "us), holding at %" PRId64 "us, took %.1fs",
 	         (int64_t)(cc->left_ns / U_TIME_1US_IN_NS), (int64_t)(cc->right_ns / U_TIME_1US_IN_NS),
 	         (int64_t)(window_ns / U_TIME_1US_IN_NS),
 	         (int64_t)(refinement->current_blink_duration_ns / U_TIME_1US_IN_NS),
 	         (int64_t)((window_ns - refinement->current_blink_duration_ns) / U_TIME_1US_IN_NS),
-	         (int64_t)(centre_ns / U_TIME_1US_IN_NS));
+	         (int64_t)(centre_ns / U_TIME_1US_IN_NS),
+	         cc->started_ns != 0 ? (double)(os_monotonic_get_ns() - cc->started_ns) / 1e9 : 0.0);
 
 	cc->local_retries = 0;
 	cc->quick = false;
@@ -339,6 +414,10 @@ count_calib_start_sweep(struct t_led_sync_refinement *refinement)
 	cc->swept_ns = 0;
 	cc->pass_plausible = false;
 	cc->pass_max_delta = 0;
+	cc->repeats = 0;
+	cc->repeat_sum = 0.0f;
+	cc->trk_leds_max = 0;
+	cc->on_from_seq = 0;
 	count_calib_set_offset(refinement, start_ns);
 }
 
@@ -350,6 +429,7 @@ count_calib_start_diag_on(struct t_led_sync_refinement *refinement)
 	cc->state = COUNT_CALIB_DIAG_ON;
 	cc->frames = 0;
 	cc->sum = 0;
+	cc->sum_sq = 0;
 	cc->off_phase = false;
 	struct t_led_sync_sample_pssense_data data = {.leds = {0xFF, 0xFF, 0xFF, 0xFF}};
 	set_offset_duration_pssense(refinement, 0, cc->offset_ns, refinement->current_blink_duration_ns,
@@ -425,31 +505,109 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 		return;
 	}
 
+	if (cc->phase_frames < COUNT_FRAMES_PER_STEP) {
+		cc->phase_frames = COUNT_FRAMES_PER_STEP;
+	}
 	float mean = 0;
-	if (!count_calib_accumulate(refinement, COUNT_FRAMES_PER_STEP, &mean)) {
+	if (!count_calib_accumulate(refinement, cc->phase_frames, &mean)) {
 		return;
 	}
 
+	// Variance between this phase's frames (no LED change within a phase).
+	float phase_var = 0.0f;
+	if (cc->frames >= 2) {
+		double n = cc->frames;
+		phase_var = (float)(((double)cc->sum_sq - (double)cc->sum * (double)cc->sum / n) / (n - 1.0));
+		if (phase_var < 0.0f) {
+			phase_var = 0.0f;
+		}
+	}
+	cc->sum_sq = 0;
+
 	if (!cc->off_phase) {
-		// Measured the LEDs at the test offset, now the same with them off.
+		/*
+		 * Measured the LEDs at the test offset, now the same with them off. Every step: the background moved
+		 * 25 -> 125 blobs within seconds on hardware (12:52), so an earlier off count can't stand in for it.
+		 */
 		cc->on_mean = mean;
+		cc->on_var = phase_var;
 		cc->off_phase = true;
 		cc->frames = 0;
 		cc->sum = 0;
+		cc->sum_sq = 0;
 		count_calib_set_leds_off(refinement);
 		return;
 	}
 
+	if (cc->noise_var <= 0.0f) {
+		cc->noise_var = COUNT_NOISE_INITIAL_VAR;
+	}
+	if (cc->frame_var <= 0.0f) {
+		cc->frame_var = COUNT_NOISE_INITIAL_VAR;
+	}
+	cc->frame_var += COUNT_NOISE_GAIN * ((cc->on_var + phase_var) / 2.0f - cc->frame_var);
+	/*
+	 * The difference of two means of n frames each varies by (var_on + var_off) / n from frame noise alone, and a
+	 * negative difference is all noise (frame noise and the background changing between the phases).
+	 */
+	float n_frames = (float)cc->phase_frames;
+	float d = cc->on_mean - mean;
+	float sample_var = (cc->on_var + phase_var) / n_frames;
+	if (d < 0.0f) {
+		sample_var = fmaxf(sample_var, d * d);
+	}
+	cc->noise_var += COUNT_NOISE_GAIN * (sample_var - cc->noise_var);
+
+	// Frames for the next phases: 2 * frame_var / n <= COUNT_TARGET_SD^2.
+	{
+		float want = ceilf(2.0f * cc->frame_var / (COUNT_TARGET_SD * COUNT_TARGET_SD));
+		if (want < COUNT_FRAMES_PER_STEP) {
+			want = COUNT_FRAMES_PER_STEP;
+		}
+		if (want > COUNT_MAX_FRAMES_PER_PHASE) {
+			want = COUNT_MAX_FRAMES_PER_PHASE;
+		}
+		cc->phase_frames = (uint32_t)want;
+	}
+
+	cc->repeats++;
+	cc->repeat_sum += d;
+	float mean_d = cc->repeat_sum / (float)cc->repeats;
+	float sigma = sqrtf(cc->noise_var / (float)cc->repeats);
+	float threshold = fmaxf(COUNT_THRESHOLD_MARGIN, COUNT_NOISE_SIGMAS * sigma);
+	bool tracker_on = cc->trk_leds_max >= COUNT_TRACKER_MIN_LEDS;
+	bool unclear = mean_d > COUNT_THRESHOLD_MARGIN && mean_d <= threshold;
+	bool impossible = mean_d < -threshold;
+	if (!tracker_on && (unclear || impossible) && cc->repeats < COUNT_MAX_REPEATS) {
+		LOG_DEBUG(refinement,
+		          "Count calibration state %d offset %" PRId64
+		          "us: %.1f blobs with LEDs, %.1f without, difference %.1f vs threshold %.1f, measuring again",
+		          cc->state, (int64_t)(cc->offset_ns / U_TIME_1US_IN_NS), cc->on_mean, mean, mean_d, threshold);
+		count_calib_set_offset(refinement, cc->offset_ns);
+		return;
+	}
+	cc->repeats = 0;
+	cc->repeat_sum = 0.0f;
+	uint32_t trk_leds = cc->trk_leds_max;
+	cc->trk_leds_max = 0;
+	cc->on_from_seq = 0;
+
 	cc->baseline = mean;
-	cc->threshold = mean + COUNT_THRESHOLD_MARGIN;
-	bool on = cc->on_mean > cc->threshold;
-	if (cc->on_mean - mean > cc->pass_max_delta) {
-		cc->pass_max_delta = cc->on_mean - mean;
+	cc->threshold = mean + threshold;
+	bool on = tracker_on || mean_d > threshold;
+	// The strength check (skipping confirmation) compares against the noise as well; the tracker's view is strong.
+	if (mean_d - (threshold - COUNT_THRESHOLD_MARGIN) > cc->pass_max_delta) {
+		cc->pass_max_delta = mean_d - (threshold - COUNT_THRESHOLD_MARGIN);
+	}
+	if (tracker_on && cc->pass_max_delta < COUNT_QUICK_MIN_DELTA) {
+		cc->pass_max_delta = COUNT_QUICK_MIN_DELTA;
 	}
 
 	LOG_DEBUG(refinement,
-	          "Count calibration state %d offset %" PRId64 "us: %.1f blobs with LEDs, %.1f without -> %s", cc->state,
-	          (int64_t)(cc->offset_ns / U_TIME_1US_IN_NS), cc->on_mean, mean, on ? "on" : "off");
+	          "Count calibration state %d offset %" PRId64
+	          "us: %.1f blobs with LEDs, %.1f without (difference %.1f, threshold %.1f), tracker matched %u -> %s",
+	          cc->state, (int64_t)(cc->offset_ns / U_TIME_1US_IN_NS), cc->on_mean, mean, mean_d, threshold, trk_leds,
+	          on ? "on" : "off");
 
 	switch (cc->state) {
 
@@ -457,7 +615,7 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 		if (on) {
 			cc->empty_sweeps = 0;
 			cc->upper_ns = cc->offset_ns;
-			cc->lower_ns = cc->offset_ns - fw;
+			cc->lower_ns = cc->offset_ns - (refinement->current_blink_duration_ns + COUNT_MAX_EXPOSURE_NS);
 			cc->edge_seen_off = false;
 			cc->state = COUNT_CALIB_LEFT_EDGE;
 			count_calib_set_offset(refinement, (cc->lower_ns + cc->upper_ns) / 2);
@@ -493,8 +651,9 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 			 * on hardware read as +2340us in 3.5s (662ppm, against a real few ppm) and pushed the trim to its
 			 * limit, walking that controller's LEDs out of the window. Drift comes only from the hold.
 			 */
-			cc->lower_ns = cc->left_ns + (fw * 9) / 10;
-			cc->upper_ns = cc->left_ns + (fw * 11) / 10;
+			cc->lower_ns = cc->left_ns + refinement->current_blink_duration_ns + COUNT_MIN_EXPOSURE_NS;
+			cc->upper_ns = cc->left_ns + refinement->current_blink_duration_ns + COUNT_MAX_EXPOSURE_NS;
+			cc->edge_seen_on = false;
 			cc->state = COUNT_CALIB_RIGHT_EDGE;
 		}
 		count_calib_set_offset(refinement, (cc->lower_ns + cc->upper_ns) / 2);
@@ -503,6 +662,7 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 	case COUNT_CALIB_RIGHT_EDGE:
 		if (on) {
 			cc->lower_ns = cc->offset_ns;
+			cc->edge_seen_on = true;
 		} else {
 			cc->upper_ns = cc->offset_ns;
 			cc->edge_seen_off = true;
@@ -516,10 +676,19 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 			 * (12577-15136us, the right edge never seen) was accepted unconfirmed and lost within 5s; the real
 			 * one was 16087-18632us.
 			 */
-			bool edges_seen = cc->left_seen_off && cc->edge_seen_off;
-			cc->pass_plausible = edges_seen && width_ns > (fw * 7) / 10 && width_ns < (fw * 3) / 2;
+			/*
+			 * The right search starts inside any real window, so it must read "on" too: all "off" means the
+			 * controller left the view, and its edge is just the search's lower limit (11:45: 237-2343us, every
+			 * right probe 1-2 blobs).
+			 */
+			bool edges_seen = cc->left_seen_off && cc->edge_seen_off && cc->edge_seen_on;
+			cc->pass_plausible =
+			    edges_seen && width_ns > refinement->current_blink_duration_ns + COUNT_MIN_EXPOSURE_NS &&
+			    width_ns < refinement->current_blink_duration_ns + COUNT_MAX_EXPOSURE_NS;
 			if (!edges_seen) {
-				count_calib_research(refinement, cc->left_seen_off ? "right edge not seen" : "left edge not seen");
+				count_calib_research(refinement, !cc->left_seen_off ? "left edge not seen"
+				                                 : !cc->edge_seen_on ? "right edge search never saw the LEDs"
+				                                                     : "right edge not seen");
 				break;
 			}
 			if (cc->pass_plausible) {
@@ -527,12 +696,17 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 				cc->plausible_left_ns = cc->left_ns;
 				cc->plausible_right_ns = cc->right_ns;
 			}
-			if (cc->quick && cc->pass_plausible && cc->pass_max_delta >= COUNT_QUICK_MIN_DELTA) {
+			if (cc->pass_plausible && cc->pass_max_delta >= COUNT_QUICK_MIN_DELTA) {
 				/*
-				 * Recalibrating after a lost hold: the hold's edge probes centre the window within seconds, so
-				 * skip the four confirmation steps (and the re-searches a failed one starts).
+				 * Both edges seen, a plausible width and a strong on/off difference: the hold's edge probes centre
+				 * the window within seconds, so skip the four confirmation steps (and the re-searches a failed one
+				 * starts). Across the logs, 3 of 5 failed confirmations were false (final window within 0-256us of
+				 * the rejected one), and the 2 real ones had 0 blobs throughout, which the strength check rejects.
+				 * In psvr2-test/ledsync/calib_sim confirming every calibration was slower (5.0 vs 3.7s in view,
+				 * 10-12 vs 3.7s with the controller out of view a fifth of the time) and no more accurate, also with
+				 * a wandering background (SIM_AMBIENT_WALK): a failed confirmation retries once, then accepts.
 				 */
-				LOG_INFO(refinement, "Count calibration after a lost hold: window plausible, skipping confirmation");
+				LOG_INFO(refinement, "Count calibration: window plausible with a strong signal, skipping confirmation");
 				count_calib_finish(refinement);
 				break;
 			}
@@ -762,6 +936,7 @@ handle_count_hold_edges(struct t_led_sync_refinement *refinement)
 			cc->hold_sub = 1;
 			cc->frames = 0;
 			cc->sum = 0;
+			cc->sum_sq = 0;
 		}
 		return;
 	}
@@ -788,6 +963,7 @@ handle_count_hold_edges(struct t_led_sync_refinement *refinement)
 		count_calib_set_leds_off(refinement);
 		cc->frames = 0;
 		cc->sum = 0;
+		cc->sum_sq = 0;
 		return;
 	default: break;
 	}
