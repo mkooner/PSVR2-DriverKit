@@ -142,10 +142,24 @@ if [ -f "$SONY_ICONS/playstation_vr2_sense_left.svg" ]; then
 	echo "  linked PS VR2 icons from the PlayStation VR2 App"
 fi
 
-# ROOM_SETUP=1 ./launch-steamvr.sh runs SteamVR's own room setup instead of the driver-provided 2m play area.
+# Room calibration (see ROOM.md): the driver keeps SteamVR's universe 3 for an unanchored session (a 2 m square around
+# where you started) and switches to universe 2, your saved room, after a floor capture (left controller on the floor,
+# crouch next to it, hold Create 2.5 s). Draw the room in SteamVR's Room Setup once you're in universe 2.
+#   ROOM_SETUP=1   no 2 m square in universe 3 either (SteamVR's Room Setup then starts on its own)
+#   ROOM_FORGET=1  delete the saved room anchor before starting (to set the room up again)
+#   OVRD_ROOM=0    the previous behaviour: a fixed 2 m play area handed to SteamVR, nothing saved
 if [ "${ROOM_SETUP:-0}" = 1 ]; then
 	export OVRD_PLAY_AREA_SIZE=0
-	echo "  ROOM_SETUP=1: not providing a play area, SteamVR room setup will run"
+	echo "  ROOM_SETUP=1: no play area in the session universe, SteamVR room setup will run"
+fi
+if [ "${ROOM_FORGET:-0}" = 1 ]; then
+	rm -f "$HOME/.config/monado/ovrd_room.json" && echo "  ROOM_FORGET=1: deleted the saved room anchor"
+fi
+# RECORD_IMAGES=1: save a pair of bottom camera images every 2 s (to judge a room relocalizer, ~1 MB each).
+if [ "${RECORD_IMAGES:-0}" = 1 ]; then
+	export PSVR2_RECORD_IMAGES="$LOGDIR/images-$STAMP"
+	mkdir -p "$PSVR2_RECORD_IMAGES"
+	echo "  RECORD_IMAGES=1: camera images to $PSVR2_RECORD_IMAGES"
 fi
 
 export VALVE_SKIP_RUNTIME_SAFETY=1

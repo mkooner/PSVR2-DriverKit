@@ -4,3 +4,5 @@ pose-sim/*.o
 __pycache__/
 analysis/harness/chain
 analysis/harness/chain.o
+analysis/harness/capture_replay
+analysis/harness/outline

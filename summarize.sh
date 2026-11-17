@@ -33,6 +33,10 @@ echo "== Clock check (ts host-now should be a few ms negative)"
 grep -E "LD stats:" "$LOG" | grep -o "ts host-now [+-][0-9.]*ms" | sort | uniq -c | sort -rn | head -5
 
 echo
+echo "== Room calibration (universe, captures, room dropped)"
+grep -E "Room: |SLAM reset" "$LOG" | sed -E 's/.*(Room: |SLAM reset)/  \1/' | cut -c1-220 | tail -12
+echo
+
 echo "== Head pose (SLAM rate, how far gyro drifts from SLAM, filter on/off)"
 grep -E "Pose stats:" "$LOG" | tail -4 | sed -E 's/.*Pose stats: //' | cut -c1-200
 
