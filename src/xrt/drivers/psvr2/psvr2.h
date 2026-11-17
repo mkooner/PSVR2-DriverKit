@@ -240,6 +240,8 @@ struct psvr2_hmd
 
 	//! PSVR2_RECORD_CAMERA: continuous recording of the camera transfers, or NULL.
 	struct psvr2_camera_recorder *camera_recorder;
+	//! PSVR2_RECORD_SLAM_RAW: every raw SLAM transfer, or NULL.
+	struct psvr2_camera_recorder *slam_recorder;
 
 	//! PSVR2_RECORD_IMAGES: when images were last saved.
 	int64_t last_image_record_ns;

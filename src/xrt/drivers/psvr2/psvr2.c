@@ -115,6 +115,11 @@ DEBUG_GET_ONCE_OPTION(psvr2_record_file, "PSVR2_RECORD_FILE", NULL)
  * drive a room relocalizer (are they exposed for the room, or dark like the LED frames?). Off when unset.
  */
 DEBUG_GET_ONCE_OPTION(psvr2_record_images, "PSVR2_RECORD_IMAGES", NULL)
+/*!
+ * Record every raw SLAM transfer (512 byte records, PV2C format of psvr2_camera_recorder.h) to this file, to find
+ * the headset's tracking state among the record's unknown bytes. Off when unset.
+ */
+DEBUG_GET_ONCE_OPTION(psvr2_record_slam_raw, "PSVR2_RECORD_SLAM_RAW", NULL)
 //! Optical hand tracking from the bottom camera pair (Mercury), see psvr2_hand_tracking.h. Off when unset.
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_hand_tracking, "PSVR2_HAND_TRACKING", false)
 /*!
@@ -145,6 +150,7 @@ psvr2_hmd_destroy(struct xrt_device *xdev)
 
 	psvr2_usb_destroy(hmd);
 	psvr2_camera_recorder_destroy(&hmd->camera_recorder);
+	psvr2_camera_recorder_destroy(&hmd->slam_recorder);
 
 	// @note We appear to be hitting a bug in libusb, so this is commented out
 	//       see: https://github.com/libusb/libusb/issues/1605
@@ -851,6 +857,10 @@ slam_xfer_cb(struct libusb_transfer *xfer)
 	}
 
 	struct psvr2_hmd *hmd = xfer->user_data;
+	if (xfer->actual_length > 0) {
+		psvr2_camera_recorder_push(hmd->slam_recorder, os_monotonic_get_ns(), xfer->buffer,
+		                           (size_t)xfer->actual_length);
+	}
 	if (xfer->actual_length == sizeof(struct slam_usb_record)) {
 		process_slam_record(hmd, xfer->buffer, xfer->actual_length);
 	}
@@ -1886,6 +1896,11 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		hmd->camera_recorder = psvr2_camera_recorder_create(
 		    debug_get_option_psvr2_record_camera(), debug_get_float_option_psvr2_record_camera_hz(),
 		    USB_CAM_MODE10_XFER_SIZE);
+	}
+	if (debug_get_option_psvr2_record_slam_raw() != NULL) {
+		// Every record (no rate limit), up to the transfer size.
+		hmd->slam_recorder =
+		    psvr2_camera_recorder_create(debug_get_option_psvr2_record_slam_raw(), 0.0f, USB_SLAM_XFER_SIZE);
 	}
 	psvr2_slam_carry_init(&hmd->slam_carry, debug_get_bool_option_psvr2_slam_carry());
 
