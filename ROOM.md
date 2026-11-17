@@ -66,7 +66,7 @@ Rejections:
 
 ## The room is dropped (back to universe 3) when
 
-- The headset's SLAM re-originates. Its raw position snaps back to within 1 mm of the origin from at least 5 mm away; the driver counts these in `psvr2_get_slam_reset_count`.
+- The headset's SLAM re-originates and the driver can't carry the position over. A reset is a jump of at least 5 cm landing within 1 cm of the origin. After the first 20 s, and at least 1 s after the previous reset, the driver carries the position across it (`psvr2_slam_carry_push`) and the room stays. Resets during startup or in a reset loop replace the tracking world; the driver counts those in `psvr2_get_slam_reset_count`, and the room is dropped.
 - The head moves more than 0.3 m within 50 ms (tracking runaway).
 
 Commands: `echo forget > $XDG_RUNTIME_DIR/monado-room-command` deletes the saved anchor. `anchor-test` (debug only) switches to universe 2 without a capture.

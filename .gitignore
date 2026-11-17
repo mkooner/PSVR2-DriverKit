@@ -6,3 +6,6 @@ analysis/harness/chain
 analysis/harness/chain.o
 analysis/harness/capture_replay
 analysis/harness/outline
+pose-sim/steamvr_sim
+pose-sim/carry_replay
+tools/vrposelog

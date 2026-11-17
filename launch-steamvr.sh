@@ -37,6 +37,23 @@ restore_config() {
 	fi
 }
 
+# When SteamVR is closed, disconnect the Sense controllers over Bluetooth so they don't stay on (like Sony's
+# controllers do when the host drops them, they then power down). CONTROLLERS_OFF=0 leaves them connected.
+controllers_off() {
+	[ "${CONTROLLERS_OFF:-1}" = 1 ] || return 0
+	command -v bluetoothctl >/dev/null || return 0
+	pgrep -x vrserver >/dev/null && return 0 # SteamVR still running (e.g. --restore while it runs)
+	bluetoothctl devices 2>/dev/null | grep 'PlayStation VR2 Sense' | while read -r _ mac name; do
+		if bluetoothctl info "$mac" 2>/dev/null | grep -q 'Connected: yes'; then
+			if bluetoothctl disconnect "$mac" >/dev/null 2>&1; then
+				echo "Disconnected $name ($mac)."
+			else
+				echo "Couldn't disconnect $name ($mac)."
+			fi
+		fi
+	done
+}
+
 if [ "${1-}" = "--restore" ]; then
 	restore_config
 	exit 0
@@ -81,7 +98,7 @@ fi
 echo
 echo "== Registering our plugin (Sony's driver disabled for this session)"
 cp -f "$VRPATH" "$BACKUP"
-trap 'restore_config' EXIT
+trap 'restore_config; controllers_off' EXIT
 trap 'echo; echo "Interrupted, stopping SteamVR..."; pkill -INT -x vrmonitor; pkill -INT -x vrserver; sleep 3' INT TERM
 
 python3 -I - "$BACKUP" "$VRPATH" "$PLUGIN" <<'EOF'
@@ -179,6 +196,8 @@ export T_CONSTELLATION_SENSOR_FUSION_LOG=${FUSION_LOG:-debug}
 # POSE_FILTER=0 ./script.sh
 export PSVR2_POSE_FILTER="${POSE_FILTER:-1}"
 export PSVR2_RECORD_FILE="$LOGDIR/record-$(date +%Y%m%d-%H%M%S)-filter${PSVR2_POSE_FILTER}.csv"
+# The Sense controllers' IMU (gyro, accelerometer, orientation), one CSV per controller, for offline analysis.
+export PSSENSE_RECORD_FILE="$LOGDIR/sense-$STAMP"
 
 echo
 echo "== Starting SteamVR (close SteamVR or press Ctrl+C here when done)"

@@ -15,10 +15,12 @@ Usage: slam_rebase_sim.py record-*.csv
 import sys
 import numpy as np
 
-STEADY_S = 5.0
-MAX_SPEED = 2.0      # m/s, clamp for the continuation velocity
-ORIGIN_EPS = 1e-4    # m, "exactly at the origin"
-MIN_JUMP = 0.005     # m, the previous position must be away from the origin
+import os
+STEADY_S = float(os.environ.get('STEADY_S', 5.0))      # s of steady tracking before a reset is carried over
+MAX_SPEED = 2.0                                        # m/s, clamp for the continuation velocity
+ORIGIN_EPS = float(os.environ.get('ORIGIN_EPS', 1e-4))  # m, the new position is this close to the origin
+MIN_JUMP = float(os.environ.get('MIN_JUMP', 0.005))     # m, and the step to it is at least this long
+STARTUP_S = float(os.environ.get('STARTUP_S', 0.0))    # s after the first SLAM pose with no carry-over (SLAM settling)
 
 def simulate(S):
     t = S[:, 0] * 1e-9
@@ -30,10 +32,10 @@ def simulate(S):
     resets = rebased = world_changes = 0
     for i in range(len(raw)):
         p = raw[i]
-        if i > 0 and np.linalg.norm(p) < ORIGIN_EPS and np.linalg.norm(raw[i-1]) > MIN_JUMP:
+        if i > 0 and np.linalg.norm(p) < ORIGIN_EPS and np.linalg.norm(raw[i-1] - p) > MIN_JUMP:
             resets += 1
             since = t[i] - (last_reset if last_reset is not None else start)
-            if since >= STEADY_S and i >= 2:
+            if since >= STEADY_S and i >= 2 and t[i] - start >= STARTUP_S:
                 dt_prev = t[i-1] - t[i-2]
                 v = (out[i-1] - out[i-2]) / dt_prev if dt_prev > 0 else np.zeros(3)
                 sp = np.linalg.norm(v)
