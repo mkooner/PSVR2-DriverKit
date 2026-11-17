@@ -14,3 +14,5 @@ hands/*.o
 hands/driver_ht_replay
 hands/detect_probe
 hands/rectify_probe
+ctreplay/ct_replay
+clock/clock_sim
