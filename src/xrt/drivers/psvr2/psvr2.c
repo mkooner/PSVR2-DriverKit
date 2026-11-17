@@ -60,6 +60,12 @@
 #include "bcdec.h"
 
 #include "psvr2.h"
+#include "psvr2_camera_recorder.h"
+#include "psvr2_interface.h"
+#include "xrt/xrt_config_drivers.h"
+#ifdef XRT_BUILD_DRIVER_HANDTRACKING
+#include "psvr2_hand_tracking.h"
+#endif
 #include "psvr2_constellation_tracking.h"
 
 
@@ -109,6 +115,15 @@ DEBUG_GET_ONCE_OPTION(psvr2_record_file, "PSVR2_RECORD_FILE", NULL)
  * drive a room relocalizer (are they exposed for the room, or dark like the LED frames?). Off when unset.
  */
 DEBUG_GET_ONCE_OPTION(psvr2_record_images, "PSVR2_RECORD_IMAGES", NULL)
+//! Optical hand tracking from the bottom camera pair (Mercury), see psvr2_hand_tracking.h. Off when unset.
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_hand_tracking, "PSVR2_HAND_TRACKING", false)
+/*!
+ * Record the bottom camera pair's image transfers (camera mode 10) to this file, continuously, for offline work on the
+ * images (hand tracking prototype). Format in psvr2_camera_recorder.h. Off when unset.
+ */
+DEBUG_GET_ONCE_OPTION(psvr2_record_camera, "PSVR2_RECORD_CAMERA", NULL)
+//! At most this many transfers per second in PSVR2_RECORD_CAMERA (0: all).
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_record_camera_hz, "PSVR2_RECORD_CAMERA_HZ", 30.0f)
 
 static void
 psvr2_usb_stop(struct psvr2_hmd *hmd);
@@ -129,6 +144,7 @@ psvr2_hmd_destroy(struct xrt_device *xdev)
 	os_thread_helper_destroy(&hmd->usb_thread);
 
 	psvr2_usb_destroy(hmd);
+	psvr2_camera_recorder_destroy(&hmd->camera_recorder);
 
 	// @note We appear to be hitting a bug in libusb, so this is commented out
 	//       see: https://github.com/libusb/libusb/issues/1605
@@ -490,12 +506,55 @@ img_xfer_cb(struct libusb_transfer *xfer)
 {
 	DRV_TRACE_MARKER();
 
+	{
+		/*
+		 * Camera stream report every 5 s (info level): whether image transfers arrive at all, their sizes, and
+		 * how the others ended. Two PSVR2_RECORD_CAMERA runs recorded nothing; failures were only traced.
+		 */
+		struct psvr2_hmd *h = xfer->user_data;
+		int st = xfer->status >= 0 && xfer->status < 8 ? (int)xfer->status : 7;
+		h->cam_stats.status[st]++;
+		if (xfer->status == LIBUSB_TRANSFER_COMPLETED) {
+			if (xfer->actual_length == 0) {
+				h->cam_stats.empty++;
+			} else {
+				h->cam_stats.last_length = xfer->actual_length;
+				h->cam_stats.with_data++;
+			}
+		}
+		int64_t now = os_monotonic_get_ns();
+		if (h->cam_stats.since_ns == 0) {
+			h->cam_stats.since_ns = now;
+		} else if (now - h->cam_stats.since_ns > 5 * U_TIME_1S_IN_NS) {
+			PSVR2_INFO(h,
+			           "Camera stream: %u with data (last %d bytes), %u empty; ended: completed %u, error %u, "
+			           "timed out %u, cancelled %u, stall %u, no device %u, overflow %u (camera %s, mode 0x%x)",
+			           h->cam_stats.with_data, h->cam_stats.last_length, h->cam_stats.empty, h->cam_stats.status[0],
+			           h->cam_stats.status[1], h->cam_stats.status[2], h->cam_stats.status[3],
+			           h->cam_stats.status[4], h->cam_stats.status[5], h->cam_stats.status[6],
+			           h->camera_enable ? "on" : "off", (unsigned)h->camera_mode);
+			memset(&h->cam_stats, 0, sizeof(h->cam_stats));
+			h->cam_stats.since_ns = now;
+		}
+	}
+
 	if (!psvr2_usb_xfer_continue(xfer, "Camera frame")) {
 		return;
 	}
 
 	struct psvr2_hmd *hmd = xfer->user_data;
 	if (xfer->actual_length > 0) {
+		// Whatever mode the headset sends: with mode 10 requested it streamed 819456 byte (mode 1) transfers at
+		// 120/s (19:58 run), which the mode 10 only hook never saw.
+		int64_t arrival_ns = os_monotonic_get_ns();
+		psvr2_camera_recorder_push(hmd->camera_recorder, arrival_ns, xfer->buffer, (size_t)xfer->actual_length);
+#ifdef XRT_BUILD_DRIVER_HANDTRACKING
+		// Copies the mode 0x10 transfer for the hand tracking worker if it's free (ignores other sizes).
+		struct xrt_device *ht = hmd->hand_tracker;
+		if (ht != NULL) {
+			psvr2_hand_tracking_push_transfer(ht, xfer->buffer, (size_t)xfer->actual_length, arrival_ns);
+		}
+#endif
 		PSVR2_TRACE(hmd, "Camera frame - %d bytes", xfer->actual_length);
 		PSVR2_TRACE_HEX(hmd, xfer->buffer, MIN(256, xfer->actual_length));
 
@@ -1462,7 +1521,14 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 
 	/* Camera data */
 	hmd->camera_enable = true;
-	hmd->camera_mode = PSVR2_CAMERA_MODE_10;
+	/*
+	 * Mode 0xa (640x640 SBS, bottom and top pairs interleaved) by default. PSVR2_RECORD_CAMERA asks for mode 0x10
+	 * instead: the 1000x1000 BC4 bottom pair that the BC4 parsing below (USB_CAM_MODE10_XFER_SIZE, "10" = 0x10)
+	 * and the hand tracking prototype use. With 0xa the recordings got only 819456 byte mode 0xa transfers.
+	 */
+	hmd->camera_mode = hmd->camera_recorder != NULL || psvr2_hand_tracking_enabled() ? PSVR2_CAMERA_MODE_BOTTOM_SBS_BC4
+	                                                                               : PSVR2_CAMERA_MODE_10;
+	PSVR2_INFO(hmd, "Camera mode 0x%x", (unsigned)hmd->camera_mode);
 	psvr2_set_camera_mode(hmd, hmd->camera_mode);
 
 	for (int i = 0; i < NUM_CAM_XFERS; i++) {
@@ -1736,6 +1802,59 @@ psvr2_end_feature(struct xrt_device *xdev, enum xrt_device_feature_type type)
 	return XRT_SUCCESS;
 }
 
+bool
+psvr2_hand_tracking_enabled(void)
+{
+#ifdef XRT_BUILD_DRIVER_HANDTRACKING
+	return debug_get_bool_option_psvr2_hand_tracking();
+#else
+	return false;
+#endif
+}
+
+void
+psvr2_hmd_offer_hand_tracking_cameras(struct psvr2_hmd *hmd,
+                                      const struct t_camera_calibration cams[2],
+                                      const struct xrt_pose poses[2])
+{
+	os_mutex_lock(&hmd->data_lock);
+	memcpy(hmd->ht_cams, cams, sizeof(hmd->ht_cams));
+	memcpy(hmd->ht_cam_poses, poses, sizeof(hmd->ht_cam_poses));
+	hmd->ht_cams_valid = true;
+	struct xrt_device *ht = hmd->hand_tracker;
+	os_mutex_unlock(&hmd->data_lock);
+#ifdef XRT_BUILD_DRIVER_HANDTRACKING
+	if (ht != NULL) {
+		psvr2_hand_tracking_set_cameras(ht, cams, poses);
+	}
+#else
+	(void)ht;
+#endif
+}
+
+void
+psvr2_hmd_attach_hand_tracking(struct xrt_device *hmd_xdev, struct xrt_device *hand_tracking)
+{
+	struct psvr2_hmd *hmd = (struct psvr2_hmd *)hmd_xdev;
+	struct t_camera_calibration cams[2];
+	struct xrt_pose poses[2];
+	os_mutex_lock(&hmd->data_lock);
+	hmd->hand_tracker = hand_tracking;
+	bool have = hmd->ht_cams_valid;
+	if (have) {
+		memcpy(cams, hmd->ht_cams, sizeof(cams));
+		memcpy(poses, hmd->ht_cam_poses, sizeof(poses));
+	}
+	os_mutex_unlock(&hmd->data_lock);
+#ifdef XRT_BUILD_DRIVER_HANDTRACKING
+	if (have) {
+		psvr2_hand_tracking_set_cameras(hand_tracking, cams, poses);
+	}
+#else
+	(void)have;
+#endif
+}
+
 struct t_timing_event_source *
 psvr2_hmd_get_timing_event_source(struct psvr2_hmd *hmd)
 {
@@ -1763,6 +1882,11 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	hmd->base.tracking_origin->initial_offset = (struct xrt_pose)XRT_POSE_IDENTITY;
 	hmd->base.tracking_origin->initial_offset.position.y = debug_get_float_option_psvr2_floor_height();
 	hmd->recenter_enabled = debug_get_bool_option_psvr2_recenter();
+	if (debug_get_option_psvr2_record_camera() != NULL) {
+		hmd->camera_recorder = psvr2_camera_recorder_create(
+		    debug_get_option_psvr2_record_camera(), debug_get_float_option_psvr2_record_camera_hz(),
+		    USB_CAM_MODE10_XFER_SIZE);
+	}
 	psvr2_slam_carry_init(&hmd->slam_carry, debug_get_bool_option_psvr2_slam_carry());
 
 	if (os_mutex_init(&hmd->data_lock) != 0) {

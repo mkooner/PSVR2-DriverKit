@@ -1000,6 +1000,18 @@ public:
 		ovrd_log("Added skeleton input %s\n", steamvr_control_path);
 	}
 
+	//! Hand-tracked controller (ht_ctrl_emu) as an Index controller: pinch as the trigger, plus the hand skeleton.
+	void
+	AddHandCtrlEmuControls()
+	{
+		AddControl("/input/trigger/value", XRT_INPUT_HAND_CTRL_EMU_PINCH_VALUE, NULL);
+		AddControl("/input/trigger/click", XRT_INPUT_HAND_CTRL_EMU_PINCH_BOOL, NULL);
+		const std::string str_hand = m_hand == XRT_HAND_LEFT ? "left" : "right";
+		AddSkeletonControl(("/input/skeleton/" + str_hand).c_str(), ("/skeleton/hand/" + str_hand).c_str(),
+		                   m_hand == XRT_HAND_LEFT ? XRT_INPUT_HT_UNOBSTRUCTED_LEFT
+		                                           : XRT_INPUT_HT_UNOBSTRUCTED_RIGHT);
+	}
+
 	void
 	AddEmulatedIndexControls()
 	{
@@ -1295,6 +1307,14 @@ public:
 			} else if (m_hand == XRT_HAND_RIGHT) {
 				m_render_model = "{indexcontroller}valve_controller_knu_1_0_right";
 			}
+		} else if (m_xdev->name == XRT_DEVICE_HAND_CTRL_EMU) {
+			/*
+			 * Optical hand tracking's emulated controllers (ht_ctrl_emu): presented as Index controllers, the
+			 * profile SteamVR and apps use for full hand skeletons, with pinch as the trigger. Monado's binding
+			 * templates have no entry for this device, so the generic path below refused it.
+			 */
+			m_input_profile = std::string("{indexcontroller}/input/index_controller_profile.json");
+			m_controller_type = "knuckles";
 		} else if (m_xdev->name == XRT_DEVICE_PSSENSE) {
 			/*
 			 * Present the Sense controllers as Sony's driver does, so SteamVR and apps recognise them as PS VR2
@@ -1355,6 +1375,8 @@ public:
 		m_input_controls.clear();
 		if (m_emulate_index_controller) {
 			AddEmulatedIndexControls();
+		} else if (m_xdev->name == XRT_DEVICE_HAND_CTRL_EMU) {
+			AddHandCtrlEmuControls();
 		} else if (m_xdev->name == XRT_DEVICE_PSSENSE) {
 			AddPssenseControls();
 		} else {
@@ -1435,6 +1457,8 @@ public:
 			grip_name = XRT_INPUT_SIMPLE_GRIP_POSE;
 		} else if (m_xdev->name == XRT_DEVICE_PSSENSE) {
 			grip_name = XRT_INPUT_PSSENSE_GRIP_POSE;
+		} else if (m_xdev->name == XRT_DEVICE_HAND_CTRL_EMU) {
+			grip_name = XRT_INPUT_HAND_CTRL_EMU_GRIP_POSE;
 		} else {
 			ovrd_log("Unhandled device name %u\n", m_xdev->name);
 			grip_name = XRT_INPUT_GENERIC_HEAD_POSE; // ???
@@ -1610,7 +1634,10 @@ public:
 			const auto &ht_input_names = ht_input_name_map[m_hand];
 			const timepoint_ns now_ns = os_monotonic_get_ns();
 
-			for (size_t i = 0; i < ht_input_names.size(); ++i) {
+			// The emulated hand controllers only have the unobstructed skeleton; asking for the conforming one
+			// logged an error per frame per hand (8800 lines in a 40 s run). The other component reuses it below.
+			const size_t ht_input_count = m_xdev->name == XRT_DEVICE_HAND_CTRL_EMU ? 1 : ht_input_names.size();
+			for (size_t i = 0; i < ht_input_count; ++i) {
 				int64_t out_timestamp_ns;
 				struct xrt_hand_joint_set joint_set_value = {};
 				if (m_xdev->get_hand_tracking(m_xdev, ht_input_names[i], now_ns, &joint_set_value,

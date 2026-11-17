@@ -37,6 +37,9 @@
 static const float cm2m = 0.01f;
 
 DEBUG_GET_ONCE_LOG_OPTION(cemu_log, "CEMU_LOG", U_LOGGING_TRACE)
+//! Thumb tip to index tip distance (mm) that starts a pinch, and the one that ends it.
+DEBUG_GET_ONCE_FLOAT_OPTION(cemu_pinch_on_mm, "CEMU_PINCH_ON_MM", 20.0f)
+DEBUG_GET_ONCE_FLOAT_OPTION(cemu_pinch_off_mm, "CEMU_PINCH_OFF_MM", 40.0f)
 
 #define CEMU_TRACE(d, ...) U_LOG_XDEV_IFL_T(&d->base, d->sys->log_level, __VA_ARGS__)
 #define CEMU_DEBUG(d, ...) U_LOG_XDEV_IFL_D(&d->base, d->sys->log_level, __VA_ARGS__)
@@ -414,8 +417,8 @@ decide(xrt_vec3 one, xrt_vec3 two, bool *out)
 	float dist = m_vec3_len_sqrd(one - two);
 	// These used to be 0.02f and 0.04f, but I bumped them way up to compensate for bad tracking. Once our tracking
 	// is better, bump these back down.
-	float activation_dist = 0.02f;
-	float deactivation_dist = 0.04f;
+	float activation_dist = debug_get_float_option_cemu_pinch_on_mm() / 1000.0f;
+	float deactivation_dist = debug_get_float_option_cemu_pinch_off_mm() / 1000.0f;
 	const float pinch_activation_dist =
 	    (*out ? deactivation_dist * deactivation_dist : activation_dist * activation_dist);
 

@@ -220,6 +220,27 @@ struct psvr2_hmd
 	//! Carries the position across mid-session SLAM resets; its world_changes are psvr2_get_slam_reset_count.
 	struct psvr2_slam_carry slam_carry;
 
+	//! Optical hand tracking device (psvr2_hand_tracking.h), or NULL. Set once by the builder, under data_lock.
+	struct xrt_device *hand_tracker;
+	//! Bottom pair (cameras 0, 1) calibration and poses in the head frame, for hand tracking; under data_lock.
+	bool ht_cams_valid;
+	struct t_camera_calibration ht_cams[2];
+	struct xrt_pose ht_cam_poses[2];
+	//! The calibration block was parsed (it arrives twice).
+	bool calibration_parsed;
+
+	//! Camera image transfer counts for the periodic "Camera stream" report (USB thread only).
+	struct
+	{
+		int64_t since_ns;
+		uint32_t status[8]; // by libusb_transfer_status
+		uint32_t with_data, empty;
+		int last_length;
+	} cam_stats;
+
+	//! PSVR2_RECORD_CAMERA: continuous recording of the camera transfers, or NULL.
+	struct psvr2_camera_recorder *camera_recorder;
+
 	//! PSVR2_RECORD_IMAGES: when images were last saved.
 	int64_t last_image_record_ns;
 

@@ -280,6 +280,7 @@ StereographicDistort(projection_state &mi)
 			// This takes 250us vs 500 because of the removed atan2.
 			project_kb4(mi, rot_dir_x, rot_dir_y, rot_dir_z, image_x_f, image_y_f);
 			break;
+		case T_DISTORTION_PSVR2: // PS VR2 tracking cameras: the generic projection handles the model
 		case T_DISTORTION_OPENCV_RADTAN_8:
 			// Regular C is plenty fast for radtan :)
 			for (int i = 0; i < image_x_f.rows(); i++) {

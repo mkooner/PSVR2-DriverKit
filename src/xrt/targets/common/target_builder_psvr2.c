@@ -23,6 +23,11 @@
 
 #include "psvr2/psvr2_interface.h"
 
+#ifdef XRT_BUILD_DRIVER_HANDTRACKING
+#include "psvr2/psvr2_hand_tracking.h"
+#include "ht_ctrl_emu/ht_ctrl_emu_interface.h"
+#endif
+
 #ifdef XRT_BUILD_DRIVER_PSSENSE
 #include "pssense/pssense_interface.h"
 #endif
@@ -164,6 +169,34 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 	tbo->eyes = head_xdev;
 	tbo->face = head_xdev;
 
+	// Hand tracking: emulated hand controllers from the bottom cameras (PSVR2_HAND_TRACKING). Added after the
+	// head: devices are destroyed in order, so the headset's USB thread (which feeds the hand tracker) has stopped
+	// before the hand tracker goes.
+	struct xrt_device *left_ht = NULL, *right_ht = NULL;
+#ifdef XRT_BUILD_DRIVER_HANDTRACKING
+	if (head_xdev != NULL && psvr2_hand_tracking_enabled()) {
+		struct xrt_device *ht = psvr2_hand_tracking_create(head_xdev);
+		struct xrt_device *two_hands[2] = {NULL, NULL};
+		if (ht != NULL && cemu_devices_create(head_xdev, ht, two_hands) == 2) {
+			psvr2_hmd_attach_hand_tracking(head_xdev, ht);
+			left_ht = two_hands[0];
+			right_ht = two_hands[1];
+			xsysd->static_xdevs[xsysd->static_xdev_count++] = left_ht;
+			xsysd->static_xdevs[xsysd->static_xdev_count++] = right_ht;
+		} else {
+			PSVR2_ERROR(pb, "PS VR2 hand tracking device creation failed");
+			if (ht != NULL) {
+				xrt_device_destroy(&ht);
+			}
+		}
+	}
+#endif
+	tbo->hand_tracking.unobstructed.left = left_ht;
+	tbo->hand_tracking.unobstructed.right = right_ht;
+	// Hands take the controller roles when no Sense controller is there.
+	tbo->left = left_ht;
+	tbo->right = right_ht;
+
 #ifdef XRT_BUILD_DRIVER_PSSENSE
 
 	struct xrt_device *left_xdev = NULL;
@@ -196,8 +229,12 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 		}
 	}
 
-	tbo->left = left_xdev;
-	tbo->right = right_xdev;
+	if (left_xdev != NULL) {
+		tbo->left = left_xdev;
+	}
+	if (right_xdev != NULL) {
+		tbo->right = right_xdev;
+	}
 	((struct psvr2_hmd *)head_xdev)->pssense_left = left_xdev;
 	((struct psvr2_hmd *)head_xdev)->pssense_right = right_xdev;
 #endif

@@ -356,6 +356,40 @@ run_hand_detection_unsafe(hand_detection_run_info *info)
 	ORT_SAFE(wrap, GetTensorMutableData(output_tensors[2], (void **)&cy));
 	ORT_SAFE(wrap, GetTensorMutableData(output_tensors[3], (void **)&sizee));
 
+	// Local copies, so the mirrored pass below can replace the left hand.
+	float e_local[2] = {hand_exists[0], hand_exists[1]};
+	float cx_local[2] = {cx[0], cx[1]};
+	float cy_local[2] = {cy[0], cy[1]};
+	float size_local[2] = {sizee[0], sizee[1]};
+
+	if (hgt->tuneable_values.detection_mirror_left) {
+		// Same image mirrored: its right hand is our left hand, at the mirrored x (outputs are in [-1, 1]).
+		cv::Mat mirrored;
+		cv::flip(binned_uint8, mirrored, 1);
+		normalizeGrayscaleImage(mirrored, binned_float_wrapper_mat);
+		OrtValue *m_out[] = {nullptr, nullptr, nullptr, nullptr};
+		ORT_SAFE(wrap, Run(wrap.session, nullptr, input_names, inputs, ARRAY_SIZE(input_names), output_names,
+		                   ARRAY_SIZE(output_names), m_out));
+		float *me = nullptr, *mx = nullptr, *my = nullptr, *ms = nullptr;
+		ORT_SAFE(wrap, GetTensorMutableData(m_out[0], (void **)&me));
+		ORT_SAFE(wrap, GetTensorMutableData(m_out[1], (void **)&mx));
+		ORT_SAFE(wrap, GetTensorMutableData(m_out[2], (void **)&my));
+		ORT_SAFE(wrap, GetTensorMutableData(m_out[3], (void **)&ms));
+		if (me[1] > e_local[0]) {
+			e_local[0] = me[1];
+			cx_local[0] = -mx[1];
+			cy_local[0] = my[1];
+			size_local[0] = ms[1];
+		}
+		for (size_t i = 0; i < ARRAY_SIZE(m_out); i++) {
+			wrap.api->ReleaseValue(m_out[i]);
+		}
+	}
+	hand_exists = e_local;
+	cx = cx_local;
+	cy = cy_local;
+	sizee = size_local;
+
 	// transform the output from the way the model returns it, to something useful to us.
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
 		hand_region_of_interest &output = info->outputs[hand_idx];
@@ -849,7 +883,8 @@ run_keypoint_estimation_unsafe(keypoint_estimation_run_info &info)
 	// When the model is sure, it's _really_ sure.
 	// Index was fine with 0.99.
 	// North Star seemed to need 0.97.
-	if (is_hand_explicit < 0.97) {
+	HG_TRACE(hgt, "is_hand view %d hand %d: %f", view_idx, (int)info.hand_idx, is_hand_explicit);
+	if (is_hand_explicit < hgt->tuneable_values.keypoint_hand_confidence) {
 		HG_DEBUG(hgt, "Not hand! %f", is_hand_explicit);
 		is_hand = false;
 	}

@@ -46,6 +46,17 @@ struct hg_tuneable_values
 
 	// Stuff that's only really useful for dataset playback:
 	bool detection_model_in_both_views = false;
+	//! Start a hand from a confident detection in either view (views below the threshold are dropped), instead of
+	//! requiring the mean of both views to pass. For camera pairs whose views differ a lot (PS VR2 bottom pair).
+	bool detection_any_view = false;
+	//! Also run hand detection on the mirrored image and use its right hand (mirrored back) as the left hand when
+	//! stronger: the detector finds right hands much more readily (PS VR2 bottom cameras: left hand 0.00-0.12 vs
+	//! mirrored 0.59-0.99 in frames where it was visible).
+	bool detection_mirror_left = false;
+	//! Detection confidence needed to start tracking a hand (Mercury's fixed value was 0.92).
+	float acquire_confidence = 0.92f;
+	//! The keypoint model's "is a hand" score needed to keep a view (Mercury's fixed value was 0.97).
+	float keypoint_hand_confidence = 0.97f;
 };
 
 struct hg_tuneable_values *

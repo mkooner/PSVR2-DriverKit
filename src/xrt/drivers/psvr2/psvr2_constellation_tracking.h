@@ -54,6 +54,12 @@ struct calibration_camera_relation
 void
 psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t size);
 
+//! Keep the bottom pair's calibration for hand tracking and pass it on if the device is attached (psvr2.c).
+void
+psvr2_hmd_offer_hand_tracking_cameras(struct psvr2_hmd *hmd,
+                                      const struct t_camera_calibration cams[2],
+                                      const struct xrt_pose poses[2]);
+
 
 struct psvr2_constellation_tracking_source
 {

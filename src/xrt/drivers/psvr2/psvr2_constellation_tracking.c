@@ -142,8 +142,9 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 		return;
 	}
 
-	// For some reason this gets triggered twice, we only really want to configure this once.
-	if ((hmd->pssense_left == NULL && hmd->pssense_right == NULL) || hmd->led_tracker != NULL) {
+	// For some reason this gets triggered twice, we only really want to configure this once. Parsed even without
+	// controllers: hand tracking needs the bottom cameras' calibration and poses too.
+	if (hmd->calibration_parsed || hmd->led_tracker != NULL) {
 		return;
 	}
 
@@ -354,6 +355,18 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 		PSVR2_DEBUG(hmd, "camera %zu pose position: (%f, %f, %f)", i,
 		            mosaic->cameras[i].pose_in_origin.position.x, mosaic->cameras[i].pose_in_origin.position.y,
 		            mosaic->cameras[i].pose_in_origin.position.z);
+	}
+
+	hmd->calibration_parsed = true;
+	if (mosaic->num_cameras >= 2) {
+		psvr2_hmd_offer_hand_tracking_cameras(
+		    hmd, (struct t_camera_calibration[2]){mosaic->cameras[0].calibration, mosaic->cameras[1].calibration},
+		    (struct xrt_pose[2]){mosaic->cameras[0].pose_in_origin, mosaic->cameras[1].pose_in_origin});
+	}
+
+	// The LED tracker only with controllers (as before hand tracking needed the parse above).
+	if (hmd->pssense_left == NULL && hmd->pssense_right == NULL) {
+		return;
 	}
 
 	t_constellation_tracker_create(&hmd->xfctx, &constellation_tracker_params, &hmd->led_tracker);

@@ -255,6 +255,8 @@ if(XRT_BUILD_DRIVER_PSVR2)
 		psvr2/psvr2_constellation_tracking.c
 		psvr2/psvr2_pose_filter.c
 		psvr2/psvr2_pose_filter.h
+		psvr2/psvr2_camera_recorder.c
+		psvr2/psvr2_camera_recorder.h
 		)
 	target_link_libraries(
 		drv_psvr2
@@ -269,6 +271,12 @@ if(XRT_BUILD_DRIVER_PSVR2)
 			${LIBUSB1_LIBRARIES}
 		)
 	target_include_directories(drv_psvr2 PRIVATE ${LIBUSB1_INCLUDE_DIRS})
+	if(XRT_BUILD_DRIVER_HANDTRACKING)
+		target_sources(
+			drv_psvr2 PRIVATE psvr2/psvr2_hand_tracking.c psvr2/psvr2_hand_tracking.h
+			)
+		target_link_libraries(drv_psvr2 PRIVATE t_ht_mercury hand_async drv_cemu)
+	endif()
 	list(APPEND ENABLED_HEADSET_DRIVERS psvr2)
 endif()
 

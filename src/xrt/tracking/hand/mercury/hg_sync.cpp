@@ -31,6 +31,10 @@ namespace xrt::tracking::hand::mercury {
 DEBUG_GET_ONCE_LOG_OPTION(mercury_log, "MERCURY_LOG", U_LOGGING_WARN)
 DEBUG_GET_ONCE_BOOL_OPTION(mercury_optimize_hand_size, "MERCURY_optimize_hand_size", true)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_min_detection_confidence, "MERCURY_MIN_DETECTION_CONFIDENCE", 0.3)
+DEBUG_GET_ONCE_BOOL_OPTION(mercury_detection_any_view, "MERCURY_DETECTION_ANY_VIEW", false)
+DEBUG_GET_ONCE_BOOL_OPTION(mercury_detection_mirror_left, "MERCURY_DETECTION_MIRROR_LEFT", false)
+DEBUG_GET_ONCE_FLOAT_OPTION(mercury_acquire_confidence, "MERCURY_ACQUIRE_CONFIDENCE", 0.92)
+DEBUG_GET_ONCE_FLOAT_OPTION(mercury_keypoint_hand_confidence, "MERCURY_KEYPOINT_HAND_CONFIDENCE", 0.97)
 
 // Flags to tell state tracker that these are indeed valid joints
 static const enum xrt_space_relation_flags valid_flags_ht = (enum xrt_space_relation_flags)(
@@ -423,7 +427,21 @@ dispatch_and_process_hand_detections(struct HandTracking *hgt)
 		float confidence_sum = (infos[0].outputs[hand_idx].hand_detection_confidence +
 		                        infos[1].outputs[hand_idx].hand_detection_confidence) /
 		                       float(num_views);
-		if (confidence_sum < 0.92) {
+		if (hgt->tuneable_values.detection_any_view) {
+			// Accept on the best view alone; views that aren't confident themselves get no region of interest,
+			// so a weak, possibly wrong box can't make the keypoint estimator drop the hand.
+			float c0 = infos[0].outputs[hand_idx].hand_detection_confidence;
+			float c1 = infos[1].outputs[hand_idx].hand_detection_confidence;
+			const float need = hgt->tuneable_values.acquire_confidence;
+			if (fmaxf(c0, c1) < need) {
+				continue;
+			}
+			for (int view_idx = 0; view_idx < 2; view_idx++) {
+				if (infos[view_idx].outputs[hand_idx].hand_detection_confidence < need) {
+					infos[view_idx].outputs[hand_idx].found = false;
+				}
+			}
+		} else if (confidence_sum < hgt->tuneable_values.acquire_confidence) {
 			continue;
 		}
 
@@ -863,6 +881,7 @@ callback_process_unsafe(HandTracking *hgt,
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
 
 
+		int views_still_active = 0;
 		for (int view_idx = 0; view_idx < 2; view_idx++) {
 			if (!hgt->views[view_idx].regions_of_interest_this_frame[hand_idx].found) {
 				// to the next view
@@ -870,9 +889,22 @@ callback_process_unsafe(HandTracking *hgt,
 			}
 
 			if (!hgt->keypoint_outputs[hand_idx].views[view_idx].active) {
+				if (hgt->tuneable_values.detection_any_view) {
+					// Drop just this view: a hand leaving one camera's image (still clearly in the other) was
+					// removed whole, 4 of 5 short losses of a slowly moving hand on a PS VR2 recording.
+					HG_DEBUG(hgt, "Dropping view %d of hand %d because keypoint estimator said to", view_idx,
+					         hand_idx);
+					hgt->views[view_idx].regions_of_interest_this_frame[hand_idx].found = false;
+					continue;
+				}
 				HG_DEBUG(hgt, "Removing hand %d because keypoint estimator said to!", hand_idx);
 				hgt->this_frame_hand_detected[hand_idx] = false;
+			} else {
+				views_still_active++;
 			}
+		}
+		if (hgt->tuneable_values.detection_any_view && views_still_active == 0) {
+			hgt->this_frame_hand_detected[hand_idx] = false;
 		}
 
 		if (!hgt->this_frame_hand_detected[hand_idx]) {
@@ -1234,6 +1266,10 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	hgt->tuneable_values.min_detection_confidence.max = 1.0f;
 	hgt->tuneable_values.min_detection_confidence.min = 0.0f;
 	hgt->tuneable_values.min_detection_confidence.step = 0.01f;
+	hgt->tuneable_values.detection_any_view = debug_get_bool_option_mercury_detection_any_view();
+	hgt->tuneable_values.detection_mirror_left = debug_get_bool_option_mercury_detection_mirror_left();
+	hgt->tuneable_values.acquire_confidence = debug_get_float_option_mercury_acquire_confidence();
+	hgt->tuneable_values.keypoint_hand_confidence = debug_get_float_option_mercury_keypoint_hand_confidence();
 	hgt->tuneable_values.min_detection_confidence.val = debug_get_float_option_mercury_min_detection_confidence();
 
 	u_var_add_draggable_f32(hgt, &hgt->tuneable_values.amt_use_depth, "Amount to use depth prediction");
@@ -1271,6 +1307,7 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	u_var_add_bool(hgt, &hgt->tuneable_values.enable_framerate_based_smoothing,
 	               "Enable framerate-based smoothing (Don't use; surprisingly seems to make things worse)");
 	u_var_add_bool(hgt, &hgt->tuneable_values.detection_model_in_both_views, "Run detection model in both views ");
+	u_var_add_bool(hgt, &hgt->tuneable_values.detection_any_view, "Start hands from one confident view");
 
 
 
