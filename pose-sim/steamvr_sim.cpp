@@ -34,7 +34,7 @@
 struct Event
 {
 	int64_t host;
-	int type; // 0 imu, 1 slam
+	int type; // 0 imu, 1 slam, 2 referee (R lines, e.g. Basalt)
 	size_t idx;
 };
 struct Imu
@@ -116,6 +116,7 @@ main(int argc, char **argv)
 	const char *csv_path = argc > 2 ? argv[2] : nullptr;
 	std::vector<Imu> imu;
 	std::vector<std::pair<int64_t, xrt_pose>> slam;
+	std::vector<std::pair<int64_t, xrt_pose>> ref;
 	std::vector<Event> ev;
 	FILE *f = fopen(argv[1], "r");
 	if (!f) {
@@ -136,8 +137,14 @@ main(int argc, char **argv)
 			ev.push_back({host, 0, imu.size() - 1});
 		} else if (line[0] == 'S' && sscanf(line, "S,%lld,%lld,%f,%f,%f,%f,%f,%f,%f", &host, &vts, &v[0], &v[1],
 		                                    &v[2], &v[3], &v[4], &v[5], &v[6]) == 9) {
-			slam.push_back({vts, xrt_pose{{v[3], v[4], v[5], v[6]}, {v[0], v[1], v[2]}}});
+			// SIM_SLAM_TS_MS: shift the SLAM poses' own timestamps (test for a SLAM timestamp offset).
+			static const long long slam_ts_shift = getenv("SIM_SLAM_TS_MS") ? (long long)(atof(getenv("SIM_SLAM_TS_MS")) * 1e6) : 0;
+			slam.push_back({vts + slam_ts_shift, xrt_pose{{v[3], v[4], v[5], v[6]}, {v[0], v[1], v[2]}}});
 			ev.push_back({host, 1, slam.size() - 1});
+		} else if (line[0] == 'R' && sscanf(line, "R,%lld,%lld,%f,%f,%f,%f,%f,%f,%f", &host, &vts, &v[0], &v[1],
+		                                    &v[2], &v[3], &v[4], &v[5], &v[6]) == 9) {
+			ref.push_back({vts, xrt_pose{{v[3], v[4], v[5], v[6]}, {v[0], v[1], v[2]}}});
+			ev.push_back({host, 2, ref.size() - 1});
 		}
 	}
 	fclose(f);
@@ -162,6 +169,16 @@ main(int argc, char **argv)
 	if (getenv("SIM_ACCEL"))
 		params.accel_enable = atoi(getenv("SIM_ACCEL")) != 0;
 	// SIM_GRAVITY_PAUSE_DEG=30: pause the gravity average above this turn rate (driver PSVR2_GRAVITY_PAUSE_DEG).
+	// SIM_REF="jump_m[,per_rad_s[,tau_s]]": referee check of the SLAM steps against the R lines (e.g. Basalt).
+	if (getenv("SIM_REF")) {
+		float a = 0, b = params.ref_jump_per_rad_s, c = params.ref_offset_tau_s;
+		int rule = 1;
+		sscanf(getenv("SIM_REF"), "%f,%f,%f,%d", &a, &b, &c, &rule);
+		params.ref_imu_decides = rule != 0; // 4th value 0: the earlier rule
+		params.ref_jump_m = a;
+		params.ref_jump_per_rad_s = b;
+		params.ref_offset_tau_s = c;
+	}
 	if (getenv("SIM_GRAVITY_PAUSE_DEG"))
 		params.accel_gravity_pause_rad_s = (float)(atof(getenv("SIM_GRAVITY_PAUSE_DEG")) * M_PI / 180.0);
 	// SIM_DUMP_RESIDUALS=file: one line per SLAM update (vts, rate rad/s, residual m, reset, skipped).
@@ -262,14 +279,17 @@ main(int argc, char **argv)
 			while (!recent.empty() && s.vts - recent.front().first > 30000000)
 				recent.pop_front();
 			imu_seen++;
+		} else if (e.type == 2) {
+			psvr2_pose_filter_push_ref(&filt, ref[e.idx].first, &ref[e.idx].second);
 		} else {
 			xrt_pose sp = slam[e.idx].second;
 			sp.position = psvr2_slam_carry_push(&carry, slam[e.idx].first, &sp.position, nullptr, nullptr);
 			psvr2_pose_filter_update upd{};
 			psvr2_pose_filter_push_slam(&filt, slam[e.idx].first, &sp, &upd);
 			if (resid_csv) {
-				fprintf(resid_csv, "%lld,%.4f,%.6f,%d,%d\n", (long long)slam[e.idx].first, upd.rate_rad_s,
-				        upd.pos_residual_m, (int)upd.position_reset, (int)upd.position_skipped);
+				fprintf(resid_csv, "%lld,%.4f,%.6f,%d,%d,%.6f,%.6f,%d\n", (long long)slam[e.idx].first, upd.rate_rad_s,
+				        upd.pos_residual_m, (int)upd.position_reset, (int)upd.position_skipped, upd.ref_disagree_m,
+				        upd.ref_vs_imu_m, (int)upd.ref_replaced);
 			}
 		}
 	}
@@ -290,6 +310,7 @@ main(int argc, char **argv)
 	if (csv != stdout)
 		fclose(csv);
 	if (resid_csv) fclose(resid_csv);
+	fprintf(stderr, "referee replaced %u SLAM steps; ", filt.ref_replacements);
 	fprintf(stderr, "filter: accel %s, have_accel %d, jumps skipped %u, gyro bias (%.3f, %.3f, %.3f) deg/s\n",
 	        params.accel_enable ? "on" : "off", (int)filt.have_accel, filt.jumps_skipped, filt.gyro_bias.x * 57.29578,
 	        filt.gyro_bias.y * 57.29578, filt.gyro_bias.z * 57.29578);

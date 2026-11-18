@@ -1,0 +1,15 @@
+[package]
+name = "psvr2-monado-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "Launcher for the PS VR2 Monado build: SteamVR, monado-service, OpenXR apps, settings"
+license = "BSL-1.0"
+
+[dependencies]
+eframe = "0.34"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.15"
+
+[profile.release]
+opt-level = 2

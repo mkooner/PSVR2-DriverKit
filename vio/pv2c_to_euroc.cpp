@@ -14,6 +14,7 @@
 #include <vector>
 #include <fstream>
 #include <filesystem>
+#include <cmath>
 
 static void bc4_decode(const uint8_t *src, int w, int h, int stride, cv::Mat &out) {
 	out.create(h, w, CV_8UC1);
@@ -34,6 +35,12 @@ static void bc4_decode(const uint8_t *src, int w, int h, int stride, cv::Mat &ou
 int main(int argc, char **argv) {
 	if (argc < 4) { fprintf(stderr, "usage: pv2c_to_euroc camera.pv2c record.csv out_dir [max_frames]\n"); return 1; }
 	std::string out = argv[3]; long max_frames = argc > 4 ? atol(argv[4]) : -1;
+	// PV2C_GAMMA=g: brighten dark images (out = 255 * (in/255)^g, g < 1) before writing.
+	double gamma = getenv("PV2C_GAMMA") ? atof(getenv("PV2C_GAMMA")) : 1.0;
+	// PV2C_SKIP=n: leave out the first n camera transfers (e.g. while the headset is being put on).
+	long skip = getenv("PV2C_SKIP") ? atol(getenv("PV2C_SKIP")) : 0;
+	cv::Mat lut(1, 256, CV_8U);
+	for (int i = 0; i < 256; i++) lut.at<uint8_t>(i) = (uint8_t)std::lround(255.0 * std::pow(i / 255.0, gamma));
 	namespace fs = std::filesystem;
 	for (const char *d : {"/mav0/cam0/data", "/mav0/cam1/data", "/mav0/imu0"}) fs::create_directories(out + d);
 	// Pass 1: camera timestamps (the IMU is written only from 20 ms before the first frame: Basalt's bounded IMU
@@ -49,6 +56,7 @@ int main(int argc, char **argv) {
 			if (len < 256 || fread(b.data(), 1, 256, f1) != 256) break;
 			fseek(f1, len - 256, SEEK_CUR);
 			if (len != 1040640) continue;
+			if (n1 <= skip) continue;
 			uint32_t v; memcpy(&v, &b[8], 4);
 			if (any && v < lv) hi += (1LL << 32);
 			lv = v; long long ts = (hi + v) * 1000LL;
@@ -88,7 +96,7 @@ int main(int argc, char **argv) {
 		if (fread(&ns, 8, 1, f) != 1 || fread(&len, 4, 1, f) != 1 || fread(&dropped, 4, 1, f) != 1) break;
 		buf.resize(len); if (fread(buf.data(), 1, len, f) != len) break;
 		n++;
-		if (len != 1040640) continue;
+		if (len != 1040640 || n <= skip) continue;
 		uint32_t vts_us; memcpy(&vts_us, &buf[8], 4);
 		if (kept && vts_us < last_vts) vts_hi += (1LL << 32); // 32-bit us wraps every 71 min
 		last_vts = vts_us;
@@ -97,6 +105,7 @@ int main(int argc, char **argv) {
 		last_ts = ts;
 		for (int c = 0; c < 2; c++) {
 			cv::Mat m; bc4_decode(&buf[256 + c * 520192], 1016, 1016, 1024, m);
+			if (gamma != 1.0) cv::LUT(m, lut, m);
 			std::string name = std::to_string(ts) + ".png";
 			cv::imwrite(out + "/mav0/cam" + std::to_string(c) + "/data/" + name, m, {cv::IMWRITE_PNG_COMPRESSION, 1});
 			fprintf(c ? c1 : c0, "%lld,%s\n", ts, name.c_str());

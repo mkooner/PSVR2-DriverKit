@@ -189,6 +189,26 @@ if [ "${RECORD_SLAM:-0}" = 1 ]; then
 	export PSVR2_RECORD_SLAM_RAW="$LOGDIR/slamraw-$STAMP.pv2c"
 	echo "  RECORD_SLAM=1: raw SLAM records to $PSVR2_RECORD_SLAM_RAW"
 fi
+# REFRESH=90 (default) or REFRESH=120: the PS VR2 panel's refresh rate (PSVR2_REFRESH_HZ 89.91 / 119.88). SteamVR and
+# Monado direct both pick the display mode to match. XRT_COMPOSITOR_DESIRED_MODE=<index> still forces a mode in Monado.
+case "${REFRESH:-90}" in
+90) export PSVR2_REFRESH_HZ="${PSVR2_REFRESH_HZ:-89.91}" ;;
+120) export PSVR2_REFRESH_HZ="${PSVR2_REFRESH_HZ:-119.88}" ;;
+*) echo "  [!!] REFRESH=${REFRESH} not supported (90 or 120), using 90"; export PSVR2_REFRESH_HZ=89.91 ;;
+esac
+echo "  refresh: ${PSVR2_REFRESH_HZ} Hz (REFRESH=90|120)"
+# BASALT=1: Basalt visual-inertial tracking as the referee of the headset's own position (PSVR2_BASALT, see
+# psvr2_basalt.h): catches the headset's position jumps in fast turns. Turns on camera mode 0x10 and accelerometer
+# fusion. Needs the local Basalt build (../basalt-install, or BASALT_LIB=/path/libbasalt.so).
+if [ "${BASALT:-0}" = 1 ]; then
+	export PSVR2_BASALT=1
+	export VIT_SYSTEM_LIBRARY_PATH="${BASALT_LIB:-$HERE/../basalt-install/lib/libbasalt.so}"
+	if [ -f "$VIT_SYSTEM_LIBRARY_PATH" ]; then
+		echo "  BASALT=1: Basalt referee on ($VIT_SYSTEM_LIBRARY_PATH)"
+	else
+		echo "  [!!] BASALT=1 but $VIT_SYSTEM_LIBRARY_PATH is missing: the driver will run without the referee"
+	fi
+fi
 # HAND_TRACKING=1: optical hand tracking from the bottom cameras (Mercury). Hands appear as Index-style controllers
 # with skeletons when the Sense controllers are off (turn them off first); pinch = trigger. Right hand only so far.
 if [ "${HAND_TRACKING:-0}" = 1 ]; then

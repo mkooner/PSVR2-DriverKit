@@ -35,7 +35,10 @@ ang=np.degrees(2*np.arccos(np.clip(np.abs(np.sum(qmul(qinv(qs),qmul(np.tile(Rw,(
 print(f'image arrival latency median {off_img/1e6:.1f} ms after exposure (headset SLAM arrives {off_s/1e6 - (off_s-off_img)/1e6:.1f}); world alignment residual median {np.median(ang):.2f} deg')
 qa=qmul(np.tile(Rw,(len(bq),1)),bq); pa=bp@R.T+t
 host=bt+off_img+proc_ms*1e6
-outl=[l for l in lines if not l.startswith('S,')]
-outl+= [f'S,{int(h)},{int(v)},{p[0]:.6f},{p[1]:.6f},{p[2]:.6f},{q[0]:.7f},{q[1]:.7f},{q[2]:.7f},{q[3]:.7f}' for h,v,p,q in zip(host,bt,pa,qa)]
+import os
+keep = os.environ.get('AS_REFEREE') == '1'   # AS_REFEREE=1: keep the headset's S lines, add Basalt as R lines
+outl=[l for l in lines if keep or not l.startswith('S,')]
+tag = 'R' if keep else 'S'
+outl+= [f'{tag},{int(h)},{int(v)},{p[0]:.6f},{p[1]:.6f},{p[2]:.6f},{q[0]:.7f},{q[1]:.7f},{q[2]:.7f},{q[3]:.7f}' for h,v,p,q in zip(host,bt,pa,qa)]
 open(out,'w').write('\n'.join(outl)+'\n')
 print(f'wrote {len(bt)} Basalt poses as S lines, arriving {off_img/1e6+proc_ms:.1f} ms after exposure, to {out}')

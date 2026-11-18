@@ -29,3 +29,11 @@ vio/decode_cost
 vio/pv2c_to_euroc
 vio/sweep*
 vio/thr*
+tools/vrframetiming
+analysis/harness/hidden_area_check
+analysis/harness/manual_mount_check
+analysis/harness/mount_check
+analysis/harness/*.o
+vio/basalt_module_test
+vio/*.o
+vio/*.log
