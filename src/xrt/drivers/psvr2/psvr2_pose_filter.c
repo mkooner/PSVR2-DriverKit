@@ -34,6 +34,7 @@ psvr2_pose_filter_default_params(struct psvr2_pose_filter_params *out_params)
 	    // it cut position jitter while turning 3.5x (p50 0.108 -> 0.031 mm/frame) for ~15% more error against SLAM;
 	    // 33 ms smoothed 6x for +37%, 50 ms no smoother than 33 (psvr2-test/analysis/jitter).
 	    .pos_blend_ns = U_TIME_1MS_IN_NS * 17,
+	    .corr_smooth_tau_s = 0.03f,
 	    .accel_enable = false,
 	    .accel_gravity_tau_s = 1.0f,
 	    .gyro_bias_tau_s = 0.0f,
@@ -304,8 +305,11 @@ position_output(const struct psvr2_pose_filter *f, timepoint_ns at_ts)
 	if (pos_dt_ns > f->params.max_extrapolation_ns) {
 		pos_dt_ns = f->params.max_extrapolation_ns;
 	}
-	struct xrt_vec3 position =
-	    m_vec3_add(f->position, m_vec3_mul_scalar(f->velocity, (float)time_ns_to_s(pos_dt_ns)));
+	struct xrt_vec3 vel = f->velocity;
+	if (f->params.corr_smooth_tau_s > 0.0f && f->params.accel_enable && f->have_accel) {
+		vel = m_vec3_add(vel, f->corr_rate); // the correction moves the output too (corr_smooth_tau_s)
+	}
+	struct xrt_vec3 position = m_vec3_add(f->position, m_vec3_mul_scalar(vel, (float)time_ns_to_s(pos_dt_ns)));
 	if (f->params.pos_blend_ns > 0) {
 		time_duration_ns since = at_ts - f->blend_start;
 		float left = since <= 0 ? 1.0f : 1.0f - (float)since / (float)f->params.pos_blend_ns;
@@ -372,6 +376,7 @@ psvr2_pose_filter_push_accel(struct psvr2_pose_filter *f, timepoint_ns ts, const
 		f->v_imu = f->velocity;
 		f->pos_ts = ts;
 		f->pending_correction = (struct xrt_vec3)XRT_VEC3_ZERO;
+		f->corr_rate = (struct xrt_vec3)XRT_VEC3_ZERO;
 		f->pos_history_count = 0;
 		return;
 	}
@@ -421,7 +426,17 @@ psvr2_pose_filter_push_accel(struct psvr2_pose_filter *f, timepoint_ns ts, const
 	f->position = m_vec3_add(f->position, m_vec3_mul_scalar(f->velocity, dt));
 
 	// Bring the last SLAM correction in over pos_blend_ns instead of stepping.
-	if (f->params.pos_blend_ns > 0) {
+	if (f->params.pos_blend_ns > 0 && f->params.corr_smooth_tau_s > 0.0f) {
+		// The rate that would bring the rest in over pos_blend_ns, approached smoothly: no step in the rate (and so in
+		// the reported velocity) when a SLAM update adds to what's pending.
+		float blend_s = (float)time_ns_to_s(f->params.pos_blend_ns);
+		struct xrt_vec3 target = m_vec3_mul_scalar(f->pending_correction, 1.0f / blend_s);
+		float k = dt / (f->params.corr_smooth_tau_s + dt);
+		f->corr_rate = m_vec3_add(f->corr_rate, m_vec3_mul_scalar(m_vec3_sub(target, f->corr_rate), k));
+		struct xrt_vec3 step = m_vec3_mul_scalar(f->corr_rate, dt);
+		f->position = m_vec3_add(f->position, step);
+		f->pending_correction = m_vec3_sub(f->pending_correction, step);
+	} else if (f->params.pos_blend_ns > 0) {
 		float frac = (float)dt_ns / (float)f->params.pos_blend_ns;
 		if (frac > 1.0f) {
 			frac = 1.0f;
@@ -433,6 +448,7 @@ psvr2_pose_filter_push_accel(struct psvr2_pose_filter *f, timepoint_ns ts, const
 		// No blending: take the correction at once (it used to be left pending forever, so position drifted).
 		f->position = m_vec3_add(f->position, f->pending_correction);
 		f->pending_correction = (struct xrt_vec3)XRT_VEC3_ZERO;
+		f->corr_rate = (struct xrt_vec3)XRT_VEC3_ZERO;
 	}
 	f->pos_ts = ts;
 
@@ -580,6 +596,7 @@ update_position_accel(struct psvr2_pose_filter *f,
 		f->position = m_vec3_add(f->position, d);
 		pos_history_shift(f, d);
 		f->pending_correction = (struct xrt_vec3)XRT_VEC3_ZERO;
+		f->corr_rate = (struct xrt_vec3)XRT_VEC3_ZERO;
 		f->v_imu = (struct xrt_vec3)XRT_VEC3_ZERO;
 		u->position_reset = true;
 		return;
@@ -737,7 +754,10 @@ psvr2_pose_filter_get(const struct psvr2_pose_filter *f, timepoint_ns at_ts, str
 
 	*out_relation = (struct xrt_space_relation){
 	    .pose = {.orientation = orientation, .position = position},
-	    .linear_velocity = m_vec3_add(f->velocity, lever_velocity),
+	    .linear_velocity = m_vec3_add(f->params.corr_smooth_tau_s > 0.0f && f->params.accel_enable && f->have_accel
+	                                      ? m_vec3_add(f->velocity, f->corr_rate)
+	                                      : f->velocity,
+	                                  lever_velocity),
 	    .angular_velocity = angular_velocity,
 	    .relation_flags = (enum xrt_space_relation_flags)(
 	        XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT |

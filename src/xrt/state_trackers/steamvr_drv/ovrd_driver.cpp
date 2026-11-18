@@ -151,6 +151,12 @@ DEBUG_GET_ONCE_NUM_OPTION(ovrd_distortion_mesh_res, "OVRD_DISTORTION_MESH_RES", 
  */
 DEBUG_GET_ONCE_OPTION(ovrd_pose_mode, "OVRD_POSE_MODE", "steamvr")
 DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_pose_age_ms, "OVRD_POSE_AGE_MS", 2.0f)
+/*!
+ * OVRD_ANGVEL_AVG_MS > 0: send SteamVR the mean of the last N ms of angular velocity instead of the newest gyro sample
+ * (0: off, the default). Offline, on three live pose logs (2026-11-18), averaging 3-10 ms raised SteamVR's 22 ms
+ * prediction error (median 0.048 -> 0.053-0.065 deg) and left the shown path's jitter the same; kept as a switch.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(ovrd_angvel_avg_ms, "OVRD_ANGVEL_AVG_MS", 0)
 DEBUG_GET_ONCE_OPTION(ovrd_pose_replay, "OVRD_POSE_REPLAY", NULL)
 /*!
  * The refresh a pose submitted now is for: the first vsync more than this far ahead. SteamVR's frame timings carry
@@ -1960,6 +1966,14 @@ CDeviceDriver_Monado::PoseUpdateThreadFunction()
 		mode = "steamvr";
 	}
 	int64_t age_ns = (int64_t)(debug_get_float_option_ovrd_pose_age_ms() * 1e6);
+	int avg_n = (int)debug_get_num_option_ovrd_angvel_avg_ms();
+	if (avg_n < 0) avg_n = 0;
+	if (avg_n > 50) avg_n = 50;
+	double avg_ring[50][3] = {};
+	int avg_pos = 0, avg_count = 0;
+	if (avg_n > 0) {
+		ovrd_log("Angular velocity sent: mean of the last %d ms (OVRD_ANGVEL_AVG_MS)\n", avg_n);
+	}
 	const char *replay = debug_get_option_ovrd_pose_replay();
 	if (replay != NULL && replay[0] != '\0') {
 		if (m_replay.load(replay)) {
@@ -2018,6 +2032,23 @@ CDeviceDriver_Monado::PoseUpdateThreadFunction()
 		} else {
 			// steamvr, novelocity, and display until its clock is known (no frames yet): the pose for now.
 			pose = GetPoseAt(t0, novel_mode, 0.0);
+		}
+		if (avg_n > 0 && !use_display && !novel_mode) {
+			// Mean of the last avg_n angular velocities (one per ~1 ms pose update), head-local as sent.
+			for (int i = 0; i < 3; i++) {
+				avg_ring[avg_pos][i] = pose.vecAngularVelocity[i];
+			}
+			avg_pos = (avg_pos + 1) % avg_n;
+			if (avg_count < avg_n) {
+				avg_count++;
+			}
+			for (int i = 0; i < 3; i++) {
+				double sum = 0;
+				for (int k = 0; k < avg_count; k++) {
+					sum += avg_ring[k][i];
+				}
+				pose.vecAngularVelocity[i] = sum / avg_count;
+			}
 		}
 		int64_t t1 = (int64_t)os_monotonic_get_ns();
 		vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_trackedDeviceIndex, pose, sizeof(vr::DriverPose_t));

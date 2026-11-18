@@ -342,6 +342,9 @@ struct psvr2_hmd
 	timepoint_ns imu_stream_start_ns;
 	//! IMU sample times (two samples per VTS millisecond), see psvr2_imu_time.h.
 	struct psvr2_imu_time imu_time;
+	//! Display frame counter the headset reported in the last IMU sample (recording only: the "D" lines).
+	uint16_t last_dp_frame_cnt;
+	bool have_dp_frame_cnt;
 
 	//! PSVR2_BASALT: Basalt VIO as the pose filter's referee (psvr2_basalt.h), and SLAM poses waiting for it.
 	struct psvr2_basalt *basalt;

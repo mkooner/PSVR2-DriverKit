@@ -70,6 +70,15 @@ struct psvr2_pose_filter_params
 	 */
 	time_duration_ns pos_blend_ns;
 	/*!
+	 * With the accelerometer: bring the blended correction in at a rate that ramps smoothly (low-passed with this time
+	 * constant, seconds) instead of one that jumps at every SLAM update, and report it in the velocity, so the
+	 * velocity matches how the output position really moves (0: off, the old exponential blend; the velocity then
+	 * trails the pose's motion, 2026-11-17 22:02 run: 38 mm/s median, 142 mm/s p90 at ~170 mm/s). Default 0.03:
+	 * offline on three recordings the velocity matched the motion 4-5x better and SteamVR's prediction landed closer,
+	 * with the pose itself no jerkier (tests/tests_psvr2_pose_filter.cpp checks both).
+	 */
+	float corr_smooth_tau_s;
+	/*!
 	 * Accelerometer-aided position (psvr2_pose_filter_push_accel): between SLAM poses, velocity follows the 2 kHz
 	 * accelerometer (gravity and bias removed by a slow average, accel_gravity_tau_s) and SLAM only corrects drift,
 	 * with alpha-beta gains from pos_tau_s. Off: the velocity comes from SLAM positions alone and steps at the SLAM
@@ -181,6 +190,8 @@ struct psvr2_pose_filter
 	struct xrt_vec3 v_imu;
 	struct xrt_vec3 gravity;
 	struct xrt_vec3 pending_correction;
+	//! corr_smooth_tau_s: the rate the pending correction is being brought in at (m/s).
+	struct xrt_vec3 corr_rate;
 	timepoint_ns last_slam_pos_ts;
 
 	//! Referee: recent referee pivot positions, SLAM poses waiting for them, and the step-comparison state.

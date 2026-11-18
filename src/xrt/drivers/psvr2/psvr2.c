@@ -131,6 +131,14 @@ DEBUG_GET_ONCE_BOOL_OPTION(psvr2_slam_carry, "PSVR2_SLAM_CARRY", true)
  * 1.03 -> 0.71 (fusion on; fusion off similar); the output follows SLAM ~0.1-0.5 mm more loosely (was 17).
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_blend_ms, "PSVR2_POSE_BLEND_MS", 100.0f)
+/*!
+ * PSVR2_SMOOTH_CORRECTION_MS > 0 (with accelerometer fusion): SLAM corrections are brought in at a rate that ramps
+ * smoothly with this time constant, and the velocity includes it (psvr2_pose_filter_params::corr_smooth_tau_s), so the
+ * reported velocity matches the pose's motion. Affects SteamVR (which predicts with the
+ * velocity) and the OpenXR path's position extrapolation alike; the pose itself stays as before. Default 30 ms,
+ * 0 turns it off (the earlier exponential blend, velocity without the correction's motion).
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_smooth_correction_ms, "PSVR2_SMOOTH_CORRECTION_MS", 30.0f)
 //! Head point distance in front of the neck pivot for the pose filter (metres, 0 disables), see pivot_offset.
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_head_pivot_m, "PSVR2_HEAD_PIVOT_M", 0.10f)
 /*
@@ -386,6 +394,18 @@ process_imu_record(struct psvr2_hmd *hmd, size_t index, struct imu_usb_record *i
 	            (int)index, imu_data.imu_ts_us, imu_data.vts_us, imu_data.accel[0], imu_data.accel[1],
 	            imu_data.accel[2], imu_data.gyro[0], imu_data.gyro[1], imu_data.gyro[2], imu_data.dp_frame_cnt,
 	            imu_data.dp_line_cnt, imu_data.status);
+
+	/*
+	 * The headset's own display frame counter and scan line, carried by every IMU sample: what the panel is showing.
+	 * Recorded once per displayed frame ("D,host_ns,vts_us,frame,line"), so a recording shows whether the panel shows
+	 * every frame once and on time (analysis/panel_frames.py), independent of SteamVR's or Monado's own timing.
+	 */
+	if (hmd->record_file != NULL && (!hmd->have_dp_frame_cnt || imu_data.dp_frame_cnt != hmd->last_dp_frame_cnt)) {
+		fprintf(hmd->record_file, "D,%" PRId64 ",%u,%u,%u\n", (int64_t)estimated_sample_time, imu_data.vts_us,
+		        imu_data.dp_frame_cnt, imu_data.dp_line_cnt);
+	}
+	hmd->last_dp_frame_cnt = imu_data.dp_frame_cnt;
+	hmd->have_dp_frame_cnt = true;
 
 	uint32_t last_imu_vts_us = hmd->last_imu_vts_us;
 	uint32_t last_imu_ts = hmd->last_imu_ts;
@@ -2269,6 +2289,7 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	pose_filter_params.pos_tau_s = debug_get_float_option_psvr2_pose_pos_tau();
 	pose_filter_params.pivot_offset.z = -debug_get_float_option_psvr2_head_pivot_m();
 	pose_filter_params.pos_blend_ns = (time_duration_ns)(debug_get_float_option_psvr2_pose_blend_ms() * U_TIME_1MS_IN_NS);
+	pose_filter_params.corr_smooth_tau_s = debug_get_float_option_psvr2_smooth_correction_ms() / 1000.0f;
 	pose_filter_params.accel_enable = debug_get_bool_option_psvr2_accel_fusion() || debug_get_bool_option_psvr2_basalt();
 	if (debug_get_bool_option_psvr2_basalt()) {
 		// The referee needs the accelerometer-aided position. 3 mm: 13 catches in the 19:12 replay, all real.
