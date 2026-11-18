@@ -3,7 +3,9 @@
 /*
  * OpenXR API layer that records an app's frame timing as the runtime gives it, per frame, without changing anything:
  * every xrWaitFrame (predicted display time and period, shouldRender), xrLocateViews (the display time asked for)
- * and xrEndFrame (the display time submitted, layer count), each with CLOCK_MONOTONIC at the call.
+ * and xrEndFrame (the display time submitted, layer count), each with CLOCK_MONOTONIC at the call. For every projection
+ * layer submitted, a V row has the view poses the app says it rendered with (to compare with the pose the runtime
+ * labels the frame with, e.g. SteamVR's SubmitLayer mHmdPose in the plugin's direct mode log).
  *
  * Works with any runtime (SteamVR, Monado), so the same game can be compared: on a steady 90 Hz the predicted display
  * times are one refresh apart and the period is one refresh; steps of 0 or 2 refreshes are frames the runtime slotted
@@ -16,6 +18,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_loader_negotiation.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,10 +87,42 @@ layer_begin(XrSession s, const XrFrameBeginInfo *bi)
 	return r;
 }
 
+//! V,call_mono_ns,displayTime,layer,space,swapchain,imageRect x/y/w/h,view0 px,py,pz,qx,qy,qz,qw,view1 ...
+static void
+log_projection_layers(long long t_call, const XrFrameEndInfo *ei)
+{
+	pthread_mutex_lock(&log_lock);
+	for (uint32_t i = 0; log_file != NULL && i < ei->layerCount; i++) {
+		const XrCompositionLayerBaseHeader *h = ei->layers[i];
+		if (h == NULL || h->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+			continue;
+		}
+		const XrCompositionLayerProjection *p = (const XrCompositionLayerProjection *)h;
+		fprintf(log_file, "V,%lld,%lld,%u,%llu,%llu", t_call, (long long)ei->displayTime, i,
+		        (unsigned long long)(uintptr_t)p->space, p->viewCount > 0
+		                                                     ? (unsigned long long)(uintptr_t)p->views[0].subImage.swapchain
+		                                                     : 0ULL);
+		if (p->viewCount > 0) {
+			const XrRect2Di *r = &p->views[0].subImage.imageRect;
+			fprintf(log_file, ",%d,%d,%d,%d", r->offset.x, r->offset.y, r->extent.width, r->extent.height);
+		}
+		for (uint32_t v = 0; v < p->viewCount && v < 2; v++) {
+			const XrPosef *q = &p->views[v].pose;
+			fprintf(log_file, ",%.6f,%.6f,%.6f,%.7f,%.7f,%.7f,%.7f", q->position.x, q->position.y, q->position.z,
+			        q->orientation.x, q->orientation.y, q->orientation.z, q->orientation.w);
+		}
+		fputc('\n', log_file);
+	}
+	pthread_mutex_unlock(&log_lock);
+}
+
 static XRAPI_ATTR XrResult XRAPI_CALL
 layer_end(XrSession s, const XrFrameEndInfo *ei)
 {
 	long long a = mono_ns();
+	if (ei != NULL) {
+		log_projection_layers(a, ei);
+	}
 	XrResult r = next_end(s, ei);
 	row('E', a, mono_ns(), ei != NULL ? (long long)ei->displayTime : 0, (long long)r, ei != NULL ? (int)ei->layerCount : 0);
 	return r;
@@ -148,6 +183,7 @@ layer_create_instance(const XrInstanceCreateInfo *info, const XrApiLayerCreateIn
 			fprintf(log_file, "kind,call_mono_ns,return_mono_ns,xr_a,xr_b,n\n");
 			fprintf(log_file, "# W: xr_a predictedDisplayTime, xr_b predictedDisplayPeriod, n shouldRender\n");
 			fprintf(log_file, "# L: xr_a displayTime asked, xr_b viewStateFlags; E: xr_a displayTime submitted, xr_b result, n layers\n");
+			fprintf(log_file, "# V: projection layer at xrEndFrame: call_mono_ns, displayTime, layer, space, swapchain, imageRect x,y,w,h, view0 p,q, view1 p,q\n");
 			atexit(close_log);
 		}
 	}

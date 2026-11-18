@@ -232,18 +232,22 @@ if [ "${RECORD_IMAGES:-0}" = 1 ]; then
 fi
 
 export VALVE_SKIP_RUNTIME_SAFETY=1
-export XRT_LOG=debug
-export PSVR2_LOG=debug
-export PSSENSE_LOG=debug
-export CONSTELLATION_TRACKER_LOG=debug
+# Log level, the same default as launch-openxr.sh (info). LOG_LEVEL=debug: the full debug logs (controller tracking,
+# sensor fusion with a solver report per solve: ~12000 reports / 900k lines a minute in vrserver, 2026-11-18 audit).
+LOG_LEVEL="${LOG_LEVEL:-info}"
+export XRT_LOG="$LOG_LEVEL"
+export PSVR2_LOG="$LOG_LEVEL"
+export PSSENSE_LOG="$LOG_LEVEL"
+export CONSTELLATION_TRACKER_LOG="$LOG_LEVEL"
+echo "  log level: $LOG_LEVEL (LOG_LEVEL=debug for the full debug logs)"
 # RECORD_DATASET=1 ./launch-steamvr.sh: record the constellation tracker's input (blobs, camera poses, IMU) for
 # offline replay of tracker changes (large files).
 if [ "${RECORD_DATASET:-0}" = "1" ]; then
 	export CONSTELLATION_TRACKER_DATA_RECORDER_OUTPUT="$LOGDIR/dataset-$(date +%Y%m%d-%H%M%S)"
 	echo "Recording the tracker dataset to $CONSTELLATION_TRACKER_DATA_RECORDER_OUTPUT"
 fi
-export T_LED_SYNC_REFINEMENT_LOG=debug
-export T_CONSTELLATION_SENSOR_FUSION_LOG=${FUSION_LOG:-debug}
+export T_LED_SYNC_REFINEMENT_LOG="$LOG_LEVEL"
+export T_CONSTELLATION_SENSOR_FUSION_LOG=${FUSION_LOG:-$LOG_LEVEL}
 # Head pose: record raw IMU/SLAM for offline replay, and allow A/B against the old behaviour with
 # POSE_FILTER=0 ./script.sh
 export PSVR2_POSE_FILTER="${POSE_FILTER:-1}"
@@ -267,14 +271,22 @@ if [ -n "${ANGVEL_AVG:-}" ] && [ "${ANGVEL_AVG}" != 0 ]; then
 	export OVRD_ANGVEL_AVG_MS="$ANGVEL_AVG"
 	echo "  ANGVEL_AVG=$ANGVEL_AVG: angular velocity averaged over $ANGVEL_AVG ms"
 fi
-# DIRECT_MODE=1: driver direct mode prototype (OVRD_DIRECT_MODE, ovrd_direct_mode.hpp). SteamVR's compositor hands its
-# finished frames to our plugin instead of driving the headset's display: THE HEADSET SHOWS NOTHING in this mode, the
-# frames are only logged (logs/direct-<stamp>.csv, 10 s summaries "Direct mode (10 s)" in the log). First step of the
-# plugin rewrite: checks SteamVR hands the frames over for a wired headset. Off by default.
+# DIRECT_MODE=1: driver direct mode (OVRD_DIRECT_MODE, ovrd_direct_mode.hpp). SteamVR's compositor hands its finished
+# eye images to our plugin instead of driving the headset's display; Monado's compositor, running inside vrserver,
+# re-warps them to the latest head pose, distorts them and shows them on the headset, paced by its own frame timing
+# (as Monado direct does for OpenXR apps). Every frame is logged (logs/direct-<stamp>.csv, 10 s summaries
+# "Direct mode (10 s)" in the log). If Monado's compositor can't start, the frames are only logged and the headset
+# stays dark. Off by default.
 if [ "${DIRECT_MODE:-0}" = 1 ]; then
 	export OVRD_DIRECT_MODE=1
 	export OVRD_DIRECT_MODE_LOG="$LOGDIR/direct-$STAMP.csv"
-	echo "  DIRECT_MODE=1: SteamVR's frames come to the plugin and are logged, the headset stays dark"
+	# Once, 20 s after the game's layers appear: save that frame's layer images (logs/direct-<stamp>-layer<N>.rgba,
+	# analysis/layer_capture.py makes PNGs). CAPTURE=0 turns it off.
+	export OVRD_DIRECT_MODE_CAPTURE="${CAPTURE:-20}"
+	# What reached the screen, per displayed frame (Monado's compositor: re-warp pose, client frame used, present
+	# and vblank times): analysis/screen_jitter.py logs/compframes-<stamp>.csv logs/direct-<stamp>.csv
+	export XRT_COMPOSITOR_FRAME_LOG="$LOGDIR/compframes-$STAMP.csv"
+	echo "  DIRECT_MODE=1: SteamVR's frames are shown by Monado's compositor (plugin direct mode)"
 fi
 # LINUX_FIXES=0: turn off the VK_LAYER_BNUUY_steamvr_linux_fixes Vulkan layer (installed with Ignition, implicit, so it
 # loads into vrcompositor in every session). Since a SteamVR update it only half-applies: it switches the compositor's
