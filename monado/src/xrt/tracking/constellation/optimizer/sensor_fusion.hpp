@@ -1,0 +1,771 @@
+// Copyright 2026, Beyley Cardellio
+// SPDX-License-Identifier: BSL-1.0
+/*!
+ * @file
+ * @brief  Constellation tracker sensor fusion.
+ * @author Beyley Cardellio <ep1cm1n10n123@gmail.com>
+ * @ingroup tracking
+ */
+
+#pragma once
+
+#include "xrt/xrt_config_build.h"
+
+#include "os/os_threading.h"
+
+#include "tracking/t_constellation.h"
+
+#include "constellation/t_constellation_tracker.h"
+#include "constellation/trace_log/t_constellation_tracker_trace_log.hpp"
+
+#include "math/m_relation_history.hpp"
+
+#include "imu_preintegration.hpp"
+
+#include <array>
+#include <atomic>
+#include <ceres/context.h>
+#include <cstddef>
+#include <cstring>
+#include <memory>
+#include <optional>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+
+namespace xrt::tracking::constellation {
+
+// Declared here rather than included, since the tracker's internal header is the one that includes this file.
+struct CameraSample;
+struct ConstellationTracker;
+
+}; // namespace xrt::tracking::constellation
+
+namespace xrt::tracking::constellation::optimizer::sensor_fusion {
+
+using namespace xrt::auxiliary;
+using namespace xrt::tracking;
+using namespace xrt::tracking::constellation::optimizer;
+
+//! How many keyframes to keep in our sliding window.
+static constexpr uint32_t kSlidingWindowSize = 3;
+
+//! The number of IMU samples to keep in our ring buffer
+static constexpr uint32_t kImuBufferSize = 5000;
+
+/*!
+ * The most IMU samples we ever expect to find between two keyframes. At a 1KHz IMU and a keyframe every few tens of
+ * milliseconds the real count is well under a hundred, so this is generous headroom rather than a tight bound. Sizing
+ * the staging buffer off this instead of `kImuBufferSize` keeps it small enough to sit on the stack.
+ */
+static constexpr uint32_t kMaxImuSamplesPerKeyframe = 512;
+
+/*!
+ * How many newer keyframes have to pile up before a keyframe gets sealed and marginalized.
+ */
+static constexpr uint32_t kKeyframeSealLagKeyframes = 2;
+
+static_assert(kKeyframeSealLagKeyframes < kSlidingWindowSize,
+              "the oldest keyframe in the window has to be sealed by the time it is evicted, so that marginalization "
+              "never has to fold an open keyframe into the prior");
+
+
+/*!
+ * How many camera samples may be queued for the fusion thread before new ones start being dropped.
+ *
+ * The fusion thread drains the whole queue every pass, so if this grows past even a handful, the thread has stalled a
+ * lot and we should just warn and start dropping them to not use an ever-increasing amount of RAM.
+ */
+static constexpr uint32_t kMaxQueuedCameraSamples = 32;
+
+struct DeviceObservation
+{
+	//! The camera that this observation is tied to
+	uint32_t camera_idx;
+
+	//! The camera pose at the timestamp
+	xrt_pose Tcv_world_cam;
+
+	//! The seed cam->device transform
+	xrt_pose Tcv_cam_device_seed;
+
+	//! 2D observations
+	std::array<xrt_vec2, XRT_CONSTELLATION_MAX_LEDS_PER_DEVICE> points2d;
+	//! 3D model correspondences
+	std::array<xrt_vec3, XRT_CONSTELLATION_MAX_LEDS_PER_DEVICE> points3d;
+
+	uint32_t num_points;
+};
+
+/*!
+ * The trace log of a sample folded into a keyframe, held on to until a solve covers the keyframe (making the sample's
+ * pose available to consumers), or the keyframe leaves the window without ever being covered.
+ */
+struct PendingFusionTrace
+{
+	TraceLogRef trace_log{};
+	timepoint_ns frame_timestamp_ns{0};
+	time_duration_ns start_latency_ns{0};
+	t_constellation_tracker_trace_log_fusion_sample_result sample_result{CONSTELLATION_FUSION_SAMPLE_INVALID};
+	time_duration_ns process_time_ns{0};
+	uint32_t batch_size{0};
+	//! Successful solves that ran while this was waiting, but didn't cover its keyframe.
+	uint32_t num_solves_waited{0};
+};
+
+struct Keyframe
+{
+	//! The mosaic this keyframe corresponds to
+	uint32_t mosaic_idx;
+	//! The timestamp of this observation
+	timepoint_ns timestamp_ns;
+
+	/*!
+	 * Set once this keyframe can no longer accept observations due to marginalization or age.
+	 */
+	bool sealed;
+
+	std::array<DeviceObservation, XRT_TRACKING_MAX_CAMS> observations;
+	uint32_t num_observations;
+
+	/*!
+	 * Trace logs of the samples folded in that no solve has covered yet. Entries past @ref num_pending_traces are
+	 * always empty, so a reused slot holds no stale references.
+	 */
+	std::array<PendingFusionTrace, XRT_TRACKING_MAX_CAMS> pending_traces;
+	uint32_t num_pending_traces;
+};
+
+/*!
+ * One IMU sample as it sits in @ref Device::imu_samples.
+ *
+ * The fusion thread reads these while the IMU thread is writing them, so the words are loaded and stored one at a time
+ * through relaxed atomics. This can cause torn reads on the reader end, but it will not be UB.
+ *
+ * Relaxed is the right ordering for the words themselves. All the ordering that matters lives on
+ * @ref Device::imu_write_count, whose release/acquire pair is what publishes a finished slot, plus a fence pair around
+ * the words that lets a reader detect a slot being overwritten underneath it.
+ */
+struct RingImuSample
+{
+	static_assert(std::is_trivially_copyable_v<xrt_imu_sample>);
+	static_assert(sizeof(xrt_imu_sample) % sizeof(uint64_t) == 0,
+	              "the sample has to decompose into whole words to be stored and loaded atomically");
+	static_assert(std::atomic<uint64_t>::is_always_lock_free,
+	              "a locking atomic here would put a mutex back on the IMU push path");
+
+	static constexpr size_t kNumWords = sizeof(xrt_imu_sample) / sizeof(uint64_t);
+
+	//! The word `xrt_imu_sample::timestamp_ns` lives in, which is the only one the collector's bisection needs.
+	static constexpr size_t kTimestampWord = offsetof(xrt_imu_sample, timestamp_ns) / sizeof(uint64_t);
+
+	std::array<std::atomic<uint64_t>, kNumWords> words;
+
+	void
+	store(const xrt_imu_sample &sample) noexcept
+	{
+		std::array<uint64_t, kNumWords> raw;
+		std::memcpy(raw.data(), &sample, sizeof(sample));
+
+		for (size_t i = 0; i < kNumWords; i++) {
+			this->words[i].store(raw[i], std::memory_order_relaxed);
+		}
+	}
+
+	xrt_imu_sample
+	load() const noexcept
+	{
+		std::array<uint64_t, kNumWords> raw;
+		for (size_t i = 0; i < kNumWords; i++) {
+			raw[i] = this->words[i].load(std::memory_order_relaxed);
+		}
+
+		xrt_imu_sample sample;
+		std::memcpy(&sample, raw.data(), sizeof(sample));
+		return sample;
+	}
+
+	//! Just the timestamp, so the bisection does not pull in six words it is only going to throw away.
+	timepoint_ns
+	loadTimestamp() const noexcept
+	{
+		const uint64_t raw = this->words[kTimestampWord].load(std::memory_order_relaxed);
+
+		timepoint_ns timestamp;
+		std::memcpy(&timestamp, &raw, sizeof(timestamp));
+		return timestamp;
+	}
+};
+
+enum class DevicePreintegrationState
+{
+	//! Needs to be recomputed
+	Dirty,
+	//! Does not refer to any real pre-integration. This term contributes nothing and can be skipped.
+	Empty,
+	//! This preintegration is complete and will never change.
+	Integrated,
+};
+
+/*!
+ * Stores state for a single preintegration residual for a device.
+ */
+struct DevicePreintegration
+{
+	PreintegratedImuSamples imu_preintegration;
+
+	DevicePreintegrationState state;
+
+	bool
+	dirty() const
+	{
+		return this->state == DevicePreintegrationState::Dirty;
+	}
+
+	static DevicePreintegration
+	Identity(DevicePreintegrationState state)
+	{
+		return {
+		    .imu_preintegration = PreintegratedImuSamples::Identity(),
+		    .state = state,
+		};
+	}
+};
+
+/*!
+ * The IMU intrinsics the rig calibration happened to solve for, as the fusion takes them in as a seed.
+ *
+ * A copy of @ref rig_calibration::ImuCalibration rather than that type itself.
+ */
+struct DeviceImuCalibration
+{
+	//! Accelerometer bias, in meters per second squared.
+	xrt_vec3_f64 accel_bias XRT_VEC3_ZERO;
+	//! Gyroscope bias, in radians per second.
+	xrt_vec3_f64 gyro_bias XRT_VEC3_ZERO;
+	//! Per-axis accelerometer scale, unitless.
+	xrt_vec3_f64 accel_scale XRT_VEC3_ONE;
+
+	//! The LED model -> IMU rotation.
+	xrt_quat Qcv_model_imu XRT_QUAT_IDENTITY;
+};
+
+struct DeviceSolveState
+{
+	//! The time of the solve
+	timepoint_ns time_ns;
+	//! The world -> LED model pose at the solve
+	xrt_pose Tcv_world_device;
+	//! The world velocity at the solve
+	xrt_vec3_f64 world_velocity;
+	//! The imu calibration at the solve
+	DeviceImuCalibration imu_calibration;
+};
+
+struct Device
+{
+public: // Fields
+	const t_constellation_device_id_t id;
+
+	const t_constellation_tracker_led_model *const led_model;
+
+	//! The noise model and bias behaviour of the device's IMU, as the driver gave it.
+	const xrt_imu_calibration sensor_calibration;
+
+	//! The latest fused solve.
+	std::optional<DeviceSolveState> latest_solve;
+	//! The solved state for the latest IMU dead reckoned position.
+	std::optional<DeviceSolveState> latest_imu_reckon;
+
+	//! The relation history of the device, used as a fast way to retrieve the latest dead-reckoned poses.
+	RelationHistory imu_relation_history;
+	/*!
+	 * The relation history containing only the exact camera keyframes, to allow access to exact fused keyframes.
+	 *
+	 * Since relation histories are not allowed to be pushed to out of order, if we want to allow access to exact
+	 * camera keyframe poses, so that a late camera can get the full solved pose from other cameras, this is the way
+	 * to go about that.
+	 */
+	RelationHistory keyframe_relation_history;
+
+	//! Pre-calibrated accelerometer bias, in meters per second squared.
+	DeviceImuCalibration stored_imu_calibration;
+
+	/*!
+	 * The preintegrated IMU samples between keyframes, as a ring running parallel to @ref
+	 * SensorFusion::keyframe_storage: slot `i` holds the interval that *ends* at the keyframe in slot `i`.
+	 *
+	 * Sharing the keyframe ring's indexing is what makes a window shift free for these too. The slot belonging
+	 * to the oldest keyframe in the window has no predecessor to integrate from and is simply never read. Index
+	 * this through @ref SensorFusion::preintegrationLocked rather than directly.
+	 */
+	std::array<DevicePreintegration, kSlidingWindowSize> preintegrations;
+
+	/*!
+	 * The total number of IMU samples ever pushed for this device. Absolute sample `n` lives in ring slot
+	 * `n % kImuBufferSize`, so this is both the write pointer and the count of samples that have ever been
+	 * written. Incrementing forever means there's no wraparound behaviour to worry about when the reader gets
+	 * lapped by the writer.
+	 *
+	 * Only the IMU push thread writes this, and it publishes it with a release store once the slot it names has
+	 * been filled. Readers must load it with acquire before touching `imu_samples`, and re-load it after an acquire
+	 * fence to confirm the writer did not overwrite what they just read; the writer issues the matching release
+	 * fence before it starts overwriting a slot.
+	 */
+	std::atomic<uint64_t> imu_write_count;
+
+	std::atomic<timepoint_ns> latest_imu_ts_ns;
+
+	//! The buffered IMU samples, indexed by absolute sample index modulo `kImuBufferSize`.
+	std::array<RingImuSample, kImuBufferSize> imu_samples;
+
+public: // Methods
+	Device(t_constellation_device_id_t id,
+	       const t_constellation_tracker_led_model *led_model,
+	       const xrt_imu_calibration &sensor_calibration);
+	~Device();
+
+	Device(const Device &) = delete;
+	Device &
+	operator=(const Device &) = delete;
+
+	const DeviceImuCalibration &
+	getLatestImuCalibration() const;
+
+	/*!
+	 * Resets the device's state to a fresh state.
+	 *
+	 * Can be used if all prior converged data can no longer
+	 * be considered trusted (eg. large jump in clock sync).
+	 */
+	void
+	resetLocked();
+};
+
+struct CameraDescription
+{
+public: // Fields
+	size_t mosaic_idx;
+	size_t camera_idx;
+
+	//! Intrinsics and distortion, which is what turns a LED in the device's frame into a pixel.
+	camera_model params;
+};
+
+/*
+ * Solve snapshot
+ *
+ * A description of one solve that stands still while the next pass moves the window on underneath it. The fusion
+ * thread owns the window outright.
+ */
+
+//! A device's solved state at one keyframe.
+struct SolvedDeviceKeyframe
+{
+	//! Solved world -> LED model pose.
+	xrt_pose Tcv_world_device;
+	//! Solved world-frame velocity, in meters per second.
+	xrt_vec3_f64 linear_velocity;
+
+	//! Whether the world-frame angular velocity is valid.
+	bool angular_velocity_valid;
+	//! World-frame angular velocity, in radians per second.
+	xrt_vec3_f64 angular_velocity;
+
+	//! Solved accelerometer bias, in meters per second squared.
+	xrt_vec3_f64 accel_bias;
+	//! Solved gyroscope bias, in radians per second.
+	xrt_vec3_f64 gyro_bias;
+	//! Solved per-axis accelerometer scale, unitless.
+	xrt_vec3_f64 accel_scale;
+	//! The covariance matrix of this solve.
+	PoseCovarianceMatrix covariance;
+};
+
+/*!
+ * One camera's view of one device at one keyframe.
+ *
+ * Carries the camera intrinsics alongside the correspondences so that whatever consumes this can reproject the solved
+ * pose without having to reach back into @ref SensorFusion::cameras for them.
+ */
+struct SnapshotObservation
+{
+	uint32_t mosaic_idx;
+	uint32_t camera_idx;
+
+	xrt_pose Tcv_world_cam;
+	xrt_pose Tcv_cam_device_seed;
+
+	camera_model params;
+
+	uint32_t num_points;
+	std::array<xrt_vec2, XRT_CONSTELLATION_MAX_LEDS_PER_DEVICE> points2d;
+	std::array<xrt_vec3, XRT_CONSTELLATION_MAX_LEDS_PER_DEVICE> points3d;
+};
+
+struct SnapshotKeyframe
+{
+	timepoint_ns timestamp_ns;
+	uint32_t mosaic_idx;
+	bool sealed;
+
+	uint32_t num_observations;
+	std::array<SnapshotObservation, XRT_TRACKING_MAX_CAMS> observations;
+
+	SolvedDeviceKeyframe device;
+};
+
+struct SnapshotDevice
+{
+	t_constellation_device_id_t id;
+
+	//! A bit per keyframe age the solve held a state for.
+	uint32_t keyframe_mask;
+
+	//! Solved LED model -> IMU rotation.
+	xrt_quat Qcv_model_imu;
+
+	//! The LED model -> IMU rotation from the rig calibration, for measuring how far the solve has walked from it.
+	xrt_quat calibrated_Qcv_model_imu;
+};
+
+/*!
+ * One solve, whole: what went in, what came out, and how the solver got there.
+ */
+struct SolveSnapshot
+{
+	//! Counts solves over the life of the fusion, and is what the logger uses as a sequence timeline.
+	uint64_t solve_index{0};
+
+	uint32_t num_keyframes;
+	//! Newest first, so index `i` is keyframe age `i`.
+	std::array<SnapshotKeyframe, kSlidingWindowSize> keyframes;
+
+	SnapshotDevice device;
+
+	//! Solved gravity magnitude, in meters per second squared.
+	double world_gravity_mag{0.0};
+
+	uint64_t num_late_samples_dropped{0};
+
+	int num_residuals{0};
+	int num_parameter_blocks{0};
+	uint32_t num_iterations{0};
+
+	//! Residual RMS in standard deviations, before and after the solve. See @ref kTargetResidualRmsSigma.
+	double initial_rms_sigma{0.0};
+	double final_rms_sigma{0.0};
+
+	double solve_time_s{0.0};
+
+	//! Ceres' termination type, already stringified, since the logger has no business including Ceres headers.
+	std::string termination;
+};
+
+struct SensorFusion
+{
+public: // Fields
+	ceres::Context *context;
+
+	u_logging_level log_level;
+
+	//! Whether we're in single threaded mode
+	bool deterministic;
+
+	/*!
+	 * The fusion thread, lock does not protect fusion operations, only threading operations like
+	 * wakeup and inter-thread sample transfer.
+	 *
+	 * See @ref SensorFusion::lock for fusion operations.
+	 */
+	os_thread_helper thread{};
+
+	//! Locks heavy fusion operations, but no threading operations (such as wakeup/sleep).
+	os::Mutex lock;
+
+	/*!
+	 * Backing store for the keyframe ring. The keyframe with absolute index `n` lives in slot
+	 * `n % kSlidingWindowSize`.
+	 *
+	 * Reach these through @ref keyframeLocked instead of indexing here, and never move the entries around.
+	 */
+	std::array<Keyframe, kSlidingWindowSize> keyframe_storage{};
+
+	//! One past the absolute index of the newest keyframe, so the newest keyframe is `keyframe_head - 1`.
+	uint64_t keyframe_head{0};
+
+	//! How many slots of the ring hold real keyframes, saturating at `kSlidingWindowSize`.
+	uint32_t num_keyframes{0};
+
+	//! The cameras that are present in the system
+	std::array<std::array<CameraDescription, XRT_TRACKING_MAX_CAMS>, XRT_CONSTELLATION_MAX_TRACKING_MOSAICS>
+	    cameras{};
+
+	Device device;
+
+	/*!
+	 * Camera samples handed over by @ref pushCameraSample, in arrival order, waiting to be folded into the
+	 * window by the fusion thread.
+	 */
+	std::vector<constellation::CameraSample> sample_queue;
+
+	/*!
+	 * How many samples have been thrown away for arriving with @ref sample_queue already at
+	 * @ref kMaxQueuedCameraSamples.
+	 *
+	 * If this grows, it indicates the fusion thread has likely stalled or is running too slowly.
+	 */
+	uint64_t num_queued_samples_dropped{0};
+
+	//! Whether the current state is dirty and we need to run an optimization
+	bool dirty{false};
+
+	//! How many camera samples have been dropped for turning up after their keyframe was already sealed.
+	uint64_t num_late_samples_dropped{0};
+
+	//! The active Ceres problem.
+	struct SensorFusionProblem *problem{nullptr};
+
+#ifdef XRT_FEATURE_RERUN
+	/*!
+	 * Rerun logging, null unless enabled.
+	 */
+	std::unique_ptr<struct RerunContext> rerun_context{nullptr};
+#endif
+
+	/*!
+	 * The window and its solved states as of the most recent solve, filled by @ref runFusionLocked once Ceres has
+	 * returned. Kept between solves since dead reckoning integrates with the solved gravity it holds.
+	 *
+	 * This is owned in full by the fusion thread, don't touch it outside of that.
+	 */
+	SolveSnapshot snapshot;
+
+private: // Methods
+	//! Marks the fusion dirty, call with the fusion lock held.
+	void
+	markDirtyFusionLocked();
+
+	//! Wakes the fusion thread, call with the thread lock held.
+	void
+	wakeThreadLocked();
+
+	/*!
+	 * Retires the keyframe falling out of the window and opens a fresh one at the head of the ring.
+	 *
+	 * @return The new keyframe, which is the newest in the window and starts out open.
+	 */
+	Keyframe &
+	pushKeyframeLocked(const constellation::CameraSample &sample);
+
+	//! Seals every keyframe that has aged past @ref kKeyframeSealLagKeyframes.
+	void
+	sealAgedKeyframesLocked();
+
+	//! @return `true` when the built problem has something to solve.
+	bool
+	buildFusionLocked();
+
+	/*!
+	 * Rebuilds the problem, without solving it, so that an eviction can marginalize against the window as it
+	 * stands.
+	 *
+	 * Needed when an earlier eviction in the same pass has already marginalized against the current problem: the
+	 * prior it produced lives outside that problem, so a second eviction against it would drop the prior.
+	 */
+	void
+	rebuildForEvictionLocked();
+
+	/*!
+	 * Integrates every dirty IMU interval of the device.
+	 *
+	 * @param[in,out] work_remaining Set when an interval could not be integrated yet and has to be retried.
+	 *
+	 * @returns When an interval was closed and it's worth a fusion run.
+	 */
+	bool
+	preintegrateDeviceLocked(bool &work_remaining);
+
+	//! Triggers the sensor fusion to reset it's state
+	void
+	resetLocked();
+
+public: // Methods
+	/*!
+	 * Constructs a new constellation tracker.
+	 *
+	 * @param context       The Ceres context to use
+	 * @param deterministic Whether to not startup a separate thread, and run the fusion on the same
+	 *                      thread as the callee's push functions.
+	 * @param id                 The ID of the constellation device
+	 * @param led_model          The LED model of the device
+	 * @param sensor_calibration The noise model and bias behaviour of the device's IMU
+	 */
+	SensorFusion(ceres::Context *context,
+	             bool deterministic,
+	             t_constellation_device_id_t id,
+	             const t_constellation_tracker_led_model *led_model,
+	             const xrt_imu_calibration &sensor_calibration);
+
+	~SensorFusion();
+
+	//! Returns the index of the keyframe in the ring buffer.
+	uint32_t
+	keyframeIdxLocked(uint32_t age) const;
+
+	/*!
+	 * The age of the keyframe currently living in ring slot @p idx, or `false` when no keyframe in the window
+	 * does.
+	 */
+	bool
+	keyframeAgeForIdxLocked(size_t idx, uint32_t &out_age) const;
+
+	/*!
+	 * The keyframe `age` steps back from the newest, so age 0 is the newest keyframe in the window and
+	 * `num_keyframes - 1` is the oldest.
+	 */
+	Keyframe &
+	keyframeLocked(uint32_t age);
+
+	const Keyframe &
+	keyframeLocked(uint32_t age) const;
+
+	//! The preintegration covering the interval that *ends* at `keyframeLocked(age)`.
+	DevicePreintegration &
+	preintegrationLocked(uint32_t age);
+
+	//! Adds a camera to the sensor fusion
+	void
+	addCamera(const CameraDescription &camera_description);
+
+	/*!
+	 * Hands a device the IMU intrinsics a rig calibration solved for. This is used as a better seed start than
+	 * assuming an identity calibration.
+	 *
+	 * Blocks until the current solve is complete.
+	 */
+	void
+	setDeviceImuCalibration(const DeviceImuCalibration &calibration);
+
+	/*!
+	 * Hands a complete constellation camera sample to the fusion thread. Must be called with
+	 * `tracker->device_lock` held.
+	 *
+	 * Does no work beyond the copy onto @ref sample_queue: everything the sample goes on to do to the window
+	 * happens on the fusion thread, so a camera thread never blocks on anything more than the queue push.
+	 */
+	void
+	pushCameraSample(constellation::ConstellationTracker *tracker, const constellation::CameraSample &sample);
+
+	/*!
+	 * Pushes an IMU sample for this particular device, IMU samples should be in OpenXR coordinate space. IMU biases
+	 * found during rig calibration should not be applied to these samples.
+	 *
+	 * May wait on large data copies during inter-thread transfer.
+	 * If your thread timing is thrown off calling this, put it behind a threaded queue,
+	 * but this should be fine without, the copies are fast.
+	 */
+	void
+	pushImuSample(const xrt_imu_sample &sample);
+
+	//! Provides the latest predicted device pose for the requested timestamp.
+	void
+	getTrackedPose(timepoint_ns requested_time_ns, xrt_space_relation &out_relation);
+
+	/*!
+	 * Provides the latest predicted device pose for the requested timestamp, also checking for exact keyframe
+	 * poses, if available.
+	 */
+	void
+	getKeyframeTrackedPose(timepoint_ns requested_time_ns, xrt_space_relation &out_relation);
+
+	/*!
+	 * Appends any camera samples into @p pending, before sorting pending by timestamp order.
+	 *
+	 * @remarks Call with @ref SensorFusion::thread lock held.
+	 *
+	 * @return Whether any camera samples have been passed by the IMU, and so are ready for integration.
+	 */
+	bool
+	pullReadyCameraSamplesLocked(timepoint_ns now_ns, std::vector<constellation::CameraSample> &pending);
+
+	void
+	writeSampleToKeyframe(Keyframe &keyframe, const DeviceObservation &observation, uint32_t camera_index);
+
+	/*!
+	 * Folds one queued camera sample into the window, or drops if it's no longer able to be merged in.
+	 *
+	 * This is the far side of @ref sample_queue, and the only thing that grows the window.
+	 *
+	 * @param[out] out_keyframe If non-null, set to the keyframe the sample was written to, if it was.
+	 *
+	 * @return What happened to the sample, for the trace log.
+	 */
+	t_constellation_tracker_trace_log_fusion_sample_result
+	processCameraSampleLocked(const constellation::CameraSample &sample, Keyframe **out_keyframe = nullptr);
+
+	/*!
+	 * @ref processCameraSampleLocked, plus tracing. If the sample made it into a keyframe its trace log is held on
+	 * that keyframe until a solve covers it, otherwise its trace entry is pushed straight away.
+	 *
+	 * @param batch_size How many samples are being folded in this pass.
+	 */
+	void
+	processCameraSampleTracedLocked(const constellation::CameraSample &sample, uint32_t batch_size);
+
+	//! Push the trace entry for a sample dropped before it could be folded in.
+	void
+	traceDroppedSample(const constellation::CameraSample &sample,
+	                   t_constellation_tracker_trace_log_fusion_sample_result result);
+
+	/*!
+	 * Push the trace entries of every sample waiting on @p keyframe and release them.
+	 *
+	 * @param solve_result  Why they're being released.
+	 * @param now_ns        When they're being released, the time the poses became available if they were covered.
+	 * @param solve_time_ns The time spent in the pass that released them.
+	 */
+	void
+	flushKeyframeTracesLocked(Keyframe &keyframe,
+	                          t_constellation_tracker_trace_log_fusion_solve_result solve_result,
+	                          timepoint_ns now_ns,
+	                          time_duration_ns solve_time_ns);
+
+	//! @ref flushKeyframeTracesLocked on every keyframe in the window, for when the window is about to be dropped.
+	void
+	flushAllKeyframeTracesLocked(t_constellation_tracker_trace_log_fusion_solve_result solve_result,
+	                             time_duration_ns solve_time_ns);
+
+	/*!
+	 * Dead reckons @p inout_solve forward through every IMU sample that has arrived since it, pushing a pose for
+	 * each into the device's relation history.
+	 *
+	 * The history only takes poses newer than the newest it already holds, so wherever it already covers the range,
+	 * the poses integrated there are dropped, and only the state carried out the end of the range is kept.
+	 *
+	 * @return false, leaving @p inout_solve untouched, when the samples could not be collected.
+	 */
+	bool
+	reckonToLatestImu(DeviceSolveState &inout_solve);
+
+	/*!
+	 * Uses the latest IMU reckoned solve and reckons it forward to the latest IMU sample
+	 */
+	void
+	updateDeviceRelationHistoryLocked();
+
+	/*!
+	 * Runs preintegration, and when @p have_new_input says the window has gained something to solve over,
+	 * builds the problem, then solves it if need-be.
+	 *
+	 * @param have_new_input Whether this pass drained any camera samples, rather than being woken by an IMU
+	 *                       sample arriving to unpark a preintegration.
+	 *
+	 * When a solve succeeds, the trace logs waiting on every keyframe it covered are released.
+	 */
+	void
+	tickLocked(bool have_new_input);
+};
+
+}; // namespace xrt::tracking::constellation::optimizer::sensor_fusion

@@ -1,0 +1,59 @@
+{
+    "name": "monado",
+    "homepage": "https://monado.freedesktop.org",
+    "version-string": "25.1",
+    "dependencies": [
+        {
+            "name": "wil",
+            "platform": "windows"
+        },
+        {
+            "name": "pthreads",
+            "platform": "windows"
+        },
+        "cjson",
+        "eigen3",
+        {
+            "name": "glslang",
+            "features": [
+                "tools"
+            ]
+        },
+        "vulkan"
+    ],
+    "default-features": [
+        "usb",
+        "gui"
+    ],
+    "features": {
+        "usb": {
+            "description": "Support USB device drivers",
+            "dependencies": [
+                "libusb",
+                "hidapi",
+                {
+                    "name": "zlib",
+                    "platform": "linux"
+                }
+            ]
+        },
+        "gui": {
+            "description": "Debug GUI support",
+            "dependencies": [
+                {
+                    "name": "sdl2",
+                    "features": [
+                        "vulkan"
+                    ]
+                }
+            ]
+        },
+        "tracking": {
+            "description": "OpenCV-based tracking features",
+            "dependencies": [
+                "opencv"
+            ]
+        }
+    },
+    "builtin-baseline": "9eec002df1cd109f8f104cd966a763daf9751489"
+}
