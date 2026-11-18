@@ -114,3 +114,36 @@ TEST_CASE("psvr2_pose_filter: the velocity matches the pose's motion with smooth
 	// ... and the pose itself is no jerkier.
 	CHECK(on.pose_jitter_rms <= 1.1 * off.pose_jitter_rms);
 }
+
+TEST_CASE("psvr2_pose_filter: no velocity while the position is held without SLAM")
+{
+	// A still head with a correction still being blended in, then SLAM stops (the headset lost its tracking): the
+	// filter holds the position, and the reported velocity has to be zero, not the correction's rate.
+	psvr2_pose_filter_params params;
+	psvr2_pose_filter_default_params(&params);
+	params.accel_enable = true;
+	params.pos_blend_ns = 100000000;
+	psvr2_pose_filter f;
+	psvr2_pose_filter_init(&f, &params);
+	const xrt_vec3 zero = {0, 0, 0};
+	int64_t t = 0;
+	for (; t < 3LL * 1000000000; t += kImuStep) {
+		psvr2_pose_filter_push_gyro(&f, t, &zero);
+		xrt_vec3 a = {0.0f, 9.81f, 0.0f};
+		psvr2_pose_filter_push_accel(&f, t, &a);
+		if (t % kSlamStep < kImuStep) {
+			// The last SLAM poses step 2 cm, so a correction is pending when SLAM stops.
+			float x = t > 2900000000LL ? 0.02f : 0.0f;
+			xrt_pose p = {{0, 0, 0, 1}, {x, 1.6f, 0.0f}};
+			psvr2_pose_filter_push_slam(&f, t, &p, nullptr);
+		}
+	}
+	for (; t < 4LL * 1000000000; t += kImuStep) { // 1 s without SLAM
+		psvr2_pose_filter_push_gyro(&f, t, &zero);
+		xrt_vec3 a = {0.0f, 9.81f, 0.0f};
+		psvr2_pose_filter_push_accel(&f, t, &a);
+	}
+	xrt_space_relation r;
+	REQUIRE(psvr2_pose_filter_get(&f, t, &r));
+	CHECK(m_vec3_len(r.linear_velocity) < 0.001f);
+}

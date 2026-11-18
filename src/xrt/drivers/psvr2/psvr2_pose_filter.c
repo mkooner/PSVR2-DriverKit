@@ -396,6 +396,9 @@ psvr2_pose_filter_push_accel(struct psvr2_pose_filter *f, timepoint_ns ts, const
 	if (f->last_slam_pos_ts != 0 && ts - f->last_slam_pos_ts > f->params.max_extrapolation_ns) {
 		f->v_imu = (struct xrt_vec3)XRT_VEC3_ZERO;
 		f->velocity = (struct xrt_vec3)XRT_VEC3_ZERO;
+		// The held position doesn't move, so neither does the correction: without this its rate stayed in the
+		// reported velocity (2026-11-18 00:16 run: SLAM nearly stopped, velocity stuck at 68.7 mm/s for 25 s).
+		f->corr_rate = (struct xrt_vec3)XRT_VEC3_ZERO;
 		f->pos_ts = ts;
 		f->pos_history[f->pos_history_next].ts = ts;
 		f->pos_history[f->pos_history_next].position = f->position;
