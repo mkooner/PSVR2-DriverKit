@@ -45,3 +45,4 @@ tools/vrdisplaydump
 tools/vrtestscene
 tools/xr_frame_log/libxr_frame_log.so
 tools/xr_frame_log/layer_test_client
+directmode/dm_harness

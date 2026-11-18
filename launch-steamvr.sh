@@ -267,6 +267,15 @@ if [ -n "${ANGVEL_AVG:-}" ] && [ "${ANGVEL_AVG}" != 0 ]; then
 	export OVRD_ANGVEL_AVG_MS="$ANGVEL_AVG"
 	echo "  ANGVEL_AVG=$ANGVEL_AVG: angular velocity averaged over $ANGVEL_AVG ms"
 fi
+# DIRECT_MODE=1: driver direct mode prototype (OVRD_DIRECT_MODE, ovrd_direct_mode.hpp). SteamVR's compositor hands its
+# finished frames to our plugin instead of driving the headset's display: THE HEADSET SHOWS NOTHING in this mode, the
+# frames are only logged (logs/direct-<stamp>.csv, 10 s summaries "Direct mode (10 s)" in the log). First step of the
+# plugin rewrite: checks SteamVR hands the frames over for a wired headset. Off by default.
+if [ "${DIRECT_MODE:-0}" = 1 ]; then
+	export OVRD_DIRECT_MODE=1
+	export OVRD_DIRECT_MODE_LOG="$LOGDIR/direct-$STAMP.csv"
+	echo "  DIRECT_MODE=1: SteamVR's frames come to the plugin and are logged, the headset stays dark"
+fi
 # LINUX_FIXES=0: turn off the VK_LAYER_BNUUY_steamvr_linux_fixes Vulkan layer (installed with Ignition, implicit, so it
 # loads into vrcompositor in every session). Since a SteamVR update it only half-applies: it switches the compositor's
 # present mode to FIFO_LATEST_READY but can't find WaitForPendingPresent to patch ("WaitForPendingPresent target
