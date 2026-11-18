@@ -24,6 +24,7 @@
 #include "ovrd_pose_log.hpp"
 #include "ovrd_display_clock.hpp"
 #include "ovrd_pose_replay.hpp"
+#include "ovrd_direct_mode.hpp"
 
 extern "C" {
 #include "ovrd_interface.h"
@@ -169,6 +170,13 @@ DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_display_after_vsync_ms, "OVRD_DISPLAY_AFTER_VSY
 
 //! OVRD_POSE_LOG=path: record every headset pose handed to SteamVR (ovrd_pose_log.hpp). Unset: nothing recorded.
 DEBUG_GET_ONCE_OPTION(ovrd_pose_log, "OVRD_POSE_LOG", NULL)
+
+/*!
+ * Driver direct mode prototype (ovrd_direct_mode.hpp): SteamVR hands its frames to the plugin instead of driving the
+ * display. Nothing is shown in the headset yet, the frames are only logged (OVRD_DIRECT_MODE_LOG).
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(ovrd_direct_mode, "OVRD_DIRECT_MODE", false)
+DEBUG_GET_ONCE_OPTION(ovrd_direct_mode_log, "OVRD_DIRECT_MODE_LOG", NULL)
 
 //! OVRD_LOG_EVENTS=1: log SteamVR events the plugin doesn't handle (off: SteamVR's frame loop doesn't write them).
 DEBUG_GET_ONCE_BOOL_OPTION(ovrd_log_events, "OVRD_LOG_EVENTS", false)
@@ -1915,6 +1923,8 @@ private:
 	std::thread *m_poseUpdateThread = NULL;
 	virtual void PoseUpdateThreadFunction();
 	OvrdPoseLog m_poseLog;          //!< OVRD_POSE_LOG
+	bool m_directModeOn = false;    //!< OVRD_DIRECT_MODE
+	OvrdDirectMode m_directMode;
 	bool m_lastPosTracked = false; //!< position tracked flag of the last GetPose (for the pose log)
 	int64_t m_eyeCheckNs = 0;      //!< last IPD check (pose thread)
 
@@ -2186,6 +2196,18 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 	//vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer, vr::Prop_IsOnDesktop_Bool, false);
 
 	// clang-format on
+	if (debug_get_bool_option_ovrd_direct_mode()) {
+		// As ALVR: SteamVR's compositor renders into our images and hands them over, paced by our vsync events.
+		m_directModeOn = true;
+		vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer, vr::Prop_HasDriverDirectModeComponent_Bool,
+		                                    true);
+		vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer,
+		                                    vr::Prop_DriverDirectModeSendsVsyncEvents_Bool, true);
+		m_directMode.start(m_flDisplayFrequency, debug_get_option_ovrd_direct_mode_log());
+	}
+	// clang-format off
+
+	// clang-format on
 
 
 	UpdateEyeToHead(true);
@@ -2207,6 +2229,7 @@ CDeviceDriver_Monado::Deactivate()
 	if (m_poseUpdateThread != NULL && m_poseUpdateThread->joinable()) {
 		m_poseUpdateThread->join();
 	}
+	m_directMode.stop();
 	ovrd_log("Deactivate\n");
 }
 
@@ -2222,6 +2245,10 @@ CDeviceDriver_Monado::GetComponent(const char *pchComponentNameAndVersion)
 	// clang-format off
 	if (strcmp(pchComponentNameAndVersion, vr::IVRDisplayComponent_Version) == 0) {
 		return (vr::IVRDisplayComponent *)this;
+	}
+	if (m_directModeOn && strcmp(pchComponentNameAndVersion, vr::IVRDriverDirectModeComponent_Version) == 0) {
+		ovrd_log("Direct mode: SteamVR asked for the direct mode component\n");
+		return (vr::IVRDriverDirectModeComponent *)&m_directMode;
 	}
 	// clang-format on
 
@@ -2487,6 +2514,10 @@ CDeviceDriver_Monado::IsDisplayOnDesktop()
 bool
 CDeviceDriver_Monado::IsDisplayRealDisplay()
 {
+	// In direct mode the frames come to us; SteamVR must not open the headset's display itself (as ALVR).
+	if (m_directModeOn) {
+		return false;
+	}
 	return true;
 }
 
