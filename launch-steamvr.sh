@@ -254,6 +254,19 @@ export PSSENSE_RECORD_FILE="$LOGDIR/sense-$STAMP"
 #   - every headset pose the plugin hands SteamVR (OVRD_POSE_LOG, ~9 MB a minute)
 #   - SteamVR's per-frame timing and the pose the game rendered each frame with (tools/vrframetiming, 30 s summaries)
 #   - analysis/steamvr_timeline.py on both: jitter per 30 s, each event labelled tracking / frame timing / prediction
+# SLAM corrections are brought in at a smoothly ramped rate that the reported velocity includes (driver default,
+# PSVR2_SMOOTH_CORRECTION_MS=30): offline the velocity matched the pose's motion 4-5x better and SteamVR's prediction
+# landed closer, with the pose itself no jerkier. SMOOTH_CORRECTION=0 turns it off (the earlier blend).
+if [ "${SMOOTH_CORRECTION:-1}" = 0 ]; then
+	export PSVR2_SMOOTH_CORRECTION_MS=0
+	echo "  SMOOTH_CORRECTION=0: earlier correction blend (velocity without the correction's motion)"
+fi
+# ANGVEL_AVG=<ms>: send SteamVR the mean angular velocity of the last N ms (OVRD_ANGVEL_AVG_MS; offline slightly worse
+# than the newest sample). Off by default.
+if [ -n "${ANGVEL_AVG:-}" ] && [ "${ANGVEL_AVG}" != 0 ]; then
+	export OVRD_ANGVEL_AVG_MS="$ANGVEL_AVG"
+	echo "  ANGVEL_AVG=$ANGVEL_AVG: angular velocity averaged over $ANGVEL_AVG ms"
+fi
 # LINUX_FIXES=0: turn off the VK_LAYER_BNUUY_steamvr_linux_fixes Vulkan layer (installed with Ignition, implicit, so it
 # loads into vrcompositor in every session). Since a SteamVR update it only half-applies: it switches the compositor's
 # present mode to FIFO_LATEST_READY but can't find WaitForPendingPresent to patch ("WaitForPendingPresent target
@@ -309,8 +322,23 @@ else
 			2>"$LOGDIR/steamvr-cpu-$STAMP-summary.txt" &
 		CPU_PID=$!
 	fi
+	# GAME=/path/to/openxr-app: start it once the compositor is up, with the OpenXR frame-timing layer
+	# (tools/xr_frame_log: each frame's predicted display time and period as SteamVR's OpenXR runtime gives them).
+	GAME_PID=""
+	if [ -n "${GAME:-}" ]; then
+		for _ in $(seq 1 60); do pgrep -x vrcompositor >/dev/null && break; sleep 1; done
+		sleep 5
+		echo "  starting $GAME with the frame-timing layer (log: $LOGDIR/steamvr-$STAMP-game.txt)"
+		"$HERE/tools/xr_frame_log/run-with-frame-log.sh" "$GAME" >"$LOGDIR/steamvr-$STAMP-game.txt" 2>&1 &
+		GAME_PID=$!
+	fi
 	while pgrep -x vrserver >/dev/null; do sleep 2; done
 	echo "  SteamVR exited."
+	if [ -n "$GAME_PID" ]; then
+		wait "$GAME_PID" 2>/dev/null
+		echo; echo "== The game's OpenXR frame timing on SteamVR"
+		sed -n '/^[0-9]* frames over/,$p' "$LOGDIR/steamvr-$STAMP-game.txt"
+	fi
 	for pid in $FT_PID $CPU_PID $PROBE_PID; do
 		kill -INT "$pid" 2>/dev/null
 		wait "$pid" 2>/dev/null

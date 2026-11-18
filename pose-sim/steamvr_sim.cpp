@@ -163,6 +163,8 @@ main(int argc, char **argv)
 		params.pos_snap_m = atof(getenv("SIM_POS_SNAP"));
 	if (getenv("SIM_ORIENT_SNAP_DEG"))
 		params.orient_snap_rad = (float)(atof(getenv("SIM_ORIENT_SNAP_DEG")) * M_PI / 180.0);
+	if (getenv("SIM_CORR_SMOOTH_MS"))
+		params.corr_smooth_tau_s = (float)(atof(getenv("SIM_CORR_SMOOTH_MS")) / 1000.0);
 	if (getenv("SIM_POS_BLEND_MS"))
 		params.pos_blend_ns = (time_duration_ns)(atof(getenv("SIM_POS_BLEND_MS")) * 1e6);
 	// SIM_ACCEL=1: accelerometer-aided position (accel_enable); SIM_GRAVITY_TAU: its gravity/bias average (s).

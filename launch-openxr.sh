@@ -80,6 +80,16 @@ if [ "${BASALT:-0}" = 1 ]; then
 		echo "  [!!] BASALT=1 but $VIT_SYSTEM_LIBRARY_PATH is missing: the driver will run without the referee"
 	fi
 fi
+# SLAM corrections are brought in at a smoothly ramped rate that the reported velocity includes (driver default,
+# PSVR2_SMOOTH_CORRECTION_MS=30): offline the velocity matched the pose's motion 4-5x better and SteamVR's prediction
+# landed closer, with the pose itself no jerkier. SMOOTH_CORRECTION=0 turns it off (the earlier blend).
+if [ "${SMOOTH_CORRECTION:-1}" = 0 ]; then
+	export PSVR2_SMOOTH_CORRECTION_MS=0
+	echo "  SMOOTH_CORRECTION=0: earlier correction blend (velocity without the correction's motion)"
+fi
+# The head pose recording (IMU, SLAM, and the panel's own frame counter "D" lines, analysis/panel_frames.py), as the
+# SteamVR launcher writes it, so both paths can be compared.
+export PSVR2_RECORD_FILE="${PSVR2_RECORD_FILE:-$LOGDIR/record-$STAMP-openxr.csv}"
 rm -f "$SOCKET" # a stale socket from a crashed service would block the new one
 export XRT_LOG="${XRT_LOG:-info}"
 export PSVR2_LOG="${PSVR2_LOG:-info}"

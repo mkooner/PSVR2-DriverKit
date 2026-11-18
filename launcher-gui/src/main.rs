@@ -78,6 +78,10 @@ fn default_settings() -> Vec<Setting> {
                "Experimental: our distortion doesn't model the lens edge yet, so it hides almost nothing.", false),
         toggle("ASYNC", "Force SteamVR async reprojection",
                "Off: SteamVR's own default (off on NVIDIA under Linux, as with Sony's driver). On: forced on.", false),
+        value("PSVR2_SMOOTH_CORRECTION_MS", "Smooth SLAM corrections (ms)",
+              "Corrections ramp in smoothly and the velocity includes them (better SteamVR prediction offline). 0 turns it off.", "30", true),
+        value("OVRD_ANGVEL_AVG_MS", "SteamVR angular velocity average (ms)",
+              "Mean of the last N ms instead of the newest gyro sample (slightly worse offline). Off by default.", "5", false),
         value("OVRD_POSE_MODE", "SteamVR headset pose mode",
               "steamvr (default): now + velocities. measured: measurement-time poses (Valve lighthouse). novelocity: no velocities. display: predicted to display time (ALVR).", "steamvr", true),
         value("OVRD_DISTORTION_MESH_RES", "SteamVR distortion mesh",
@@ -101,12 +105,13 @@ struct Config {
     steam_root: String,
     #[serde(default)]
     steamvr_dir: String,
-    /// Settings format: 2 = async reprojection off by default (SteamVR's own choice); 3 = SteamVR render scale 170.
+    /// Settings format: 2 = async reprojection off by default (SteamVR's own choice); 3 = SteamVR render scale 170;
+/// 4 = smooth SLAM corrections on.
     #[serde(default)]
     version: u32,
 }
 
-const CONFIG_VERSION: u32 = 3;
+const CONFIG_VERSION: u32 = 4;
 
 impl Default for Config {
     fn default() -> Self {
@@ -169,6 +174,11 @@ fn load_config() -> Config {
                     *value = "170".into();
                 }
             }
+        }
+    }
+    if cfg.version < 4 {
+        if let Some(s) = cfg.settings.iter_mut().find(|s| s.key == "PSVR2_SMOOTH_CORRECTION_MS") {
+            s.enabled = true;
         }
     }
     cfg.version = CONFIG_VERSION;
