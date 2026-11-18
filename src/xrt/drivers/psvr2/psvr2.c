@@ -51,6 +51,8 @@
 #include "b_timing_source.h"
 
 #include <stdio.h>
+#include <ctype.h>
+#include <sys/stat.h>
 #include <assert.h>
 #include <inttypes.h>
 #include <libusb.h>
@@ -84,6 +86,8 @@
 
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_default_brightness, "PSVR2_DEFAULT_BRIGHTNESS", 1.0f)
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_refresh_hz, "PSVR2_REFRESH_HZ", 89.91f)
+//! How long to wait for the headset's calibration block before using the saved copy (take_calibration_block).
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_calib_wait_s, "PSVR2_CALIB_WAIT_S", 5.0f)
 
 DEBUG_GET_ONCE_LOG_OPTION(psvr2_log, "PSVR2_LOG", U_LOGGING_WARN)
 
@@ -1203,6 +1207,9 @@ struct gen_data_entry
 };
 static_assert(sizeof(struct gen_data_entry) == 12, "bad data");
 
+static void
+take_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t size, bool from_cache);
+
 static void LIBUSB_CALL
 vd_xfer_cb(struct libusb_transfer *xfer)
 {
@@ -1277,26 +1284,7 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 				break;
 			}
 			case GEN_DATA_CALIBRATION_BLOCK: {
-				os_mutex_lock(&hmd->calib_lock);
-				if (hmd->calib_block == NULL) {
-					hmd->calib_block = malloc(entry->size);
-					if (hmd->calib_block != NULL) {
-						memcpy(hmd->calib_block, buf + entry->offset, entry->size);
-						hmd->calib_block_size = entry->size;
-					}
-				}
-				psvr2_parse_gen_calibration_block(hmd, buf + entry->offset, entry->size);
-				if (debug_get_bool_option_psvr2_basalt() && hmd->basalt == NULL && !hmd->basalt_tried) {
-					// Once: it needs the camera calibration in this block. Published only when fully set up.
-					hmd->basalt_tried = true;
-					struct psvr2_basalt *b = psvr2_basalt_create(NULL, buf + entry->offset, entry->size);
-					__atomic_store_n(&hmd->basalt, b, __ATOMIC_RELEASE);
-					if (b == NULL) {
-						PSVR2_ERROR(hmd, "PSVR2_BASALT: Basalt didn't start, running without the referee");
-					}
-				}
-				os_mutex_unlock(&hmd->calib_lock);
-				// PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
+				take_calibration_block(hmd, buf + entry->offset, entry->size, false);
 				break;
 			}
 			case GEN_DATA_12: {
@@ -1362,6 +1350,116 @@ dump_xfer_cb(struct libusb_transfer *xfer)
 	os_mutex_unlock(&hmd->data_lock);
 }
 
+/*!
+ * The saved copy of this headset's calibration block: $XDG_CONFIG_HOME (or ~/.config)/monado/psvr2-calibration-<serial>.bin.
+ * The block (camera intrinsics and placement, from the factory) is the same every session.
+ */
+static bool
+calibration_cache_path(struct psvr2_hmd *hmd, char *out, size_t len)
+{
+	const char *xdg = getenv("XDG_CONFIG_HOME");
+	const char *home = getenv("HOME");
+	char dir[512];
+	if (xdg != NULL && xdg[0] != '\0') {
+		snprintf(dir, sizeof dir, "%s/monado", xdg);
+	} else if (home != NULL) {
+		snprintf(dir, sizeof dir, "%s/.config/monado", home);
+	} else {
+		return false;
+	}
+	char serial[XRT_DEVICE_NAME_LEN];
+	size_t n = 0;
+	for (const char *c = hmd->base.serial; *c != '\0' && n + 1 < sizeof serial; c++) {
+		serial[n++] = (isalnum((unsigned char)*c) || *c == '-' || *c == '_') ? *c : '_';
+	}
+	serial[n] = '\0';
+	snprintf(out, len, "%s/psvr2-calibration-%s.bin", dir, serial);
+	mkdir(dir, 0755); // may exist already
+	return true;
+}
+
+/*!
+ * The headset's calibration block (GEN_DATA_CALIBRATION_BLOCK), from the headset or (@p from_cache) the saved copy:
+ * builds the LED tracker for the controllers (psvr2_parse_gen_calibration_block) and Basalt if on. A block from the
+ * headset is saved, so a session where the headset doesn't send it (23:00 run 2026-11-17: never arrived, no error, no
+ * LED tracker, controllers untracked all session) still gets one.
+ */
+static void
+take_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t size, bool from_cache)
+{
+	os_mutex_lock(&hmd->calib_lock);
+	bool first = hmd->calib_block == NULL;
+	if (first) {
+		hmd->calib_block = malloc(size);
+		if (hmd->calib_block != NULL) {
+			memcpy(hmd->calib_block, data, size);
+			hmd->calib_block_size = size;
+		}
+	}
+	psvr2_parse_gen_calibration_block(hmd, data, size);
+	if (debug_get_bool_option_psvr2_basalt() && hmd->basalt == NULL && !hmd->basalt_tried) {
+		// Once: it needs the camera calibration in this block. Published only when fully set up.
+		hmd->basalt_tried = true;
+		struct psvr2_basalt *b = psvr2_basalt_create(NULL, data, size);
+		__atomic_store_n(&hmd->basalt, b, __ATOMIC_RELEASE);
+		if (b == NULL) {
+			PSVR2_ERROR(hmd, "PSVR2_BASALT: Basalt didn't start, running without the referee");
+		}
+	}
+	os_mutex_unlock(&hmd->calib_lock);
+
+	char path[1024];
+	if (!from_cache && first && calibration_cache_path(hmd, path, sizeof path)) {
+		// Save it when there's no copy yet or it differs (another headset with the same serial string is unlikely).
+		bool same = false;
+		FILE *f = fopen(path, "rb");
+		if (f != NULL) {
+			uint8_t *old = malloc(size + 1);
+			same = old != NULL && fread(old, 1, size + 1, f) == size && memcmp(old, data, size) == 0;
+			free(old);
+			fclose(f);
+		}
+		if (!same) {
+			f = fopen(path, "wb");
+			if (f != NULL && fwrite(data, 1, size, f) == size) {
+				PSVR2_INFO(hmd, "Saved the headset's calibration block (%u bytes) to %s", size, path);
+			} else {
+				PSVR2_WARN(hmd, "Couldn't save the calibration block to %s", path);
+			}
+			if (f != NULL) {
+				fclose(f);
+			}
+		}
+	}
+}
+
+//! No calibration block from the headset PSVR2_CALIB_WAIT_S after USB start: use the saved copy, if there is one.
+static void
+calibration_block_fallback(struct psvr2_hmd *hmd)
+{
+	char path[1024];
+	if (!calibration_cache_path(hmd, path, sizeof path)) {
+		return;
+	}
+	FILE *f = fopen(path, "rb");
+	if (f == NULL) {
+		PSVR2_ERROR(hmd, "The headset sent no calibration block and there's no saved copy (%s): the controllers "
+		                 "won't be tracked optically this session; restarting usually brings it back",
+		            path);
+		return;
+	}
+	uint8_t buf[65536];
+	size_t n = fread(buf, 1, sizeof buf, f);
+	fclose(f);
+	if (n < 16) {
+		PSVR2_ERROR(hmd, "Saved calibration block %s is too short (%zu bytes)", path, n);
+		return;
+	}
+	PSVR2_WARN(hmd, "The headset sent no calibration block in %.0f s: using the saved copy %s (%zu bytes)",
+	           debug_get_float_option_psvr2_calib_wait_s(), path, n);
+	take_calibration_block(hmd, buf, (uint32_t)n, true); // the parse checks its magic and size
+}
+
 static void *
 psvr2_usb_thread(void *ptr)
 {
@@ -1369,11 +1467,24 @@ psvr2_usb_thread(void *ptr)
 
 	struct psvr2_hmd *hmd = ptr;
 
+	timepoint_ns start_ns = os_monotonic_get_ns();
+	bool calib_checked = false;
 	os_thread_helper_lock(&hmd->usb_thread);
 	while (os_thread_helper_is_running_locked(&hmd->usb_thread) && !hmd->usb_complete) {
 		os_thread_helper_unlock(&hmd->usb_thread);
 
 		libusb_handle_events_completed(hmd->ctx, &hmd->usb_complete);
+
+		if (!calib_checked &&
+		    os_monotonic_get_ns() - start_ns > time_s_to_ns(debug_get_float_option_psvr2_calib_wait_s())) {
+			calib_checked = true;
+			os_mutex_lock(&hmd->calib_lock);
+			bool have = hmd->calib_block != NULL;
+			os_mutex_unlock(&hmd->calib_lock);
+			if (!have) {
+				calibration_block_fallback(hmd);
+			}
+		}
 
 		os_thread_helper_lock(&hmd->usb_thread);
 	}
@@ -1904,14 +2015,26 @@ psvr2_setup_distortion_and_fovs(struct psvr2_hmd *hmd)
 	struct distortion_calibration_block calibration_block;
 
 	uint8_t buf[0x100];
-	get_psvr2_control(hmd, 0x8f, 1, buf, sizeof buf);
+	memset(buf, 0, sizeof buf); // a failed request reads as version 0 (the default model), not leftover memory
+	bool lens_calib_ok = get_psvr2_control(hmd, 0x8f, 1, buf, sizeof buf);
 	memcpy(&calibration_block, buf, sizeof calibration_block);
 
 	memset(hmd->distortion_calibration, 0, sizeof(hmd->distortion_calibration));
 	if (calibration_block.version_unk < 4) {
+		/*
+		 * Which lens model the headset got (Sony's driver computes its distortion from this headset calibration; with
+		 * the default, ours differs from Sony's, e.g. SteamVR's "Raw ideal render target scale" 1.82 vs Sony's 1.35).
+		 */
+		PSVR2_WARN(hmd, "Lens calibration (0x8f): %s, version %u: using the default lens model, not this headset's",
+		           lens_calib_ok ? "read" : "request failed", calibration_block.version_unk);
 		hmd->distortion_calibration[0] = -0.09919293;
 		hmd->distortion_calibration[2] = 0.09919293;
 	} else {
+		PSVR2_INFO(hmd, "Lens calibration (0x8f): version %u, params %.4f %.4f %.4f %.4f %.4f %.4f %.4f",
+		           calibration_block.version_unk, calibration_block.distortion_params[0],
+		           calibration_block.distortion_params[1], calibration_block.distortion_params[2],
+		           calibration_block.distortion_params[3], calibration_block.distortion_params[4],
+		           calibration_block.distortion_params[5], calibration_block.distortion_params[6]);
 		float *p = calibration_block.distortion_params;
 
 		hmd->distortion_calibration[0] = (((-p[0] - p[6]) * 29.9 + 14.95) / 1000.0 - 3.22) / 32.46199;

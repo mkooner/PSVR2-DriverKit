@@ -21,6 +21,9 @@
 #include "ovrd_log.hpp"
 #include "openvr_driver.h"
 #include "ovrd_hidden_area.hpp"
+#include "ovrd_pose_log.hpp"
+#include "ovrd_display_clock.hpp"
+#include "ovrd_pose_replay.hpp"
 
 extern "C" {
 #include "ovrd_interface.h"
@@ -71,7 +74,12 @@ extern "C" {
 //! controllers, but input mapping may be incomplete or not ideal.
 DEBUG_GET_ONCE_BOOL_OPTION(emulate_index_controller, "STEAMVR_EMULATE_INDEX_CONTROLLER", false)
 
-DEBUG_GET_ONCE_NUM_OPTION(scale_percentage, "XRT_COMPOSITOR_SCALE_PERCENTAGE", 140)
+/*!
+ * Per-eye render size for SteamVR in percent of the eye's display size. 0 (unset): 170 for the PS VR2, as Sony's driver
+ * recommends (3400x3468 per eye = 2000x2040 x 1.7, hmdq/HMD Geometry Database entry and its vrcompositor.txt), 140 for
+ * other devices (Monado's default).
+ */
+DEBUG_GET_ONCE_NUM_OPTION(scale_percentage, "XRT_COMPOSITOR_SCALE_PERCENTAGE", 0)
 
 /*!
  * Play area handed to SteamVR for our tracking universe (side length in meters, 0 disables).
@@ -115,6 +123,49 @@ DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_photons_to_vblank_s, "OVRD_PHOTONS_TO_VBLANK_S"
  * visible edge on the panel isn't modelled. OVRD_HIDDEN_AREA=1: on.
  */
 DEBUG_GET_ONCE_BOOL_OPTION(ovrd_hidden_area, "OVRD_HIDDEN_AREA", false)
+/*!
+ * A hidden-area mask to hand SteamVR as it is: "ham_vert <eye> <type> <u> <v>" lines (tools/vrdisplaydump output, taken
+ * with Sony's driver running, gives Sony's mask: 22.3% of a 3400x3468 eye). Default ~/.config/monado/psvr2-hidden-area.txt
+ * when that exists. Takes precedence over OVRD_HIDDEN_AREA.
+ */
+DEBUG_GET_ONCE_OPTION(ovrd_hidden_area_file, "OVRD_HIDDEN_AREA_FILE", NULL)
+
+/*!
+ * Resolution of the distortion mesh SteamVR builds from ComputeDistortion (Prop_DistortionMeshResolution_Int32).
+ * SteamVR's default is 49x49, which bends the PS VR2 picture by up to ~2.7 px in the centre and ~16 px in the middle of
+ * the view between mesh points (psvr2-test/analysis/harness/mesh_res_check); turning the head slides the scene through
+ * those cells, so it wobbles. Sony's driver sets 80 (its vrcompositor.txt: "mesh resolution 80"); Monado's own
+ * compositor uses 64 (XRT_MESH_SIZE). Built once at startup, no per-frame cost. 0: SteamVR's default.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(ovrd_distortion_mesh_res, "OVRD_DISTORTION_MESH_RES", 80)
+
+/*!
+ * How the headset pose is handed to SteamVR (OVRD_POSE_MODE), one variable at a time for diagnosis:
+ * - "steamvr" (default, A): the pose for now, poseTimeOffset 0, with velocities; SteamVR predicts.
+ * - "measured" (B): no driver-side prediction: the pose at now - OVRD_POSE_AGE_MS (about when the newest IMU sample was
+ *   taken) with poseTimeOffset = -age and velocities, as Valve's lighthouse driver reports its poses; SteamVR predicts.
+ * - "novelocity" (C): the pose for now without velocities: SteamVR shows it as it is (SteamVR-OpenHMD's model).
+ * - "display": the pose predicted to the time its frame is shown, without velocities (ALVR's model,
+ *   ovrd_display_clock.hpp). Tried 2026-11-17 22:44: frames still a refresh off (10.3% early), so not the fix.
+ * OVRD_POSE_REPLAY=pose-log.csv plays a recorded OVRD_POSE_LOG instead of the headset (D), any mode, same input.
+ */
+DEBUG_GET_ONCE_OPTION(ovrd_pose_mode, "OVRD_POSE_MODE", "steamvr")
+DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_pose_age_ms, "OVRD_POSE_AGE_MS", 2.0f)
+DEBUG_GET_ONCE_OPTION(ovrd_pose_replay, "OVRD_POSE_REPLAY", NULL)
+/*!
+ * The refresh a pose submitted now is for: the first vsync more than this far ahead. SteamVR's frame timings carry
+ * their display vsync, and the app asks for its pose ~3 ms before the refresh before it (Valve's running start), so its
+ * frame shows at the vsync 3-14 ms after it asks; 8.6 ms is the middle, away from both edges.
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_display_cut_ms, "OVRD_DISPLAY_CUT_MS", 8.6f)
+//! When a refresh's light reaches the eyes after its vsync: vsync-to-photons + half the scanout (1.36 + 10.3 / 2).
+DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_display_after_vsync_ms, "OVRD_DISPLAY_AFTER_VSYNC_MS", 6.5f)
+
+//! OVRD_POSE_LOG=path: record every headset pose handed to SteamVR (ovrd_pose_log.hpp). Unset: nothing recorded.
+DEBUG_GET_ONCE_OPTION(ovrd_pose_log, "OVRD_POSE_LOG", NULL)
+
+//! OVRD_LOG_EVENTS=1: log SteamVR events the plugin doesn't handle (off: SteamVR's frame loop doesn't write them).
+DEBUG_GET_ONCE_BOOL_OPTION(ovrd_log_events, "OVRD_LOG_EVENTS", false)
 
 #define MODELNUM_LEN (XRT_DEVICE_NAME_LEN + 9) // "[Monado] "
 
@@ -1819,6 +1870,9 @@ public:
 	virtual void *GetComponent(const char *pchComponentNameAndVersion);
 	virtual void DebugRequest(const char *pchRequest, char *pchResponseBuffer, uint32_t unResponseBufferSize);
 	virtual vr::DriverPose_t GetPose();
+	vr::DriverPose_t GetPoseAt(timepoint_ns at_ns, bool zero_velocity, double time_offset_s);
+	OvrdPoseReplay m_replay;       //!< OVRD_POSE_REPLAY
+	int64_t m_replayStartNs = 0;
 
 	// IVRDisplayComponent
 	virtual void GetWindowBounds(int32_t *pnX, int32_t *pnY, uint32_t *pnWidth, uint32_t *pnHeight);
@@ -1829,6 +1883,8 @@ public:
 	virtual void GetProjectionRaw(vr::EVREye eEye, float *pfLeft, float *pfRight, float *pfTop, float *pfBottom);
 	virtual vr::DistortionCoordinates_t ComputeDistortion(vr::EVREye eEye, float fU, float fV);
 	void SetHiddenAreaMeshes();
+	bool LoadHiddenAreaFile();
+	void UpdateEyeToHead(bool force);
 	virtual bool ComputeInverseDistortion(vr::HmdVector2_t *pResult, vr::EVREye eEye, uint32_t unChannel, float fU, float fV);
 
 	// clang-format on
@@ -1852,6 +1908,9 @@ private:
 	bool m_poseUpdating = true;
 	std::thread *m_poseUpdateThread = NULL;
 	virtual void PoseUpdateThreadFunction();
+	OvrdPoseLog m_poseLog;          //!< OVRD_POSE_LOG
+	bool m_lastPosTracked = false; //!< position tracked flag of the last GetPose (for the pose log)
+	int64_t m_eyeCheckNs = 0;      //!< last IPD check (pose thread)
 
 	// clang-format on
 };
@@ -1880,12 +1939,120 @@ CDeviceDriver_Monado::PoseUpdateThreadFunction()
 {
 	ovrd_log("Starting HMD pose update thread\n");
 
+	const char *log_path = debug_get_option_ovrd_pose_log();
+	if (log_path != NULL && log_path[0] != '\0') {
+		if (m_poseLog.open(log_path)) {
+			ovrd_log("Recording submitted headset poses to %s\n", log_path);
+		} else {
+			ovrd_log("Can't write the pose log %s\n", log_path);
+		}
+	}
+
+	const char *mode = debug_get_option_ovrd_pose_mode();
+	if (mode == NULL) {
+		mode = "steamvr";
+	}
+	bool display_mode = strcmp(mode, "display") == 0;
+	bool measured_mode = strcmp(mode, "measured") == 0;
+	bool novel_mode = strcmp(mode, "novelocity") == 0;
+	if (!display_mode && !measured_mode && !novel_mode && strcmp(mode, "steamvr") != 0) {
+		ovrd_log("Unknown OVRD_POSE_MODE '%s', using steamvr\n", mode);
+		mode = "steamvr";
+	}
+	int64_t age_ns = (int64_t)(debug_get_float_option_ovrd_pose_age_ms() * 1e6);
+	const char *replay = debug_get_option_ovrd_pose_replay();
+	if (replay != NULL && replay[0] != '\0') {
+		if (m_replay.load(replay)) {
+			m_replayStartNs = (int64_t)os_monotonic_get_ns();
+			ovrd_log("Replaying %zu recorded headset poses (%.1f s, looped) from %s instead of the headset\n",
+			         m_replay.size(), m_replay.duration_s(), replay);
+		} else {
+			ovrd_log("Can't use OVRD_POSE_REPLAY %s (missing or too short), using the headset\n", replay);
+		}
+	}
+	int64_t cut_ns = (int64_t)(debug_get_float_option_ovrd_display_cut_ms() * 1e6);
+	int64_t after_ns = (int64_t)(debug_get_float_option_ovrd_display_after_vsync_ms() * 1e6);
+	OvrdDisplayClock clock((int64_t)(1e9 / m_flDisplayFrequency));
+	bool announced = false;
+	int64_t start_ns = (int64_t)os_monotonic_get_ns();
+	int64_t last_clock_log_ns = 0;
+	ovrd_log("Headset pose mode: %s%s\n", mode,
+	         display_mode    ? " (predicted to display time, no velocities)"
+	         : measured_mode ? " (pose at its measurement time, negative poseTimeOffset, velocities)"
+	         : novel_mode    ? " (now, no velocities)"
+	                         : " (now + velocities, SteamVR predicts)");
+
 	while (m_poseUpdating) {
 		//! @todo figure out the best pose update rate
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_trackedDeviceIndex, GetPose(),
-		                                                   sizeof(vr::DriverPose_t));
+		int64_t t0 = (int64_t)os_monotonic_get_ns();
+		int64_t target_ns = t0;
+		bool use_display = false;
+		if (display_mode) {
+			vr::Compositor_FrameTiming ft = {};
+			ft.m_nSize = sizeof(ft);
+			if (vr::VRServerDriverHost()->GetFrameTimings(&ft, 1) == 1) {
+				clock.observe(t0, ft.m_flSystemTimeInSeconds, ft.m_nFrameIndex);
+			}
+			if (!clock.ready() && !announced && t0 - start_ns > 10 * (int64_t)U_TIME_1S_IN_NS) {
+				ovrd_log("Display clock: no compositor frame timings after 10 s, poses for now + velocities\n");
+				announced = true;
+			}
+			if (clock.ready()) {
+				target_ns = clock.display_time_ns(t0, cut_ns, after_ns);
+				use_display = true;
+				if (!announced || t0 - last_clock_log_ns > 10 * (int64_t)U_TIME_1S_IN_NS) {
+					ovrd_log("Display clock: SteamVR time + %.4f s = monotonic; poses %.1f ms ahead\n",
+					         clock.offset_s(), (target_ns - t0) / 1e6);
+					announced = true;
+					last_clock_log_ns = t0;
+				}
+			}
+		}
+		vr::DriverPose_t pose;
+		if (use_display) {
+			pose = GetPoseAt(target_ns, true, 0.0);
+		} else if (measured_mode) {
+			target_ns = t0 - age_ns;
+			pose = GetPoseAt(target_ns, false, -(double)age_ns * 1e-9);
+		} else {
+			// steamvr, novelocity, and display until its clock is known (no frames yet): the pose for now.
+			pose = GetPoseAt(t0, novel_mode, 0.0);
+		}
+		int64_t t1 = (int64_t)os_monotonic_get_ns();
+		vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_trackedDeviceIndex, pose, sizeof(vr::DriverPose_t));
+		if (t1 - m_eyeCheckNs > 500 * (int64_t)U_TIME_1MS_IN_NS) {
+			m_eyeCheckNs = t1;
+			UpdateEyeToHead(false); // the headset's IPD dial
+		}
+		if (m_poseLog.is_open()) {
+			OvrdPoseLog::Record r = {};
+			r.submit_ns = t1;
+			r.target_ns = target_ns;
+			r.get_pose_ns = t1 - t0;
+			r.q[0] = (float)pose.qRotation.x, r.q[1] = (float)pose.qRotation.y;
+			r.q[2] = (float)pose.qRotation.z, r.q[3] = (float)pose.qRotation.w;
+			for (int i = 0; i < 3; i++) {
+				r.p[i] = (float)pose.vecPosition[i];
+				r.v[i] = (float)pose.vecVelocity[i];
+				r.w[i] = (float)pose.vecAngularVelocity[i];
+			}
+			if (use_display || measured_mode) {
+				vr::DriverPose_t now_pose = GetPoseAt(t0, false, 0.0);
+				r.nq[0] = (float)now_pose.qRotation.x, r.nq[1] = (float)now_pose.qRotation.y;
+				r.nq[2] = (float)now_pose.qRotation.z, r.nq[3] = (float)now_pose.qRotation.w;
+				for (int i = 0; i < 3; i++) r.np[i] = (float)now_pose.vecPosition[i];
+			} else {
+				for (int i = 0; i < 4; i++) r.nq[i] = r.q[i];
+				for (int i = 0; i < 3; i++) r.np[i] = r.p[i];
+			}
+			r.valid = pose.poseIsValid;
+			r.result = (uint8_t)pose.result;
+			r.pos_tracked = m_lastPosTracked;
+			m_poseLog.push(r);
+		}
 	}
+	m_poseLog.close();
 	ovrd_log("Stopping HMD pose update thread\n");
 }
 
@@ -1935,8 +2102,16 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 		vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_SecondsFromPhotonsToVblank_Float,
 		                                     m_flSecondsFromPhotonsToVblank);
 	}
-	if (debug_get_bool_option_ovrd_hidden_area()) {
+	if (!LoadHiddenAreaFile() && debug_get_bool_option_ovrd_hidden_area()) {
 		SetHiddenAreaMeshes();
+	}
+	{
+		int mesh_res = (int)debug_get_num_option_ovrd_distortion_mesh_res();
+		if (mesh_res > 0) {
+			vr::VRProperties()->SetInt32Property(m_ulPropertyContainer, vr::Prop_DistortionMeshResolution_Int32,
+			                                     mesh_res);
+			ovrd_log("Distortion mesh resolution: %d\n", mesh_res);
+		}
 	}
 
 	// Universe 2 (the saved room) or 3 (this session only), see OvrdRoom; never 0 (invalid) or 1 (Oculus)
@@ -1982,13 +2157,7 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 	// clang-format on
 
 
-	//! @todo update when ipd changes
-	vr::HmdMatrix34_t left;
-	create_translation_rotation_matrix(&m_view_pose[0], &left);
-	vr::HmdMatrix34_t right;
-	create_translation_rotation_matrix(&m_view_pose[1], &right);
-
-	vr::VRServerDriverHost()->SetDisplayEyeToHead(m_trackedDeviceIndex, left, right);
+	UpdateEyeToHead(true);
 
 
 	m_poseUpdateThread = new std::thread(&CDeviceDriver_Monado::PoseUpdateThreadFunction, this);
@@ -2004,7 +2173,9 @@ void
 CDeviceDriver_Monado::Deactivate()
 {
 	m_poseUpdating = false;
-	m_poseUpdateThread->join();
+	if (m_poseUpdateThread != NULL && m_poseUpdateThread->joinable()) {
+		m_poseUpdateThread->join();
+	}
 	ovrd_log("Deactivate\n");
 }
 
@@ -2046,10 +2217,38 @@ HmdQuaternion_Init(double w, double x, double y, double z)
 vr::DriverPose_t
 CDeviceDriver_Monado::GetPose()
 {
+	return GetPoseAt(os_monotonic_get_ns(), false, 0.0);
+}
 
+/*!
+ * The headset pose at @p at_ns, handed over with poseTimeOffset @p time_offset_s; @p zero_velocity leaves the
+ * velocities out so SteamVR shows the pose as it is. From the replay (OVRD_POSE_REPLAY) instead of the headset when on.
+ */
+vr::DriverPose_t
+CDeviceDriver_Monado::GetPoseAt(timepoint_ns at_ns, bool zero_velocity, double time_offset_s)
+{
 	timepoint_ns now_ns = os_monotonic_get_ns();
+	if (m_replay.size() > 0) {
+		OvrdPoseReplay::Sample r = m_replay.at(at_ns - m_replayStartNs);
+		vr::DriverPose_t t = {};
+		t.poseTimeOffset = time_offset_s;
+		t.qWorldFromDriverRotation = HmdQuaternion_Init(1, 0, 0, 0);
+		t.qDriverFromHeadRotation = HmdQuaternion_Init(1, 0, 0, 0);
+		t.qRotation = HmdQuaternion_Init(r.q[3], r.q[0], r.q[1], r.q[2]);
+		for (int i = 0; i < 3; i++) {
+			t.vecPosition[i] = r.p[i];
+			t.vecVelocity[i] = zero_velocity ? 0 : r.v[i];
+			t.vecAngularVelocity[i] = zero_velocity ? 0 : r.wl[i];
+		}
+		t.result = vr::TrackingResult_Running_OK;
+		t.poseIsValid = true;
+		t.deviceIsConnected = true;
+		m_lastPosTracked = true;
+		g_room.apply(t);
+		return t;
+	}
 	struct xrt_space_relation rel;
-	xrt_device_get_tracked_pose(m_xdev, XRT_INPUT_GENERIC_HEAD_POSE, now_ns, &rel);
+	xrt_device_get_tracked_pose(m_xdev, XRT_INPUT_GENERIC_HEAD_POSE, at_ns, &rel);
 
 	struct xrt_pose *offset = &m_xdev->tracking_origin->initial_offset;
 
@@ -2083,8 +2282,16 @@ CDeviceDriver_Monado::GetPose()
 	    .shouldApplyHeadModel = !m_xdev->supported.position_tracking,
 	    .deviceIsConnected = true,
 	};
+	t.poseTimeOffset = time_offset_s;
 	apply_pose(&rel, &t);
-	if ((rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) != 0) {
+	if (zero_velocity) {
+		for (int i = 0; i < 3; i++) {
+			t.vecVelocity[i] = 0;
+			t.vecAngularVelocity[i] = 0;
+		}
+	}
+	m_lastPosTracked = (rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) != 0;
+	if (m_lastPosTracked) {
 		g_room.note_head(rel.pose.position, now_ns);
 	}
 	g_room.apply(t); // the room transform, the same for the headset and both controllers
@@ -2104,6 +2311,98 @@ CDeviceDriver_Monado::GetPose()
 	// t.vecAngularAcceleration[1], t.vecAngularAcceleration[2]);
 
 	return t;
+}
+
+/*!
+ * Eye-to-head transforms from the device's view poses (IVRServerDriverHost::SetDisplayEyeToHead) and the IPD property.
+ * At activation, and from the pose thread twice a second when the headset's IPD dial moved (> 0.5 mm): SteamVR only
+ * knew the IPD at startup, while the OpenXR path takes the dial every frame (psvr2_hmd_get_view_poses).
+ */
+void
+CDeviceDriver_Monado::UpdateEyeToHead(bool force)
+{
+	struct xrt_vec3 ipd_vec = {0.063f, 0, 0}; // the device replaces x with its dial
+	struct xrt_space_relation head_relation;
+	struct xrt_fov fovs[2];
+	struct xrt_pose view_pose[2];
+	xrt_device_get_view_poses(m_xdev, &ipd_vec, os_monotonic_get_ns(), XRT_VIEW_TYPE_STEREO, 2, &head_relation, fovs,
+	                          view_pose);
+	float ipd = view_pose[1].position.x - view_pose[0].position.x;
+	if (!force && fabsf(ipd - m_flIPD) < 0.0005f) {
+		return;
+	}
+	m_view_pose[0] = view_pose[0];
+	m_view_pose[1] = view_pose[1];
+	vr::HmdMatrix34_t left, right;
+	create_translation_rotation_matrix(&m_view_pose[0], &left);
+	create_translation_rotation_matrix(&m_view_pose[1], &right);
+	vr::VRServerDriverHost()->SetDisplayEyeToHead(m_trackedDeviceIndex, left, right);
+	if (!force) {
+		vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_UserIpdMeters_Float, ipd);
+		ovrd_log("IPD dial: %.1f mm -> %.1f mm\n", m_flIPD * 1000.0f, ipd * 1000.0f);
+	}
+	m_flIPD = ipd;
+}
+
+//! A hidden-area mask from a file (OVRD_HIDDEN_AREA_FILE): true when one was found and handed to SteamVR.
+bool
+CDeviceDriver_Monado::LoadHiddenAreaFile()
+{
+	std::string path;
+	const char *env = debug_get_option_ovrd_hidden_area_file();
+	if (env != NULL && env[0] != '\0') {
+		path = env;
+	} else {
+		const char *xdg = getenv("XDG_CONFIG_HOME");
+		const char *home = getenv("HOME");
+		if (xdg != NULL && xdg[0] != '\0') {
+			path = std::string(xdg) + "/monado/psvr2-hidden-area.txt";
+		} else if (home != NULL) {
+			path = std::string(home) + "/.config/monado/psvr2-hidden-area.txt";
+		}
+		if (m_xdev->name != XRT_DEVICE_PSVR2) {
+			return false; // the default file is PS VR2 only
+		}
+	}
+	FILE *f = path.empty() ? NULL : fopen(path.c_str(), "r");
+	if (f == NULL) {
+		if (env != NULL && env[0] != '\0') {
+			ovrd_log("Hidden area: can't read %s\n", path.c_str());
+		}
+		return false;
+	}
+	std::vector<vr::HmdVector2_t> verts[2][3];
+	char line[256];
+	while (fgets(line, sizeof line, f) != NULL) {
+		int eye, type;
+		float u, v;
+		if (sscanf(line, "ham_vert %d %d %f %f", &eye, &type, &u, &v) == 4 && eye >= 0 && eye < 2 && type >= 0 &&
+		    type < 3) {
+			verts[eye][type].push_back({{u, v}});
+		}
+	}
+	fclose(f);
+	bool any = false;
+	for (int e = 0; e < 2; e++) {
+		if (verts[e][0].size() < 3 || verts[e][0].size() % 3 != 0) {
+			continue;
+		}
+		double area = 0;
+		for (size_t i = 0; i + 2 < verts[e][0].size(); i += 3) {
+			const auto &A = verts[e][0][i].v, &B = verts[e][0][i + 1].v, &C = verts[e][0][i + 2].v;
+			area += fabs((B[0] - A[0]) * (C[1] - A[1]) - (C[0] - A[0]) * (B[1] - A[1])) / 2;
+		}
+		for (int t = 0; t < 3; t++) {
+			if (!verts[e][t].empty()) {
+				vr::VRHiddenArea()->SetHiddenArea((vr::EVREye)e, (vr::EHiddenAreaMeshType)t, verts[e][t].data(),
+				                                  (uint32_t)verts[e][t].size());
+			}
+		}
+		ovrd_log("Hidden area mesh, eye %d, from %s: %zu triangles, %.1f%% of the render target hidden\n", e,
+		         path.c_str(), verts[e][0].size() / 3, area * 100.0);
+		any = true;
+	}
+	return any;
 }
 
 //! Hidden-area meshes from our own distortion, see ovrd_hidden_area.hpp.
@@ -2164,6 +2463,9 @@ void
 CDeviceDriver_Monado::GetRecommendedRenderTargetSize(uint32_t *pnWidth, uint32_t *pnHeight)
 {
 	int scale = debug_get_num_option_scale_percentage();
+	if (scale <= 0) {
+		scale = m_xdev->name == XRT_DEVICE_PSVR2 ? 170 : 140;
+	}
 	float fscale = (float)scale / 100.f;
 
 
@@ -2265,6 +2567,42 @@ CDeviceDriver_Monado::ComputeInverseDistortion(
  *
  */
 
+//! Durations in ns per part of RunFrame, for the 10 s log (measurement only).
+struct OvrdRunFrameStats
+{
+	static constexpr int PARTS = 6;
+	const char *names[PARTS] = {"interval", "left controller", "right controller", "room", "events", "total"};
+	std::vector<int64_t> v[PARTS];
+	void
+	add(int part, int64_t ns)
+	{
+		v[part].push_back(ns);
+	}
+	void
+	reset()
+	{
+		for (auto &x : v) {
+			x.clear();
+		}
+	}
+	void
+	log()
+	{
+		char buf[1024];
+		int n = snprintf(buf, sizeof buf, "RunFrame (10 s, %zu calls):", v[5].size());
+		for (int p = 0; p < PARTS && n < (int)sizeof buf; p++) {
+			auto x = v[p];
+			if (x.empty()) {
+				continue;
+			}
+			std::sort(x.begin(), x.end());
+			n += snprintf(buf + n, sizeof buf - n, " %s median %.2f p99 %.2f max %.2f ms;", names[p],
+			              x[x.size() / 2] / 1e6, x[(size_t)(0.99 * (x.size() - 1))] / 1e6, x.back() / 1e6);
+		}
+		ovrd_log("%s\n", buf);
+	}
+};
+
 class CServerDriver_Monado : public vr::IServerTrackedDeviceProvider
 {
 public:
@@ -2276,6 +2614,8 @@ public:
 	virtual void Cleanup();
 	virtual const char *const * GetInterfaceVersions() { return vr::k_InterfaceVersions; }
 	virtual void RunFrame();
+	OvrdRunFrameStats m_rf_stats;
+	int64_t m_rf_last_ns = 0, m_rf_log_ns = 0;
 	virtual bool ShouldBlockStandbyMode() { return false; }
 	virtual void EnterStandby() {}
 	virtual void LeaveStandby() {}
@@ -2382,8 +2722,14 @@ CServerDriver_Monado::Cleanup()
 	xrt_system_devices_destroy(&m_xsysd);
 	xrt_system_destroy(&m_xsys);
 	m_xhmd = NULL;
-	m_left->m_xdev = NULL;
-	m_right->m_xdev = NULL;
+	// Null when a controller wasn't connected: vrserver segfaulted here on shutdown (2026-11-17 23:42 and 23:43,
+	// coredumpctl: CServerDriver_Monado::Cleanup, ovrd_driver.cpp:2725-2726).
+	if (m_left != NULL) {
+		m_left->m_xdev = NULL;
+	}
+	if (m_right != NULL) {
+		m_right->m_xdev = NULL;
+	}
 
 	if (m_xinst) {
 		xrt_instance_destroy(&m_xinst);
@@ -2440,13 +2786,30 @@ CServerDriver_Monado::HandleHapticEvent(vr::VREvent_t *event)
 void
 CServerDriver_Monado::RunFrame()
 {
+	/*
+	 * Timing of SteamVR's main loop as seen from here (measurement only): how often vrserver calls RunFrame and how
+	 * long each part of ours takes. RunFrame runs in vrserver's main loop ("should not perform calls that might
+	 * block", Valve's driver docs); apps got our headset pose from a snapshot one or two refreshes old (22:44 run),
+	 * which a late main loop would explain. Logged every 10 s.
+	 */
+	int64_t t_start = (int64_t)os_monotonic_get_ns();
+	if (m_rf_last_ns != 0) {
+		m_rf_stats.add(0, t_start - m_rf_last_ns);
+	}
+	m_rf_last_ns = t_start;
 	if (m_left) {
 		m_left->RunFrame();
 	}
+	int64_t t_left = (int64_t)os_monotonic_get_ns();
 	if (m_right) {
 		m_right->RunFrame();
 	}
+	int64_t t_right = (int64_t)os_monotonic_get_ns();
 	g_room.run_frame(os_monotonic_get_ns());
+	int64_t t_room = (int64_t)os_monotonic_get_ns();
+	m_rf_stats.add(1, t_left - t_start);
+	m_rf_stats.add(2, t_right - t_left);
+	m_rf_stats.add(3, t_room - t_right);
 
 	// https://github.com/ValveSoftware/openvr/issues/719#issuecomment-358038640
 	struct vr::VREvent_t event;
@@ -2480,8 +2843,21 @@ CServerDriver_Monado::RunFrame()
 		case vr::VREvent_Compositor_ChaperoneBoundsShown:
 		case vr::VREvent_Compositor_ChaperoneBoundsHidden: break;
 
-		default: ovrd_log("Unhandled Event: %d\n", event.eventType);
+		default:
+			if (debug_get_bool_option_ovrd_log_events()) {
+				ovrd_log("Unhandled Event: %d\n", event.eventType);
+			}
 		}
+	}
+	int64_t t_end = (int64_t)os_monotonic_get_ns();
+	m_rf_stats.add(4, t_end - t_room);
+	m_rf_stats.add(5, t_end - t_start);
+	if (t_end - m_rf_log_ns > 10 * (int64_t)U_TIME_1S_IN_NS) {
+		if (m_rf_log_ns != 0) {
+			m_rf_stats.log();
+		}
+		m_rf_stats.reset();
+		m_rf_log_ns = t_end;
 	}
 }
 
