@@ -21,3 +21,11 @@ imu/refuse
 imu/*.o
 ledsync/calib_sim
 ledsync/*.o
+vio/euroc-*/
+vio/out-*/
+vio/record-*.csv
+vio/cam_imu_rot
+vio/decode_cost
+vio/pv2c_to_euroc
+vio/sweep*
+vio/thr*

@@ -133,6 +133,18 @@ if drv.get("blocked_by_safe_mode"):
     print("  unblocked driver_monado (was blocked by a previous SteamVR safe mode event)")
 drv["blocked_by_safe_mode"] = False
 drv["enable"] = True
+# Async reprojection: SteamVR turns it off by default on NVIDIA under Linux ("Async: Automatically disabled as default
+# based on the detected Vulkan environment" in vrcompositor.txt, RTX 5080, 2026-11-17). Without it, any frame the game
+# or compositor delivers late is shown with the old head pose, which looks like the view shaking while the head pose
+# itself is smooth. ASYNC=0 ./launch-steamvr.sh leaves SteamVR's default.
+import os
+sv = cfg.setdefault("steamvr", {})
+if os.environ.get("ASYNC", "1") != "0":
+    sv["enableLinuxVulkanAsync"] = True
+    print("  async reprojection on (enableLinuxVulkanAsync)")
+else:
+    sv.pop("enableLinuxVulkanAsync", None)
+    print("  async reprojection: SteamVR default (ASYNC=0)")
 with open(path, "w") as f:
     json.dump(cfg, f, indent=3)
 EOF

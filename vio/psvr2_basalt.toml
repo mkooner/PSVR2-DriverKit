@@ -1,0 +1,10 @@
+# Basalt VIT config for the PS VR2 bottom camera pair (psvr2-test/vio). Values from the Monado fork's msdmi config
+# (deterministic=0: 1 deadlocks with Monado's euroc player), 4 threads (77 frames/s, 1 thread 55 < camera 60).
+show-gui=0
+cam-calib="/home/mehrab/Documents/Claude/Monado/psvr2-test/vio/psvr2_basalt_calib.json"
+config-path="/home/mehrab/Documents/Claude/Monado/psvr2-test/vio/psvr2_basalt_config.json"
+marg-data=""
+print-queue=0
+use-double=0
+deterministic=0
+num-threads=4

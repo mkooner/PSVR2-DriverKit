@@ -9,3 +9,8 @@ g++ -std=c++17 -O2 $INC pose_sim.cpp pose_filter.o -o pose_sim \
 	"$B/src/xrt/auxiliary/tracking/libaux_tracking.a" "$B/src/xrt/auxiliary/math/libaux_math.a" \
 	"$B/src/xrt/auxiliary/util/libaux_util.a" "$B/src/xrt/auxiliary/os/libaux_os.a" -lpthread -lm
 echo built ./pose_sim
+# What SteamVR shows from a recording (the real pose filter and clock code).
+g++ -std=c++17 -O2 $INC steamvr_sim.cpp pose_filter.o -o steamvr_sim \
+	"$B/src/xrt/auxiliary/tracking/libaux_tracking.a" "$B/src/xrt/auxiliary/math/libaux_math.a" \
+	"$B/src/xrt/auxiliary/util/libaux_util.a" "$B/src/xrt/auxiliary/os/libaux_os.a" -lpthread -lm
+echo built ./steamvr_sim

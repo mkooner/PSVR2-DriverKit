@@ -16,6 +16,7 @@
 //   avgN   : mean of the last N ms of gyro
 //
 // Usage: steamvr_sim record.csv [frames.csv]   (frames to stdout without a path)
+#include "psvr2_imu_time.h"
 #include "math/m_api.h"
 #include "math/m_vec3.h"
 #include "math/m_clock_tracking.h"
@@ -40,6 +41,7 @@ struct Imu
 {
 	int64_t vts;
 	xrt_vec3 gyro;
+	xrt_vec3 accel;
 };
 
 static xrt_quat
@@ -123,9 +125,14 @@ main(int argc, char **argv)
 	char line[512];
 	while (fgets(line, sizeof(line), f)) {
 		long long host, vts;
-		float v[7];
-		if (line[0] == 'I' && sscanf(line, "I,%lld,%lld,%f,%f,%f", &host, &vts, &v[0], &v[1], &v[2]) == 5) {
-			imu.push_back({vts, {v[0], v[1], v[2]}});
+		float v[9];
+		if (line[0] == 'I' && sscanf(line, "I,%lld,%lld,%f,%f,%f,%f,%f,%f", &host, &vts, &v[0], &v[1], &v[2], &v[3],
+		                             &v[4], &v[5]) >= 5) {
+			// SIM_IMU_TIME=1: the driver's sample time fix (psvr2_imu_time.h); recordings hold the raw VTS.
+			static psvr2_imu_time itime = {};
+			if (getenv("SIM_IMU_TIME") && atoi(getenv("SIM_IMU_TIME")) != 0)
+				vts = psvr2_imu_time_fix(&itime, vts);
+			imu.push_back({vts, {v[0], v[1], v[2]}, {v[3], v[4], v[5]}});
 			ev.push_back({host, 0, imu.size() - 1});
 		} else if (line[0] == 'S' && sscanf(line, "S,%lld,%lld,%f,%f,%f,%f,%f,%f,%f", &host, &vts, &v[0], &v[1],
 		                                    &v[2], &v[3], &v[4], &v[5], &v[6]) == 9) {
@@ -151,6 +158,19 @@ main(int argc, char **argv)
 		params.orient_snap_rad = (float)(atof(getenv("SIM_ORIENT_SNAP_DEG")) * M_PI / 180.0);
 	if (getenv("SIM_POS_BLEND_MS"))
 		params.pos_blend_ns = (time_duration_ns)(atof(getenv("SIM_POS_BLEND_MS")) * 1e6);
+	// SIM_ACCEL=1: accelerometer-aided position (accel_enable); SIM_GRAVITY_TAU: its gravity/bias average (s).
+	if (getenv("SIM_ACCEL"))
+		params.accel_enable = atoi(getenv("SIM_ACCEL")) != 0;
+	// SIM_GRAVITY_PAUSE_DEG=30: pause the gravity average above this turn rate (driver PSVR2_GRAVITY_PAUSE_DEG).
+	if (getenv("SIM_GRAVITY_PAUSE_DEG"))
+		params.accel_gravity_pause_rad_s = (float)(atof(getenv("SIM_GRAVITY_PAUSE_DEG")) * M_PI / 180.0);
+	// SIM_DUMP_RESIDUALS=file: one line per SLAM update (vts, rate rad/s, residual m, reset, skipped).
+	FILE *resid_csv = getenv("SIM_DUMP_RESIDUALS") ? fopen(getenv("SIM_DUMP_RESIDUALS"), "w") : nullptr;
+	// SIM_GYRO_BIAS_TAU: gyro bias estimation time constant (s), 0 off.
+	if (getenv("SIM_GYRO_BIAS_TAU"))
+		params.gyro_bias_tau_s = atof(getenv("SIM_GYRO_BIAS_TAU"));
+	if (getenv("SIM_GRAVITY_TAU"))
+		params.accel_gravity_tau_s = atof(getenv("SIM_GRAVITY_TAU"));
 	if (getenv("SIM_POS_CONFIRM"))
 		params.pos_confirm_jumps = atoi(getenv("SIM_POS_CONFIRM")) != 0;
 	// SIM_LEVER="x,y,z": the filter's pivot_offset (head frame, metres; the driver default is 0,0,-0.10)
@@ -237,6 +257,7 @@ main(int argc, char **argv)
 			last_vts = vts;
 			m_clock_offset_a2b(2000.0f, s.vts, e.host, &hw2mono);
 			psvr2_pose_filter_push_gyro(&filt, vts, &s.gyro);
+			psvr2_pose_filter_push_accel(&filt, vts, &s.accel);
 			recent.push_back({s.vts, s.gyro});
 			while (!recent.empty() && s.vts - recent.front().first > 30000000)
 				recent.pop_front();
@@ -244,7 +265,12 @@ main(int argc, char **argv)
 		} else {
 			xrt_pose sp = slam[e.idx].second;
 			sp.position = psvr2_slam_carry_push(&carry, slam[e.idx].first, &sp.position, nullptr, nullptr);
-			psvr2_pose_filter_push_slam(&filt, slam[e.idx].first, &sp, nullptr);
+			psvr2_pose_filter_update upd{};
+			psvr2_pose_filter_push_slam(&filt, slam[e.idx].first, &sp, &upd);
+			if (resid_csv) {
+				fprintf(resid_csv, "%lld,%.4f,%.6f,%d,%d\n", (long long)slam[e.idx].first, upd.rate_rad_s,
+				        upd.pos_residual_m, (int)upd.position_reset, (int)upd.position_skipped);
+			}
 		}
 	}
 
@@ -263,5 +289,9 @@ main(int argc, char **argv)
 	}
 	if (csv != stdout)
 		fclose(csv);
+	if (resid_csv) fclose(resid_csv);
+	fprintf(stderr, "filter: accel %s, have_accel %d, jumps skipped %u, gyro bias (%.3f, %.3f, %.3f) deg/s\n",
+	        params.accel_enable ? "on" : "off", (int)filt.have_accel, filt.jumps_skipped, filt.gyro_bias.x * 57.29578,
+	        filt.gyro_bias.y * 57.29578, filt.gyro_bias.z * 57.29578);
 	return 0;
 }
