@@ -22,7 +22,7 @@ Per displayed frame:
 Frame-to-frame changes of these errors are what shows as jitter; the angular size at 1 m / 0.5 m adds the position
 error seen at that distance.
 
-Usage: screen_jitter.py compframes.csv direct.csv
+Usage: screen_jitter.py compframes.csv direct.csv [from_s to_s]   (optional window, seconds after the first frame)
 """
 import math
 import sys
@@ -211,7 +211,7 @@ def report(rows, photon, skipped, n_vblank):
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 5):
         print(__doc__)
         return 2
     W, P, B, R, T = load(sys.argv[1], sys.argv[2])
@@ -219,6 +219,11 @@ def main():
         print("need W rows (XRT_COMPOSITOR_FRAME_LOG) and T rows (OVRD_DIRECT_MODE_LOG)")
         return 1
     rows, photon, skipped = analyse(W, P, B, R, T)
+    if len(sys.argv) == 5 and rows:
+        t0 = rows[0]['t']
+        lo, hi = float(sys.argv[3]), float(sys.argv[4])
+        rows = [r for r in rows if lo <= (r['t'] - t0) / 1e9 <= hi]
+        print(f"window {lo:.0f}-{hi:.0f} s")
     report(rows, photon, skipped, len(B))
     return 0
 

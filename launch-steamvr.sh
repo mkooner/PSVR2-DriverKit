@@ -280,9 +280,10 @@ fi
 if [ "${DIRECT_MODE:-0}" = 1 ]; then
 	export OVRD_DIRECT_MODE=1
 	export OVRD_DIRECT_MODE_LOG="$LOGDIR/direct-$STAMP.csv"
-	# Once, 20 s after the game's layers appear: save that frame's layer images (logs/direct-<stamp>-layer<N>.rgba,
-	# analysis/layer_capture.py makes PNGs). CAPTURE=0 turns it off.
-	export OVRD_DIRECT_MODE_CAPTURE="${CAPTURE:-20}"
+	# CAPTURE=<s>: once, <s> seconds after the game's layers appear, save that frame's layer images
+	# (logs/direct-<stamp>-layer<N>.rgba, analysis/layer_capture.py makes PNGs). Off by default: on 2026-11-18 11:25 it
+	# froze the frames for 1.8 s and SteamVR then ran at 30 fps for 8 s.
+	export OVRD_DIRECT_MODE_CAPTURE="${CAPTURE:-0}"
 	# What reached the screen, per displayed frame (Monado's compositor: re-warp pose, client frame used, present
 	# and vblank times): analysis/screen_jitter.py logs/compframes-<stamp>.csv logs/direct-<stamp>.csv
 	export XRT_COMPOSITOR_FRAME_LOG="$LOGDIR/compframes-$STAMP.csv"
