@@ -20,7 +20,9 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BUILD="${MONADO_BUILD:-$HERE/../trial/build}"
-PLUGIN="$BUILD/steamvr-monado"
+# PLUGIN_DIR=<build>/steamvr-monado-upstream: register another build of the plugin (e.g. Monado's upstream
+# steamvr_drv, built against the same PS VR2 driver, for an A/B of the adapter). Default: ours.
+PLUGIN="${PLUGIN_DIR:-$BUILD/steamvr-monado}"
 VRPATH="$HOME/.config/openvr/openvrpaths.vrpath"
 BACKUP="$VRPATH.psvr2-test-backup"
 STEAM_ROOT="${STEAM_ROOT:-$HOME/.local/share/Steam}"
@@ -133,18 +135,18 @@ if drv.get("blocked_by_safe_mode"):
     print("  unblocked driver_monado (was blocked by a previous SteamVR safe mode event)")
 drv["blocked_by_safe_mode"] = False
 drv["enable"] = True
-# Async reprojection: SteamVR turns it off by default on NVIDIA under Linux ("Async: Automatically disabled as default
-# based on the detected Vulkan environment" in vrcompositor.txt, RTX 5080, 2026-11-17). Without it, any frame the game
-# or compositor delivers late is shown with the old head pose, which looks like the view shaking while the head pose
-# itself is smooth. ASYNC=0 ./launch-steamvr.sh leaves SteamVR's default.
+# Async reprojection: SteamVR's own default, which on NVIDIA under Linux is off ("Async: Automatically disabled as
+# default based on the detected Vulkan environment" in vrcompositor.txt, RTX 5080), the same as Sony's driver ran with.
+# It was forced on while frames ran late (per-eye render size bug); since that fix SteamVR reports no late frames.
+# ASYNC=1 ./launch-steamvr.sh still forces it on.
 import os
 sv = cfg.setdefault("steamvr", {})
-if os.environ.get("ASYNC", "1") != "0":
+if os.environ.get("ASYNC", "0") == "1":
     sv["enableLinuxVulkanAsync"] = True
-    print("  async reprojection on (enableLinuxVulkanAsync)")
+    print("  async reprojection forced on (ASYNC=1)")
 else:
     sv.pop("enableLinuxVulkanAsync", None)
-    print("  async reprojection: SteamVR default (ASYNC=0)")
+    print("  async reprojection: SteamVR default (ASYNC=1 forces it on)")
 with open(path, "w") as f:
     json.dump(cfg, f, indent=3)
 EOF
@@ -248,6 +250,31 @@ export PSVR2_POSE_FILTER="${POSE_FILTER:-1}"
 export PSVR2_RECORD_FILE="$LOGDIR/record-$(date +%Y%m%d-%H%M%S)-filter${PSVR2_POSE_FILTER}.csv"
 # The Sense controllers' IMU (gyro, accelerometer, orientation), one CSV per controller, for offline analysis.
 export PSSENSE_RECORD_FILE="$LOGDIR/sense-$STAMP"
+# JITTER_CHECK=1: record what tells tracking jitter from compositor judder, and analyse it when SteamVR exits:
+#   - every headset pose the plugin hands SteamVR (OVRD_POSE_LOG, ~9 MB a minute)
+#   - SteamVR's per-frame timing and the pose the game rendered each frame with (tools/vrframetiming, 30 s summaries)
+#   - analysis/steamvr_timeline.py on both: jitter per 30 s, each event labelled tracking / frame timing / prediction
+# LINUX_FIXES=0: turn off the VK_LAYER_BNUUY_steamvr_linux_fixes Vulkan layer (installed with Ignition, implicit, so it
+# loads into vrcompositor in every session). Since a SteamVR update it only half-applies: it switches the compositor's
+# present mode to FIFO_LATEST_READY but can't find WaitForPendingPresent to patch ("WaitForPendingPresent target
+# function not resolved" in Steam/logs/vrcompositor-linux.txt, every session since 2026-11-04).
+if [ "${LINUX_FIXES:-1}" = 0 ]; then
+	export DISABLE_STEAMVR_LINUX_FIXES=1
+	echo "  LINUX_FIXES=0: SteamVR Linux fixes layer off (compositor runs SteamVR's own present path)"
+fi
+# OVRD_POSE_MODE=steamvr|measured|novelocity|display and OVRD_POSE_REPLAY=logs/steamvr-pose-<stamp>.csv (a recorded
+# head motion instead of the headset's) pass through to the plugin: one variable per run, same input with the replay.
+[ -n "${OVRD_POSE_MODE:-}" ] && echo "  OVRD_POSE_MODE=$OVRD_POSE_MODE"
+[ -n "${OVRD_POSE_REPLAY:-}" ] && echo "  OVRD_POSE_REPLAY=$OVRD_POSE_REPLAY (recorded head motion, not the headset's)"
+if [ "${JITTER_CHECK:-0}" = 1 ]; then
+	export OVRD_POSE_LOG="$LOGDIR/steamvr-pose-$STAMP.csv"
+	FRAMES_CSV="$LOGDIR/steamvr-frames-$STAMP.csv"
+	if [ -x "$HERE/tools/vrframetiming" ]; then
+		echo "  JITTER_CHECK=1: submitted poses to $OVRD_POSE_LOG, frame timing to $FRAMES_CSV"
+	else
+		echo "  [!!] JITTER_CHECK=1 but tools/vrframetiming isn't built (see its Build: line); poses only"
+	fi
+fi
 
 echo
 echo "== Starting SteamVR (close SteamVR or press Ctrl+C here when done)"
@@ -263,8 +290,31 @@ if ! pgrep -x vrserver >/dev/null; then
 	echo "  vrserver never started; see $LOG and $STEAM_LOGS/vrstartup.txt"
 else
 	echo "  vrserver running (pid $(pgrep -x vrserver | head -1))"
+	FT_PID=""
+	if [ "${JITTER_CHECK:-0}" = 1 ] && [ -x "$HERE/tools/vrframetiming" ]; then
+		"$HERE/tools/vrframetiming" 36000 "$FRAMES_CSV" "$LOGDIR/steamvr-vrposes-$STAMP.csv" \
+			2>"$LOGDIR/steamvr-frames-$STAMP-summary.txt" &
+		FT_PID=$!
+	fi
+	PROBE_PID=""
+	if [ "${JITTER_CHECK:-0}" = 1 ] && [ -x "$HERE/tools/vrposeprobe" ]; then
+		# SteamVR's own pose prediction at fixed times, independent of any app (analysis/steamvr_probe.py).
+		"$HERE/tools/vrposeprobe" 36000 "$LOGDIR/steamvr-probe-$STAMP.csv" 2>/dev/null &
+		PROBE_PID=$!
+	fi
+	CPU_PID=""
+	if [ "${JITTER_CHECK:-0}" = 1 ]; then
+		# Per-thread CPU use and CPU wait of the game, vrserver (our driver), vrcompositor.
+		python3 -I "$HERE/tools/cpusample.py" "$LOGDIR/steamvr-cpu-$STAMP.csv" ${GAME_PROCESS:-wwhd} vrserver vrcompositor \
+			2>"$LOGDIR/steamvr-cpu-$STAMP-summary.txt" &
+		CPU_PID=$!
+	fi
 	while pgrep -x vrserver >/dev/null; do sleep 2; done
 	echo "  SteamVR exited."
+	for pid in $FT_PID $CPU_PID $PROBE_PID; do
+		kill -INT "$pid" 2>/dev/null
+		wait "$pid" 2>/dev/null
+	done
 fi
 
 echo
@@ -278,3 +328,22 @@ echo "  logs in $LOGDIR/steamvr-$STAMP-*"
 echo
 
 "$HERE/summarize.sh" "$LOGDIR/steamvr-$STAMP-combined.log"
+
+# A plugin without our pose log (PLUGIN_DIR=...-upstream): measure against SteamVR's own pose samples instead.
+if [ "${JITTER_CHECK:-0}" = 1 ] && [ ! -s "${OVRD_POSE_LOG:-}" ] && [ -s "$LOGDIR/steamvr-vrposes-$STAMP.csv" ]; then
+	echo "  (no plugin pose log: measuring against SteamVR's pose samples)"
+	OVRD_POSE_LOG="$LOGDIR/steamvr-vrposes-$STAMP.csv"
+fi
+if [ "${JITTER_CHECK:-0}" = 1 ] && [ -s "${OVRD_POSE_LOG:-}" ] && [ -s "${FRAMES_CSV:-}" ]; then
+	echo
+	echo "== Jitter check (tracking vs frame timing vs prediction)"
+	cat "$LOGDIR/steamvr-frames-$STAMP-summary.txt" 2>/dev/null
+	echo; echo "CPU per thread:"; cat "$LOGDIR/steamvr-cpu-$STAMP-summary.txt" 2>/dev/null
+	python3 -I "$HERE/analysis/steamvr_timeline.py" "$OVRD_POSE_LOG" "$FRAMES_CSV" | tee "$LOGDIR/steamvr-jitter-$STAMP.txt"
+	echo; echo "== Frames drawn one refresh early or late (the pose each frame was drawn with)"
+	python3 -I "$HERE/analysis/steamvr_frame_shift.py" "$OVRD_POSE_LOG" "$FRAMES_CSV" | tee -a "$LOGDIR/steamvr-jitter-$STAMP.txt"
+	if [ -s "$LOGDIR/steamvr-probe-$STAMP.csv" ]; then
+		echo; echo "== SteamVR's own pose prediction (vrserver, no app involved)"
+		python3 -I "$HERE/analysis/steamvr_probe.py" "$OVRD_POSE_LOG" "$LOGDIR/steamvr-probe-$STAMP.csv" | tee -a "$LOGDIR/steamvr-jitter-$STAMP.txt"
+	fi
+fi

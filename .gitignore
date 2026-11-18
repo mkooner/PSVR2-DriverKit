@@ -37,3 +37,11 @@ analysis/harness/*.o
 vio/basalt_module_test
 vio/*.o
 vio/*.log
+analysis/harness/mesh_res_check
+analysis/harness/display_clock_test
+analysis/harness/replay_test
+tools/vrposeprobe
+tools/vrdisplaydump
+tools/vrtestscene
+tools/xr_frame_log/libxr_frame_log.so
+tools/xr_frame_log/layer_test_client

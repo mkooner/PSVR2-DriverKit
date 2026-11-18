@@ -63,7 +63,7 @@ fn default_settings() -> Vec<Setting> {
         value("PSVR2_REFRESH_HZ", "Display refresh (Hz)",
               "89.91 or 119.88. SteamVR and Monado direct both pick the matching display mode.", "89.91", true),
         value("XRT_COMPOSITOR_SCALE_PERCENTAGE", "SteamVR render scale (%)",
-              "Per-eye render size for SteamVR games (140: sharp in the lens centre; 100: lighter).", "140", true),
+              "Per-eye render size for SteamVR games (170 = 3400x3468, as Sony's driver; lower is lighter).", "170", true),
         value("OXR_VIEWPORT_SCALE_PERCENTAGE", "OpenXR render scale (%)",
               "Recommended render size for apps on monado-service.", "100", true),
         toggle("PSVR2_BASALT", "Basalt referee",
@@ -76,12 +76,18 @@ fn default_settings() -> Vec<Setting> {
                "Keeps the head position continuous when the headset's tracking re-originates.", true),
         toggle("OVRD_HIDDEN_AREA", "Hidden-area mesh (SteamVR)",
                "Experimental: our distortion doesn't model the lens edge yet, so it hides almost nothing.", false),
-        toggle("ASYNC", "SteamVR async reprojection",
-               "SteamVR launcher: re-warps late frames (steadier, can flicker on NVIDIA).", true),
+        toggle("ASYNC", "Force SteamVR async reprojection",
+               "Off: SteamVR's own default (off on NVIDIA under Linux, as with Sony's driver). On: forced on.", false),
+        value("OVRD_POSE_MODE", "SteamVR headset pose mode",
+              "steamvr (default): now + velocities. measured: measurement-time poses (Valve lighthouse). novelocity: no velocities. display: predicted to display time (ALVR).", "steamvr", true),
+        value("OVRD_DISTORTION_MESH_RES", "SteamVR distortion mesh",
+              "Grid SteamVR samples the lens distortion on (80 as Sony's driver; SteamVR's own 49 wobbles while turning).", "80", true),
         toggle("RECORD_DATASET", "Record controller dataset", "SteamVR launcher: record LED tracking data.", false),
         toggle("RECORD_SLAM", "Record headset SLAM", "SteamVR launcher: record the headset's raw SLAM stream.", false),
         toggle("RECORD_CAMERA", "Record camera images", "SteamVR launcher: record camera transfers (~2 GB/min).", false),
         toggle("HAND_TRACKING", "Optical hand tracking", "SteamVR launcher: hands from the bottom cameras.", false),
+        toggle("JITTER_CHECK", "Jitter check (SteamVR)",
+               "Records submitted poses and frame timing, then labels each jitter moment as tracking, frame timing or prediction (logs/steamvr-jitter-*.txt).", false),
     ]
 }
 
@@ -95,7 +101,12 @@ struct Config {
     steam_root: String,
     #[serde(default)]
     steamvr_dir: String,
+    /// Settings format: 2 = async reprojection off by default (SteamVR's own choice); 3 = SteamVR render scale 170.
+    #[serde(default)]
+    version: u32,
 }
+
+const CONFIG_VERSION: u32 = 3;
 
 impl Default for Config {
     fn default() -> Self {
@@ -113,6 +124,7 @@ impl Default for Config {
             settings,
             steam_root: String::new(),
             steamvr_dir: String::new(),
+            version: CONFIG_VERSION,
         }
     }
 }
@@ -129,12 +141,37 @@ fn load_config() -> Config {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    // Settings added since the file was written get their defaults.
-    for d in Config::default().settings {
-        if !cfg.settings.iter().any(|s| s.key == d.key) {
-            cfg.settings.push(d);
+    let defaults = Config::default().settings;
+    // Settings added since the file was written get their defaults; names and help always come from this version.
+    for d in &defaults {
+        match cfg.settings.iter_mut().find(|s| s.key == d.key) {
+            Some(s) => {
+                s.label = d.label.clone();
+                s.help = d.help.clone();
+                if std::mem::discriminant(&s.kind) != std::mem::discriminant(&d.kind) {
+                    s.kind = d.kind.clone();
+                }
+            }
+            None => cfg.settings.push(d.clone()),
         }
     }
+    if cfg.version < 2 {
+        // Version 1 forced async reprojection on by default; SteamVR's own default (off on NVIDIA/Linux) now.
+        if let Some(s) = cfg.settings.iter_mut().find(|s| s.key == "ASYNC") {
+            s.enabled = false;
+        }
+    }
+    if cfg.version < 3 {
+        // Version 2 sent 140; Sony's driver renders 170% (3400x3468 per eye).
+        if let Some(s) = cfg.settings.iter_mut().find(|s| s.key == "XRT_COMPOSITOR_SCALE_PERCENTAGE") {
+            if let Kind::Value { value } = &mut s.kind {
+                if value.trim() == "140" {
+                    *value = "170".into();
+                }
+            }
+        }
+    }
+    cfg.version = CONFIG_VERSION;
     cfg
 }
 

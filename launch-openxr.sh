@@ -84,6 +84,12 @@ rm -f "$SOCKET" # a stale socket from a crashed service would block the new one
 export XRT_LOG="${XRT_LOG:-info}"
 export PSVR2_LOG="${PSVR2_LOG:-info}"
 
+# JITTER_CHECK=1: Monado's app pacer decisions in the log (U_PACING_APP_LOG=debug: when the app is woken from
+# xrWaitFrame and why) and per-thread CPU use / CPU wait of the app and monado-service (tools/cpusample.py).
+if [ "${JITTER_CHECK:-0}" = 1 ]; then
+	export U_PACING_APP_LOG=debug
+	echo "  JITTER_CHECK=1: pacer log on, CPU per thread to $LOGDIR/monado-cpu-$STAMP.csv"
+fi
 echo "Starting monado-service ($LOG)..."
 # The service exits when its stdin closes (it waits for Enter), so give it one that stays open.
 "$SERVICE" > "$LOG" 2>&1 < <(sleep infinity) &
@@ -119,8 +125,19 @@ if [ ! -S "$SOCKET" ]; then
 fi
 echo "Monado is ready. Running $APP $*"
 
+CPU_PID=""
+if [ "${JITTER_CHECK:-0}" = 1 ]; then
+	python3 -I "$HERE/tools/cpusample.py" "$LOGDIR/monado-cpu-$STAMP.csv" "$(basename "$APP" | cut -c1-15)" monado-service \
+		2>"$LOGDIR/monado-cpu-$STAMP-summary.txt" &
+	CPU_PID=$!
+fi
 XR_RUNTIME_JSON="$MANIFEST" "$APP" "$@"
 STATUS=$?
+if [ -n "$CPU_PID" ]; then
+	kill -INT "$CPU_PID" 2>/dev/null
+	wait "$CPU_PID" 2>/dev/null
+	echo "CPU per thread:"; cat "$LOGDIR/monado-cpu-$STAMP-summary.txt"
+fi
 echo "App exited ($STATUS)."
 stop_service
 exit "$STATUS"
