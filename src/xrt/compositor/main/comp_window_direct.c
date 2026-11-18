@@ -11,6 +11,8 @@
 
 #include "comp_window_direct.h"
 
+#include <math.h>
+
 #include "util/u_misc.h"
 
 
@@ -52,9 +54,35 @@ choose_best_vk_mode_auto(struct comp_target *ct, VkDisplayModePropertiesKHR *mod
 			best_index = i;
 		}
 	}
+	/*
+	 * Third: if the head device declares its refresh rate (nominal frame interval), use the full-size mode closest to
+	 * it within 1 Hz instead of simply the fastest, so the panel runs at the rate the device asks for (e.g. PS VR2:
+	 * PSVR2_REFRESH_HZ, 89.91 or 119.88), as SteamVR's compositor does with the same value.
+	 */
+	struct xrt_device *head = ct->c->xdev;
+	if (head != NULL && head->hmd != NULL && head->hmd->screens[0].nominal_frame_interval_ns > 0) {
+		double want_hz = 1e9 / (double)head->hmd->screens[0].nominal_frame_interval_ns;
+		VkDisplayModeParametersKHR top = mode_properties[best_index].parameters;
+		int top_pixels = top.visibleRegion.width * top.visibleRegion.height;
+		int match = -1;
+		double match_err = 1.0;
+		for (int i = 0; i < mode_count; i++) {
+			VkDisplayModeParametersKHR *m = &mode_properties[i].parameters;
+			double err = fabs((double)m->refreshRate / 1000.0 - want_hz);
+			if ((int)(m->visibleRegion.width * m->visibleRegion.height) == top_pixels && err < match_err) {
+				match = i;
+				match_err = err;
+			}
+		}
+		if (match >= 0) {
+			best_index = match;
+		} else {
+			COMP_INFO(ct->c, "No full-size display mode at the device's %.2f Hz, using the fastest", want_hz);
+		}
+	}
 	VkDisplayModeParametersKHR best = mode_properties[best_index].parameters;
-	COMP_DEBUG(ct->c, "Auto choosing Vk direct mode %d: %dx%d@%.2f", best_index, best.visibleRegion.width,
-	           best.visibleRegion.height, (float)best.refreshRate / 1000.f);
+	COMP_INFO(ct->c, "Auto choosing Vk direct mode %d: %dx%d@%.2f", best_index, best.visibleRegion.width,
+	          best.visibleRegion.height, (float)best.refreshRate / 1000.f);
 	return best_index;
 }
 

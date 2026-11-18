@@ -851,7 +851,7 @@ predict_pose(TrackerSlam &t, timepoint_ns when_ns, struct xrt_space_relation *ou
 	// Use only SLAM data if asking for an old point in time or PREDICTION_SP_SO_SA_SL
 	SLAM_DASSERT_(rel_ts < INT64_MAX);
 	if (t.pred_type == SLAM_PRED_POSE_ONLY || when_ns <= (int64_t)rel_ts) {
-		math::RelationHistoryEntry entry{};
+		xrt::auxiliary::math::RelationHistoryEntry entry{};
 		t.slam_rels.get(when_ns, entry);
 		*out_relation = entry.relation;
 		return;
@@ -1194,6 +1194,37 @@ t_slam_get_tracked_pose(struct xrt_tracked_slam *xts, timepoint_ns when_ns, stru
 	if (t.gt.override_tracking) {
 		out_relation->pose = gt2xr_pose(t.gt.origin, get_gt_pose_at(*t.gt.trajectory, when_ns));
 	}
+}
+
+/*!
+ * The pose the external SLAM system computed for exactly @p when_ns, interpolated between its own outputs, without
+ * prediction or filtering. False if it hasn't produced poses on both sides of that time (yet).
+ */
+extern "C" bool
+t_slam_get_pose_at(struct xrt_tracked_slam *xts, timepoint_ns when_ns, struct xrt_pose *out_pose)
+{
+	auto &t = *container_of(xts, TrackerSlam, base);
+	flush_poses(t);
+	xrt::auxiliary::math::RelationHistoryEntry entry{};
+	m_relation_history_result r = t.slam_rels.get(when_ns, entry);
+	if (r != M_RELATION_HISTORY_RESULT_EXACT && r != M_RELATION_HISTORY_RESULT_INTERPOLATED) {
+		return false;
+	}
+	*out_pose = entry.relation.pose;
+	return true;
+}
+
+//! Reset the external SLAM system's state (it re-initializes from the next samples) and forget its poses.
+extern "C" void
+t_slam_reset_state(struct xrt_tracked_slam *xts)
+{
+	auto &t = *container_of(xts, TrackerSlam, base);
+	vit_result_t vres = t.vit.tracker_reset(t.tracker);
+	if (vres != VIT_SUCCESS) {
+		SLAM_WARN("Failed to reset VIT tracker");
+	}
+	flush_poses(t);
+	t.slam_rels.clear();
 }
 
 //! Receive and register ground truth to use for trajectory error metrics.

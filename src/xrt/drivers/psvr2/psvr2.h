@@ -343,6 +343,16 @@ struct psvr2_hmd
 	//! IMU sample times (two samples per VTS millisecond), see psvr2_imu_time.h.
 	struct psvr2_imu_time imu_time;
 
+	//! PSVR2_BASALT: Basalt VIO as the pose filter's referee (psvr2_basalt.h), and SLAM poses waiting for it.
+	struct psvr2_basalt *basalt;
+	bool basalt_tried;
+	struct
+	{
+		timepoint_ns ts;
+		struct xrt_pose pose;
+	} ref_pend[16];
+	uint32_t ref_pend_count;
+
 	/* Tracking state */
 	struct m_relation_history *slam_relation_history;
 	struct m_ff_vec3_f32 *ff_gyro;

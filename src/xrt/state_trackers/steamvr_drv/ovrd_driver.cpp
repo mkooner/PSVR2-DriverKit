@@ -20,6 +20,7 @@
 #include "math/m_api.h"
 #include "ovrd_log.hpp"
 #include "openvr_driver.h"
+#include "ovrd_hidden_area.hpp"
 
 extern "C" {
 #include "ovrd_interface.h"
@@ -106,6 +107,14 @@ DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_vsync_to_photons_s, "OVRD_VSYNC_TO_PHOTONS_S", 
  * SteamVR times frames against the display. Negative: the default for the headset, see below; 0: not reported.
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_photons_to_vblank_s, "OVRD_PHOTONS_TO_VBLANK_S", -1.0f)
+
+/*!
+ * Give SteamVR a hidden-area mesh per eye (the parts of the render target the lens distortion never samples), so apps
+ * skip shading them; Sony's driver hides 22.3% (vrcompositor.txt "HiddenArea(22.30%)"). Off by default: our
+ * distortion samples the whole render target (psvr2-test/analysis/harness/hidden_area_check: 0.0% hidden), the lens's
+ * visible edge on the panel isn't modelled. OVRD_HIDDEN_AREA=1: on.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(ovrd_hidden_area, "OVRD_HIDDEN_AREA", false)
 
 #define MODELNUM_LEN (XRT_DEVICE_NAME_LEN + 9) // "[Monado] "
 
@@ -1819,6 +1828,7 @@ public:
 	virtual void GetEyeOutputViewport(vr::EVREye eEye, uint32_t *pnX, uint32_t *pnY, uint32_t *pnWidth, uint32_t *pnHeight);
 	virtual void GetProjectionRaw(vr::EVREye eEye, float *pfLeft, float *pfRight, float *pfTop, float *pfBottom);
 	virtual vr::DistortionCoordinates_t ComputeDistortion(vr::EVREye eEye, float fU, float fV);
+	void SetHiddenAreaMeshes();
 	virtual bool ComputeInverseDistortion(vr::HmdVector2_t *pResult, vr::EVREye eEye, uint32_t unChannel, float fU, float fV);
 
 	// clang-format on
@@ -1924,6 +1934,9 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 	if (m_flSecondsFromPhotonsToVblank > 0.0f) {
 		vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_SecondsFromPhotonsToVblank_Float,
 		                                     m_flSecondsFromPhotonsToVblank);
+	}
+	if (debug_get_bool_option_ovrd_hidden_area()) {
+		SetHiddenAreaMeshes();
 	}
 
 	// Universe 2 (the saved room) or 3 (this session only), see OvrdRoom; never 0 (invalid) or 1 (Oculus)
@@ -2093,6 +2106,34 @@ CDeviceDriver_Monado::GetPose()
 	return t;
 }
 
+//! Hidden-area meshes from our own distortion, see ovrd_hidden_area.hpp.
+void
+CDeviceDriver_Monado::SetHiddenAreaMeshes()
+{
+	for (int e = 0; e < 2; e++) {
+		vr::EVREye eye = (vr::EVREye)e;
+		ovrd_hidden_area::Mesh mesh;
+		bool ok = ovrd_hidden_area::build(
+		    [&](float u, float v, float out[6]) {
+			    vr::DistortionCoordinates_t d = ComputeDistortion(eye, u, v);
+			    out[0] = d.rfRed[0], out[1] = d.rfRed[1], out[2] = d.rfGreen[0], out[3] = d.rfGreen[1];
+			    out[4] = d.rfBlue[0], out[5] = d.rfBlue[1];
+		    },
+		    mesh);
+		if (!ok) {
+			ovrd_log("Hidden area: eye %d centre maps outside the render target, no mesh\n", e);
+			continue;
+		}
+		std::vector<vr::HmdVector2_t> tris, loop;
+		for (auto &p : mesh.triangles) tris.push_back({{p.x, p.y}});
+		for (auto &p : mesh.loop) loop.push_back({{p.x, p.y}});
+		vr::VRHiddenArea()->SetHiddenArea(eye, vr::k_eHiddenAreaMesh_Standard, tris.data(), (uint32_t)tris.size());
+		vr::VRHiddenArea()->SetHiddenArea(eye, vr::k_eHiddenAreaMesh_LineLoop, loop.data(), (uint32_t)loop.size());
+		ovrd_log("Hidden area mesh, eye %d: %zu triangles, %.1f%% of the render target hidden\n", e,
+		         tris.size() / 3, mesh.hidden_fraction * 100.0);
+	}
+}
+
 void
 CDeviceDriver_Monado::GetWindowBounds(int32_t *pnX, int32_t *pnY, uint32_t *pnWidth, uint32_t *pnHeight)
 {
@@ -2127,8 +2168,14 @@ CDeviceDriver_Monado::GetRecommendedRenderTargetSize(uint32_t *pnWidth, uint32_t
 
 
 
-	*pnWidth = m_xdev->hmd->screens[0].w_pixels * fscale;
-	*pnHeight = m_xdev->hmd->screens[0].h_pixels * fscale;
+	/*
+	 * Per eye: SteamVR takes this as each eye's render target (its log: "HMD driver recommended: WxH ... MP/sec" =
+	 * W * H * 2 eyes * Hz). This used the whole panel (both eyes, 4000 px wide for the PS VR2), so every eye was rendered
+	 * twice as wide as needed (5600x2856 per eye at 140%). The view's display size is the per-eye size the OpenXR path
+	 * uses too (xrt_view::display, scaled by XRT_COMPOSITOR_SCALE_PERCENTAGE).
+	 */
+	*pnWidth = m_xdev->hmd->views[0].display.w_pixels * fscale;
+	*pnHeight = m_xdev->hmd->views[0].display.h_pixels * fscale;
 
 	ovrd_log("Render Target Size: %dx%d (%fx)\n", *pnWidth, *pnHeight, fscale);
 }

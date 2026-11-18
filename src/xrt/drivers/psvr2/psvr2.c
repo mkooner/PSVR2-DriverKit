@@ -60,6 +60,7 @@
 #include "bcdec.h"
 
 #include "psvr2_imu_time.h"
+#include "psvr2_basalt.h"
 #include "psvr2.h"
 #include "psvr2_camera_recorder.h"
 #include "psvr2_interface.h"
@@ -111,10 +112,21 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_gyro_bias_tau, "PSVR2_GYRO_BIAS_TAU", 0.0f)
  * three 2026-11-17 recordings: 250 ms prediction drift in fast turns 4.8 -> 2.7 mm, slow motion unchanged.
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_gravity_pause_deg, "PSVR2_GRAVITY_PAUSE_DEG", 30.0f)
+/*!
+ * Basalt VIO (bottom camera pair + IMU, camera mode 0x10) as the referee of the headset's SLAM steps in the pose filter
+ * (psvr2_basalt.h): a SLAM step the IMU and Basalt both reject is replaced by the IMU step. Needs libbasalt.so
+ * (VIT_SYSTEM_LIBRARY_PATH) and turns accelerometer fusion on. Replay of the 2026-11-17 19:12 recording through this
+ * module in real time: fast-move position jitter worst-10% 0.71 -> 0.34 mm, worst-1% 1.65 -> 0.79 mm, still unchanged.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_basalt, "PSVR2_BASALT", false)
 //! Carry the head position across mid-session SLAM resets (PSVR2_SLAM_CARRY=0 for the previous behaviour).
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_slam_carry, "PSVR2_SLAM_CARRY", true)
-//! Head position correction blend time (ms, 0 steps at each SLAM update), see pos_blend_ns.
-DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_blend_ms, "PSVR2_POSE_BLEND_MS", 17.0f)
+/*!
+ * Head position correction blend time (ms, 0: take each correction at once), see pos_blend_ns. 100 ms: replay of two
+ * 2026-11-17 recordings, worst-1% position jitter still 1.63 -> 0.71 mm, turning 0.61 -> 0.40, fast moves worst-10%
+ * 1.03 -> 0.71 (fusion on; fusion off similar); the output follows SLAM ~0.1-0.5 mm more loosely (was 17).
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_blend_ms, "PSVR2_POSE_BLEND_MS", 100.0f)
 //! Head point distance in front of the neck pivot for the pose filter (metres, 0 disables), see pivot_offset.
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_head_pivot_m, "PSVR2_HEAD_PIVOT_M", 0.10f)
 /*
@@ -173,6 +185,7 @@ psvr2_hmd_destroy(struct xrt_device *xdev)
 	hmd->usb_complete = 1;
 	os_thread_helper_unlock(&hmd->usb_thread);
 	os_thread_helper_destroy(&hmd->usb_thread);
+	psvr2_basalt_destroy(&hmd->basalt); // after the USB thread: nothing feeds it any more
 
 	psvr2_usb_destroy(hmd);
 	psvr2_camera_recorder_destroy(&hmd->camera_recorder);
@@ -425,6 +438,23 @@ process_imu_record(struct psvr2_hmd *hmd, size_t index, struct imu_usb_record *i
 	psvr2_pose_filter_push_gyro(&hmd->pose_filter, sample.timestamp_ns, &hmd->last_gyro);
 	psvr2_pose_filter_push_accel(&hmd->pose_filter, sample.timestamp_ns, &hmd->last_accel);
 
+	if (hmd->basalt != NULL) {
+		// Basalt runs on the headset's clock (VTS), like the filter: IMU here, camera transfers by their header time.
+		psvr2_basalt_push_imu(hmd->basalt, sample.timestamp_ns, &hmd->last_accel, &hmd->last_gyro);
+		// Referee: SLAM poses whose Basalt pose is there now (oldest first), dropped after 150 ms.
+		while (hmd->ref_pend_count > 0) {
+			struct xrt_pose ref;
+			timepoint_ns rts = hmd->ref_pend[0].ts;
+			if (psvr2_basalt_ref_pose(hmd->basalt, rts, &hmd->ref_pend[0].pose, &ref)) {
+				psvr2_pose_filter_push_ref(&hmd->pose_filter, rts, &ref);
+			} else if (sample.timestamp_ns - rts < U_TIME_1MS_IN_NS * 150) {
+				break; // not there yet
+			}
+			memmove(&hmd->ref_pend[0], &hmd->ref_pend[1], sizeof(hmd->ref_pend[0]) * (hmd->ref_pend_count - 1));
+			hmd->ref_pend_count--;
+		}
+	}
+
 	if (hmd->record_file != NULL) {
 		fprintf(hmd->record_file, "I,%" PRId64 ",%" PRId64 ",%.7f,%.7f,%.7f,%.5f,%.5f,%.5f\n",
 		        (int64_t)estimated_sample_time, (int64_t)sample.timestamp_ns, hmd->last_gyro.x, hmd->last_gyro.y,
@@ -603,6 +633,22 @@ img_xfer_cb(struct libusb_transfer *xfer)
 #endif
 		PSVR2_TRACE(hmd, "Camera frame - %d bytes", xfer->actual_length);
 		PSVR2_TRACE_HEX(hmd, xfer->buffer, MIN(256, xfer->actual_length));
+
+		if (xfer->actual_length == USB_CAM_MODE10_XFER_SIZE && hmd->basalt != NULL) {
+			// Header u32 at 8: exposure VTS in us; extended to 64 bits next to the IMU's VTS (wraps every 71 min).
+			uint32_t vts_us;
+			memcpy(&vts_us, xfer->buffer + 8, sizeof(vts_us));
+			vts_us = __le32_to_cpu(vts_us);
+			int64_t imu_us = hmd->last_imu_vts_ns / 1000;
+			int64_t full_us = (imu_us & ~(int64_t)0xffffffff) | (int64_t)vts_us;
+			if (full_us - imu_us > ((int64_t)1 << 31)) {
+				full_us -= (int64_t)1 << 32;
+			} else if (imu_us - full_us > ((int64_t)1 << 31)) {
+				full_us += (int64_t)1 << 32;
+			}
+			psvr2_basalt_push_transfer(hmd->basalt, (timepoint_ns)full_us * 1000, xfer->buffer,
+			                           (size_t)xfer->actual_length);
+		}
 
 		if (xfer->actual_length == USB_CAM_MODE10_XFER_SIZE) {
 			struct xrt_frame *frames[2] = {0};
@@ -820,6 +866,15 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 
 	struct psvr2_pose_filter_update filter_update;
 	psvr2_pose_filter_push_slam(&hmd->pose_filter, vts_ns, &hmd->pose, &filter_update);
+	if (hmd->basalt != NULL) {
+		if (hmd->ref_pend_count == ARRAY_SIZE(hmd->ref_pend)) {
+			memmove(&hmd->ref_pend[0], &hmd->ref_pend[1], sizeof(hmd->ref_pend[0]) * (ARRAY_SIZE(hmd->ref_pend) - 1));
+			hmd->ref_pend_count--;
+		}
+		hmd->ref_pend[hmd->ref_pend_count].ts = vts_ns;
+		hmd->ref_pend[hmd->ref_pend_count].pose = hmd->pose;
+		hmd->ref_pend_count++;
+	}
 	psvr2_pose_stats_update_locked(hmd, vts_ns, &filter_update);
 
 	if (hmd->record_file != NULL) {
@@ -1231,6 +1286,15 @@ vd_xfer_cb(struct libusb_transfer *xfer)
 					}
 				}
 				psvr2_parse_gen_calibration_block(hmd, buf + entry->offset, entry->size);
+				if (debug_get_bool_option_psvr2_basalt() && hmd->basalt == NULL && !hmd->basalt_tried) {
+					// Once: it needs the camera calibration in this block. Published only when fully set up.
+					hmd->basalt_tried = true;
+					struct psvr2_basalt *b = psvr2_basalt_create(NULL, buf + entry->offset, entry->size);
+					__atomic_store_n(&hmd->basalt, b, __ATOMIC_RELEASE);
+					if (b == NULL) {
+						PSVR2_ERROR(hmd, "PSVR2_BASALT: Basalt didn't start, running without the referee");
+					}
+				}
 				os_mutex_unlock(&hmd->calib_lock);
 				// PSVR2_DEBUG_HEX(hmd, buf + entry->offset, entry->size);
 				break;
@@ -1624,8 +1688,10 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 	 * instead: the 1000x1000 BC4 bottom pair that the BC4 parsing below (USB_CAM_MODE10_XFER_SIZE, "10" = 0x10)
 	 * and the hand tracking prototype use. With 0xa the recordings got only 819456 byte mode 0xa transfers.
 	 */
-	hmd->camera_mode = hmd->camera_recorder != NULL || psvr2_hand_tracking_enabled() ? PSVR2_CAMERA_MODE_BOTTOM_SBS_BC4
-	                                                                               : PSVR2_CAMERA_MODE_10;
+	hmd->camera_mode = hmd->camera_recorder != NULL || psvr2_hand_tracking_enabled() ||
+	                           debug_get_bool_option_psvr2_basalt()
+	                       ? PSVR2_CAMERA_MODE_BOTTOM_SBS_BC4
+	                       : PSVR2_CAMERA_MODE_10;
 	PSVR2_INFO(hmd, "Camera mode 0x%x", (unsigned)hmd->camera_mode);
 	if (debug_get_bool_option_psvr2_sony_ld_config()) {
 		// Byte for byte as Sony's driver sends them, in its order, before the camera mode.
@@ -2080,7 +2146,11 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	pose_filter_params.pos_tau_s = debug_get_float_option_psvr2_pose_pos_tau();
 	pose_filter_params.pivot_offset.z = -debug_get_float_option_psvr2_head_pivot_m();
 	pose_filter_params.pos_blend_ns = (time_duration_ns)(debug_get_float_option_psvr2_pose_blend_ms() * U_TIME_1MS_IN_NS);
-	pose_filter_params.accel_enable = debug_get_bool_option_psvr2_accel_fusion();
+	pose_filter_params.accel_enable = debug_get_bool_option_psvr2_accel_fusion() || debug_get_bool_option_psvr2_basalt();
+	if (debug_get_bool_option_psvr2_basalt()) {
+		// The referee needs the accelerometer-aided position. 3 mm: 13 catches in the 19:12 replay, all real.
+		pose_filter_params.ref_jump_m = 0.003f;
+	}
 	pose_filter_params.gyro_bias_tau_s = debug_get_float_option_psvr2_gyro_bias_tau();
 	pose_filter_params.accel_gravity_pause_rad_s = DEG_TO_RAD(debug_get_float_option_psvr2_gravity_pause_deg());
 	PSVR2_INFO(hmd, "Gyro bias estimation: %s (PSVR2_GYRO_BIAS_TAU %.1f s)",
@@ -2132,7 +2202,8 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	 * SteamVR's compositor runs the PS VR2 panel in its 4000x2040@89.91Hz mode (it matches a desired 90Hz; the
 	 * 119.88Hz mode is also offered), but this said 120Hz, which SteamVR takes as Prop_DisplayFrequency for its frame
 	 * timing and pose prediction: every frame's head pose was predicted for the wrong moment (8.3 vs 11.1ms frames),
-	 * judder while turning. PSVR2_REFRESH_HZ sets it, matching the mode the compositor uses.
+	 * judder while turning. PSVR2_REFRESH_HZ sets it (89.91 default, or 119.88), and both compositors pick the display
+	 * mode to match: SteamVR from Prop_DisplayFrequency, Monado direct in choose_best_vk_mode_auto (comp_window_direct.c).
 	 */
 	hmd->base.hmd->screens[0].nominal_frame_interval_ns =
 	    time_s_to_ns(1.0f / debug_get_float_option_psvr2_refresh_hz());

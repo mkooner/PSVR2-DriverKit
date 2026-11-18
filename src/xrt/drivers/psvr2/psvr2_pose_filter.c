@@ -39,6 +39,11 @@ psvr2_pose_filter_default_params(struct psvr2_pose_filter_params *out_params)
 	    .gyro_bias_tau_s = 0.0f,
 	    .accel_gravity_pause_rad_s = 0.0f,
 	    .pos_rate_window_ns = U_TIME_1MS_IN_NS * 50,
+	    .ref_jump_m = 0.0f,
+	    .ref_jump_per_rad_s = 0.0005f,
+	    .ref_offset_tau_s = 1.0f,
+	    .ref_wait_ns = U_TIME_1MS_IN_NS * 40,
+	    .ref_imu_decides = true,
 	};
 }
 
@@ -341,6 +346,11 @@ pos_history_at(const struct psvr2_pose_filter *f, timepoint_ns ts, struct xrt_ve
 static void
 pos_history_shift(struct psvr2_pose_filter *f, struct xrt_vec3 d)
 {
+	// The referee's previous IMU position and those of updates waiting for a verdict are history points too.
+	f->ref_prev_imu = m_vec3_add(f->ref_prev_imu, d);
+	for (uint32_t k = 0; k < f->pend_count; k++) {
+		f->pend[k].at_ts = m_vec3_add(f->pend[k].at_ts, d);
+	}
 	for (uint32_t age = 0; age < f->pos_history_count; age++) {
 		uint32_t idx = pos_history_index(f, age);
 		f->pos_history[idx].position = m_vec3_add(f->pos_history[idx].position, d);
@@ -419,6 +429,10 @@ psvr2_pose_filter_push_accel(struct psvr2_pose_filter *f, timepoint_ns ts, const
 		struct xrt_vec3 step = m_vec3_mul_scalar(f->pending_correction, frac);
 		f->position = m_vec3_add(f->position, step);
 		f->pending_correction = m_vec3_sub(f->pending_correction, step);
+	} else {
+		// No blending: take the correction at once (it used to be left pending forever, so position drifted).
+		f->position = m_vec3_add(f->position, f->pending_correction);
+		f->pending_correction = (struct xrt_vec3)XRT_VEC3_ZERO;
 	}
 	f->pos_ts = ts;
 
@@ -427,6 +441,86 @@ psvr2_pose_filter_push_accel(struct psvr2_pose_filter *f, timepoint_ns ts, const
 	f->pos_history_next = (f->pos_history_next + 1) % PSVR2_POSE_FILTER_HISTORY;
 	if (f->pos_history_count < PSVR2_POSE_FILTER_HISTORY) {
 		f->pos_history_count++;
+	}
+}
+
+//! The referee pivot at @p ts (interpolated), false if not covered.
+static bool
+ref_at(const struct psvr2_pose_filter *f, timepoint_ns ts, struct xrt_vec3 *out)
+{
+	for (uint32_t age = 0; age + 1 < f->ref_count; age++) {
+		uint32_t i1 = (f->ref_next + 64 - 1 - age) % 64, i0 = (f->ref_next + 64 - 2 - age) % 64;
+		if (f->ref[i0].ts <= ts && ts <= f->ref[i1].ts) {
+			float u = f->ref[i1].ts > f->ref[i0].ts ? (float)(ts - f->ref[i0].ts) / (float)(f->ref[i1].ts - f->ref[i0].ts) : 0.0f;
+			*out = m_vec3_lerp(f->ref[i0].pivot, f->ref[i1].pivot, u);
+			return true;
+		}
+	}
+	return false;
+}
+
+
+/*!
+ * Referee verdicts for applied SLAM updates whose referee pose has now arrived (see ref_jump_m). A jump: the referee's
+ * step replaces SLAM's (offset), and the correction the jumped update applied is undone.
+ */
+static void
+ref_verdicts(struct psvr2_pose_filter *f, struct psvr2_pose_filter_update *u)
+{
+	timepoint_ns newest_ref = f->ref_count > 0 ? f->ref[(f->ref_next + 63) % 64].ts : 0;
+	while (f->pend_count > 0) {
+		timepoint_ns ts = f->pend[0].ts;
+		bool too_old = f->orient_ts - ts > f->params.ref_wait_ns;
+		if (newest_ref < ts && !too_old) {
+			break;
+		}
+		struct xrt_vec3 r_now, r_prev;
+		bool have = !too_old && f->have_ref_prev && ts > f->ref_prev_ts && ts - f->ref_prev_ts < U_TIME_1MS_IN_NS * 100 &&
+		            ref_at(f, ts, &r_now) && ref_at(f, f->ref_prev_ts, &r_prev);
+		if (have) {
+			float dt_s = (float)time_ns_to_s(ts - f->ref_prev_ts);
+			float decay = f->params.ref_offset_tau_s > 0.0f ? expf(-dt_s / f->params.ref_offset_tau_s) : 0.0f;
+			struct xrt_vec3 d_slam = m_vec3_sub(f->pend[0].slam, f->ref_prev_slam);
+			struct xrt_vec3 d_ref = m_vec3_sub(r_now, r_prev);
+			struct xrt_vec3 d_imu = m_vec3_sub(f->pend[0].at_ts, f->ref_prev_imu);
+			struct xrt_vec3 dis = m_vec3_sub(d_slam, d_ref);
+			float disagree = m_vec3_len(dis), vs_imu = m_vec3_len(m_vec3_sub(d_ref, d_imu));
+			float thr = f->params.ref_jump_m + f->params.ref_jump_per_rad_s * f->pend[0].rate;
+			if (u != NULL) {
+				u->ref_disagree_m = disagree;
+				u->ref_vs_imu_m = vs_imu;
+			}
+			f->ref_offset = m_vec3_mul_scalar(f->ref_offset, decay);
+			struct xrt_vec3 slam_vs_imu = m_vec3_sub(d_slam, d_imu);
+			bool jump = f->params.ref_imu_decides ? (m_vec3_len(slam_vs_imu) > thr && vs_imu < 0.5f * thr)
+			                                      : (disagree > thr && vs_imu < thr);
+			if (jump) {
+				f->ref_offset = m_vec3_add(f->ref_offset, f->params.ref_imu_decides ? slam_vs_imu : dis);
+				dis = f->params.ref_imu_decides ? slam_vs_imu : dis;
+				f->ref_replacements++;
+				if (u != NULL) {
+					u->ref_replaced = true;
+				}
+				// Undo what the jump did: this update, and any later one already applied with the old offset.
+				for (uint32_t k = 0; k < f->pend_count; k++) {
+					if (f->pend[k].alpha <= 0.0f) {
+						continue;
+					}
+					struct xrt_vec3 corr = m_vec3_mul_scalar(dis, -f->pend[k].alpha);
+					f->pending_correction = m_vec3_add(f->pending_correction, corr);
+					pos_history_shift(f, corr);
+					f->v_imu = m_vec3_add(f->v_imu, m_vec3_mul_scalar(dis, -f->pend[k].beta / f->pend[k].dt));
+				}
+			}
+		} else if (!f->have_ref_prev || ts - f->ref_prev_ts >= U_TIME_1MS_IN_NS * 100) {
+			f->ref_offset = (struct xrt_vec3)XRT_VEC3_ZERO; // a gap: nothing to compare against
+		}
+		f->have_ref_prev = true;
+		f->ref_prev_ts = ts;
+		f->ref_prev_slam = f->pend[0].slam;
+		f->ref_prev_imu = f->pend[0].at_ts;
+		memmove(&f->pend[0], &f->pend[1], sizeof(f->pend[0]) * (f->pend_count - 1));
+		f->pend_count--;
 	}
 }
 
@@ -440,6 +534,23 @@ update_position_accel(struct psvr2_pose_filter *f,
 	struct xrt_vec3 at_ts;
 	if (!pos_history_at(f, ts, &at_ts)) {
 		return; // older than the history (a stall): the next one compares
+	}
+	struct xrt_vec3 slam_checked;
+	int pend_idx = -1;
+	if (f->params.ref_jump_m > 0.0f) {
+		// Remember this update for the referee's verdict (it comes when the referee pose of this time arrives).
+		if (f->pend_count == 8) {
+			memmove(&f->pend[0], &f->pend[1], sizeof(f->pend[0]) * 7);
+			f->pend_count--;
+		}
+		pend_idx = (int)f->pend_count++;
+		f->pend[pend_idx].ts = ts;
+		f->pend[pend_idx].slam = *slam;
+		f->pend[pend_idx].at_ts = at_ts;
+		f->pend[pend_idx].alpha = 0.0f;
+		f->pend[pend_idx].rate = u->rate_rad_s;
+		slam_checked = m_vec3_sub(*slam, f->ref_offset);
+		slam = &slam_checked;
 	}
 
 	// The correction still being blended in counts as already applied.
@@ -476,6 +587,11 @@ update_position_accel(struct psvr2_pose_filter *f,
 	float alpha = f->params.pos_tau_s > 0.0f ? 1.0f - expf(-dt / f->params.pos_tau_s) : 1.0f;
 	float beta = alpha * alpha / (2.0f - alpha);
 	struct xrt_vec3 corr = m_vec3_mul_scalar(residual, alpha);
+	if (pend_idx >= 0) {
+		f->pend[pend_idx].alpha = alpha;
+		f->pend[pend_idx].beta = beta;
+		f->pend[pend_idx].dt = dt;
+	}
 	f->pending_correction = m_vec3_add(f->pending_correction, corr);
 	// History as if already corrected, so the next comparison doesn't see this again.
 	pos_history_shift(f, corr);
@@ -559,6 +675,23 @@ update_position(struct psvr2_pose_filter *f,
 	}
 	f->blend_offset = (struct xrt_vec3)XRT_VEC3_ZERO; // snaps and resets jump on purpose
 	f->pos_ts = ts;
+}
+
+
+void
+psvr2_pose_filter_push_ref(struct psvr2_pose_filter *f, timepoint_ns ts, const struct xrt_pose *pose)
+{
+	struct xrt_vec3 lever;
+	math_quat_rotate_vec3(&pose->orientation, &f->params.pivot_offset, &lever);
+	f->ref[f->ref_next].ts = ts;
+	f->ref[f->ref_next].pivot = m_vec3_sub(pose->position, lever);
+	f->ref_next = (f->ref_next + 1) % 64;
+	if (f->ref_count < 64) {
+		f->ref_count++;
+	}
+	if (f->params.ref_jump_m > 0.0f && f->params.accel_enable) {
+		ref_verdicts(f, NULL);
+	}
 }
 
 void

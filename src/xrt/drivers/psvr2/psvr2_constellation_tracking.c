@@ -20,6 +20,7 @@
 #include "xrt/xrt_defines.h"
 #include <string.h>
 #include "psvr2_constellation_tracking.h"
+#include "psvr2_cam_mount.h"
 #include "util/u_debug.h"
 
 #include <stdio.h>
@@ -30,6 +31,13 @@
  * Negative pitch tilts the camera down, positive yaw turns it left (outward for the left camera).
  * Not in the headset's calibration blocks, so it is configurable while it is being verified on hardware.
  */
+/*!
+ * The camera 0 mount as before 2026-11-17 (transposed calibration matrix, OpenCV-axes manual angles). Default on: the
+ * camera chain below inverts the mount (the tracker's recorded camera 0 pose is the inverse of the mount computed here,
+ * 0.08 deg), so the corrected mount must go in with the chain fixed, not on its own. Work in progress, see
+ * psvr2-test/analysis/harness/mount_check.c.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_cam0_mount_legacy, "PSVR2_CAM0_MOUNT_LEGACY", true)
 DEBUG_GET_ONCE_OPTION(psvr2_cam0_mount, "PSVR2_CAM0_MOUNT", NULL)
 
 /*
@@ -47,7 +55,6 @@ DEBUG_GET_ONCE_OPTION(psvr2_cam_rig_offset, "PSVR2_CAM_RIG_OFFSET", NULL)
  * Rx(-15 deg) * R (hmd_device_hooks.cpp). Verified on hardware: R0^T * R1 matches the block's cam0->cam1 relation
  * to 0.01 deg.
  */
-#define PSVR2_CALIB_CAM0_TO_HEAD_OFFSET 0x6f0
 #include "../pssense/pssense_interface.h"
 
 // Version of the camera relation data that is easier to work with for determining final orientation of all cameras
@@ -222,6 +229,7 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 
 	float pitch_deg = 0, yaw_deg = 0, roll_deg = 0;
 	const char *mount = debug_get_option_psvr2_cam0_mount();
+	const bool legacy = debug_get_bool_option_psvr2_cam0_mount_legacy();
 	bool have_mount = false;
 	// The calibration's camera-to-head rotation is already in OpenXR camera axes, see below.
 	bool mount_in_xr_axes = false;
@@ -229,53 +237,36 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 	if (mount != NULL && sscanf(mount, "%f %f %f", &pitch_deg, &yaw_deg, &roll_deg) >= 2) {
 		// Manual override.
 		struct xrt_quat q_yaw, q_pitch, q_roll;
-		math_quat_from_angle_vector(DEG_TO_RAD(yaw_deg), &(struct xrt_vec3){0, 1, 0}, &q_yaw);
-		math_quat_from_angle_vector(DEG_TO_RAD(pitch_deg), &(struct xrt_vec3){1, 0, 0}, &q_pitch);
-		math_quat_from_angle_vector(DEG_TO_RAD(roll_deg), &(struct xrt_vec3){0, 0, 1}, &q_roll);
-		math_quat_rotate(&q_yaw, &q_pitch, &q_mount);
-		math_quat_rotate(&q_mount, &q_roll, &q_mount);
+		(void)q_yaw;
+		(void)q_pitch;
+		(void)q_roll;
+		psvr2_cam0_mount_from_angles(pitch_deg, yaw_deg, roll_deg, &q_mount);
+		mount_in_xr_axes = !legacy; // legacy: OpenCV axes, flipped below (it faced the camera backwards)
 		PSVR2_INFO(hmd, "Camera 0 mount from PSVR2_CAM0_MOUNT: pitch %.1f yaw %.1f roll %.1f deg", pitch_deg,
 		           yaw_deg, roll_deg);
 		have_mount = true;
-	} else if (size >= PSVR2_CALIB_CAM0_TO_HEAD_OFFSET + 9 * sizeof(float)) {
-		// From the headset's own calibration: Rx(-15 deg) * R_cam0_to_head, as Sony's driver does.
-		struct xrt_matrix_3x3 r = {0};
-		for (int j = 0; j < 9; j++) {
-			uint32_t bits;
-			memcpy(&bits, data + PSVR2_CALIB_CAM0_TO_HEAD_OFFSET + j * 4, sizeof(bits));
-			bits = __le32_to_cpu(bits);
-			memcpy(&r.v[j], &bits, sizeof(float));
-		}
+	} else if (psvr2_cam0_mount_from_block(data, size, -15.0f, legacy, &q_mount)) {
 		/*
-		 * The block stores the matrix in the other order from xrt_matrix_3x3's: replaying 2621 hardware solves
-		 * through this code (psvr2-test/analysis) the transposed mount, with the relations as stored (below), brings
-		 * the median disagreement between cameras 0 and 1 about the same controller from 43.9cm to 3.6cm, faces them
-		 * +-15 deg outward (the bottom pair is 30.6 deg apart, PSVR2-Documentation) instead of lopsided and 25-30 deg
-		 * up, puts the controllers 94% below and 100% in front of the head, and halves the tilt disagreement with the
-		 * controllers' IMUs (9.6/14.2 -> 4.9/7.7 deg).
+		 * Rx(-15 deg) * R_cam0_to_head with the matrix as stored. Checked against camera 0's mount measured from
+		 * motion (camera rotation vs gyro over 865 frame pairs, psvr2-test/vio/cam_imu_rot.cpp; the two bottom
+		 * cameras 31.7 deg apart vs the calibration's 30.2), running this code on the recorded block
+		 * (psvr2-test/analysis/harness/mount_check.c): 1.5 deg off, camera looking 28.9 deg down and 17.4 left
+		 * (measured 28.2 down, 16.1 left). The previous transposed matrix was 41 deg off (level, looking right);
+		 * PSVR2_CAM0_MOUNT_LEGACY=1 brings it back.
 		 */
-		math_matrix_3x3_transpose(&r, &r);
-		struct xrt_quat q_r;
-		math_quat_from_matrix_3x3(&r, &q_r);
-		float n = sqrtf(q_r.x * q_r.x + q_r.y * q_r.y + q_r.z * q_r.z + q_r.w * q_r.w);
-		if (n > 0.9f && n < 1.1f) {
-			struct xrt_quat q_pitch15;
-			math_quat_from_angle_vector(DEG_TO_RAD(-15.0), &(struct xrt_vec3){1, 0, 0}, &q_pitch15);
-			math_quat_normalize(&q_r);
-			math_quat_rotate(&q_pitch15, &q_r, &q_mount);
-			PSVR2_INFO(hmd, "Camera 0 mount from the headset calibration (cam-to-head at 0x%x)",
-			           PSVR2_CALIB_CAM0_TO_HEAD_OFFSET);
-			have_mount = true;
-			mount_in_xr_axes = true;
-		}
+		PSVR2_INFO(hmd, "Camera 0 mount from the headset calibration (cam-to-head at 0x%x)%s",
+		           PSVR2_CALIB_CAM0_TO_HEAD_OFFSET, legacy ? ", legacy transposed matrix" : "");
+		have_mount = true;
+		mount_in_xr_axes = true;
 	}
 
 	if (!have_mount) {
 		PSVR2_WARN(hmd, "No camera 0 mount in the calibration block, using an estimate (set PSVR2_CAM0_MOUNT)");
 		struct xrt_quat q_yaw, q_pitch;
-		math_quat_from_angle_vector(DEG_TO_RAD(17.0), &(struct xrt_vec3){0, 1, 0}, &q_yaw);
-		math_quat_from_angle_vector(DEG_TO_RAD(-29.0), &(struct xrt_vec3){1, 0, 0}, &q_pitch);
-		math_quat_rotate(&q_yaw, &q_pitch, &q_mount);
+		(void)q_yaw;
+		(void)q_pitch;
+		psvr2_cam0_mount_from_angles(-29.0f, 17.0f, 0.0f, &q_mount);
+		mount_in_xr_axes = !legacy;
 	}
 	/*
 	 * The tracker takes camera poses in OpenXR camera axes (Txr_origin_cam, converted to OpenCV internally). The
@@ -289,6 +280,12 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 	 */
 	if (!mount_in_xr_axes) {
 		math_quat_rotate(&q_mount, &q_cv_to_head, &q_mount);
+	}
+	{
+		float vp, vy;
+		psvr2_cam_mount_view_angles(&q_mount, &vp, &vy);
+		PSVR2_INFO(hmd, "Camera 0 looks %.1f deg %s, %.1f deg %s (measured from motion: 28 down, 16 left)", fabsf(vp),
+		           vp < 0 ? "down" : "up", fabsf(vy), vy > 0 ? "left" : "right");
 	}
 
 	struct xrt_matrix_3x3 scratch_3x3;

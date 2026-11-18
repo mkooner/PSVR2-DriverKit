@@ -775,6 +775,21 @@ t_slam_create(struct xrt_frame_context *xfctx,
 int
 t_slam_start(struct xrt_tracked_slam *xts);
 
+/*!
+ * The pose the SLAM system computed for exactly @p when_ns (interpolated between its outputs, no prediction), false if
+ * it hasn't produced poses around that time.
+ * @public @memberof xrt_tracked_slam
+ */
+bool
+t_slam_get_pose_at(struct xrt_tracked_slam *xts, timepoint_ns when_ns, struct xrt_pose *out_pose);
+
+/*!
+ * Reset the SLAM system's state; it re-initializes from the next samples.
+ * @public @memberof xrt_tracked_slam
+ */
+void
+t_slam_reset_state(struct xrt_tracked_slam *xts);
+
 /*
  *
  * Camera calibration

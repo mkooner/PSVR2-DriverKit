@@ -257,6 +257,9 @@ if(XRT_BUILD_DRIVER_PSVR2)
 		psvr2/psvr2_pose_filter.h
 		psvr2/psvr2_camera_recorder.c
 		psvr2/psvr2_camera_recorder.h
+		psvr2/psvr2_basalt.c
+		psvr2/psvr2_basalt.h
+		psvr2/psvr2_cam_mount.h
 		)
 	target_link_libraries(
 		drv_psvr2

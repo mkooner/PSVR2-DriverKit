@@ -92,6 +92,28 @@ struct psvr2_pose_filter_params
 	float accel_gravity_pause_rad_s;
 	//! Turning speed reported with each SLAM update: max gyro rate over this long before the pose (diagnostics).
 	time_duration_ns pos_rate_window_ns;
+	/*!
+	 * Referee (psvr2_pose_filter_push_ref, accelerometer-aided position only): a second, independent position source
+	 * (Basalt VIO) used only to judge the SLAM steps, never as a position itself. At each SLAM update the SLAM step,
+	 * the referee's step and the IMU-propagated step over the same interval are compared; a SLAM step that differs
+	 * from the referee's by more than ref_jump_m (+ ref_jump_per_rad_s * turn rate) while the referee's agrees with
+	 * the IMU is a SLAM jump: the referee's step is used instead and the difference becomes an offset on SLAM that
+	 * cancels when SLAM comes back, or fades with ref_offset_tau_s. SLAM updates are applied at once; the verdict comes
+	 * when the referee pose of that time arrives (Basalt: ~7 ms later, before the next SLAM pose), and a jump's
+	 * correction is then undone. Verdicts not possible within ref_wait_ns are dropped. ref_jump_m 0: off.
+	 */
+	float ref_jump_m;
+	float ref_jump_per_rad_s;
+	float ref_offset_tau_s;
+	time_duration_ns ref_wait_ns;
+	/*!
+	 * Referee rule. true (default): the IMU decides - a SLAM step is a jump only if it differs from the IMU step by
+	 * more than the threshold while the referee's step is within half of it, and the IMU step replaces it (the
+	 * referee only confirms, so its own step errors don't build up in the offset). false: the earlier rule (SLAM vs
+	 * referee step, referee within the threshold of the IMU, referee step replaces), which made false catches and
+	 * drifted from SLAM by up to cm in the 19:12 replay.
+	 */
+	bool ref_imu_decides;
 };
 
 //! What one SLAM update did, for logging/tuning.
@@ -107,6 +129,10 @@ struct psvr2_pose_filter_update
 	bool position_skipped;
 	//! Turning speed around the SLAM pose's timestamp (rad/s, max over pos_rate_window_ns).
 	float rate_rad_s;
+	//! Referee: SLAM step minus referee step (m), referee step minus IMU step (m), and the SLAM step was replaced.
+	float ref_disagree_m;
+	float ref_vs_imu_m;
+	bool ref_replaced;
 };
 
 struct psvr2_pose_filter
@@ -156,6 +182,31 @@ struct psvr2_pose_filter
 	struct xrt_vec3 gravity;
 	struct xrt_vec3 pending_correction;
 	timepoint_ns last_slam_pos_ts;
+
+	//! Referee: recent referee pivot positions, SLAM poses waiting for them, and the step-comparison state.
+	struct
+	{
+		timepoint_ns ts;
+		struct xrt_vec3 pivot;
+	} ref[64];
+	uint32_t ref_next;
+	uint32_t ref_count;
+	//! SLAM updates already applied, waiting for the referee's verdict: what each did, so a jump can be undone.
+	struct
+	{
+		timepoint_ns ts;
+		struct xrt_vec3 slam;  //!< raw SLAM pivot
+		struct xrt_vec3 at_ts; //!< IMU history position at ts when applied
+		float alpha, beta, dt; //!< the correction gains used (0: none applied)
+		float rate;
+	} pend[8];
+	uint32_t pend_count;
+	bool have_ref_prev;
+	timepoint_ns ref_prev_ts;
+	struct xrt_vec3 ref_prev_slam;
+	struct xrt_vec3 ref_prev_imu;
+	struct xrt_vec3 ref_offset;
+	uint32_t ref_replacements;
 	//! Recent pivot positions at IMU rate, to compare against SLAM at its own timestamp.
 	struct
 	{
@@ -185,6 +236,13 @@ psvr2_pose_filter_push_gyro(struct psvr2_pose_filter *f, timepoint_ns ts, const 
  */
 void
 psvr2_pose_filter_push_accel(struct psvr2_pose_filter *f, timepoint_ns ts, const struct xrt_vec3 *accel);
+
+/*!
+ * Feed a referee pose (an independent tracker, e.g. Basalt VIO, in the SLAM world frame up to a slowly varying offset)
+ * for the time @p ts. Only its steps are used, to judge the SLAM steps (params.ref_jump_m).
+ */
+void
+psvr2_pose_filter_push_ref(struct psvr2_pose_filter *f, timepoint_ns ts, const struct xrt_pose *pose);
 
 //! Push a SLAM pose taken at @p ts. @p out_update may be NULL.
 void
