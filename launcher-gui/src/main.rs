@@ -1,6 +1,6 @@
 // Copyright 2026, Mehrab Kooner
 // SPDX-License-Identifier: BSL-1.0
-//! PS VR2 Monado launcher: shows whether the headset and the Sense controllers are connected, starts and stops
+//! PSVR2-DriverKit: shows whether the headset and the Sense controllers are connected, starts and stops
 //! SteamVR with our Monado plugin, monado-service, and any OpenXR app on monado-service, shows the environment an app
 //! needs to use Monado, and keeps the driver settings we use (with their defaults) switchable.
 
@@ -138,11 +138,17 @@ fn config_path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));
-    base.join("psvr2-monado-launcher").join("settings.json")
+    base.join("PSVR2-DriverKit").join("settings.json")
+}
+
+/// Where the settings were kept before the app was renamed to PSVR2-DriverKit (read once if the new file is missing).
+fn old_config_path() -> PathBuf {
+    config_path().parent().and_then(|p| p.parent()).unwrap_or(Path::new(".")).join("psvr2-monado-launcher").join("settings.json")
 }
 
 fn load_config() -> Config {
     let mut cfg: Config = fs::read_to_string(config_path())
+        .or_else(|_| fs::read_to_string(old_config_path()))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
@@ -606,12 +612,53 @@ impl eframe::App for Launcher {
     }
 }
 
+/// The headset refresh rates the PS VR2 panel supports (PSVR2_REFRESH_HZ values) and their labels.
+const REFRESH_RATES: [(&str, &str); 2] = [("89.91", "90 Hz"), ("119.88", "120 Hz")];
+
 impl Launcher {
+    /// Headset refresh rate (PSVR2_REFRESH_HZ, the same setting as on the Settings tab): used by the next SteamVR,
+    /// monado-service or app start; SteamVR and Monado pick the matching display mode.
+    fn refresh_picker(&mut self, ui: &mut egui::Ui) {
+        let Some(i) = self.cfg.settings.iter().position(|s| s.key == "PSVR2_REFRESH_HZ") else {
+            return;
+        };
+        let current = match &self.cfg.settings[i].kind {
+            Kind::Value { value } if self.cfg.settings[i].enabled => value.clone(),
+            _ => "89.91".to_string(),
+        };
+        let label = REFRESH_RATES
+            .iter()
+            .find(|(v, _)| *v == current)
+            .map(|(_, l)| l.to_string())
+            .unwrap_or_else(|| format!("{current} Hz (custom)"));
+        let mut picked = current.clone();
+        ui.horizontal(|ui| {
+            ui.label("Headset refresh rate:");
+            egui::ComboBox::from_id_salt("refresh_rate")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    for (v, l) in REFRESH_RATES {
+                        ui.selectable_value(&mut picked, v.to_string(), l);
+                    }
+                });
+        })
+        .response
+        .on_hover_text("Used the next time SteamVR, the Monado service or an app is started.");
+        if picked != current {
+            self.cfg.settings[i].kind = Kind::Value { value: picked };
+            self.cfg.settings[i].enabled = true;
+            if let Err(e) = save_config(&self.cfg) {
+                eprintln!("can't save the settings: {e}");
+            }
+        }
+    }
+
     fn launcher_tab(&mut self, ui: &mut egui::Ui, st: &Status) {
         ui.heading("Devices");
         dot(ui, Some(st.headset), "PS VR2 headset (USB)");
         dot(ui, st.left, "Left Sense controller");
         dot(ui, st.right, "Right Sense controller");
+        self.refresh_picker(ui);
         ui.separator();
 
         ui.heading("SteamVR with Monado");
@@ -771,8 +818,8 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 720.0]).with_title("PS VR2 Monado launcher"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 720.0]).with_title("PSVR2-DriverKit"),
         ..Default::default()
     };
-    eframe::run_native("PS VR2 Monado launcher", options, Box::new(|cc| Ok(Box::new(Launcher::new(cc)))))
+    eframe::run_native("PSVR2-DriverKit", options, Box::new(|cc| Ok(Box::new(Launcher::new(cc)))))
 }

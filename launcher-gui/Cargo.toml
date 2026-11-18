@@ -1,9 +1,13 @@
 [package]
-name = "psvr2-monado-launcher"
+name = "psvr2-driverkit"
 version = "0.1.0"
 edition = "2021"
-description = "Launcher for the PS VR2 Monado build: SteamVR, monado-service, OpenXR apps, settings"
+description = "PSVR2-DriverKit: launcher for the PS VR2 Monado build: SteamVR, monado-service, OpenXR apps, settings"
 license = "BSL-1.0"
+
+[[bin]]
+name = "PSVR2-DriverKit"
+path = "src/main.rs"
 
 [dependencies]
 eframe = "0.34"
