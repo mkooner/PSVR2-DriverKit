@@ -40,6 +40,8 @@ extern "C" {
 
 #include "xrt/xrt_space.h"
 #include "xrt/xrt_system.h"
+#include "xrt/xrt_session.h"
+#include "xrt/xrt_compositor.h"
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_instance.h"
@@ -177,6 +179,17 @@ DEBUG_GET_ONCE_OPTION(ovrd_pose_log, "OVRD_POSE_LOG", NULL)
  */
 DEBUG_GET_ONCE_BOOL_OPTION(ovrd_direct_mode, "OVRD_DIRECT_MODE", false)
 DEBUG_GET_ONCE_OPTION(ovrd_direct_mode_log, "OVRD_DIRECT_MODE_LOG", NULL)
+//! In direct mode, wait for SteamVR's writes into each frame's images before Monado reads them (OvrdDirectMode::gpu_sync).
+DEBUG_GET_ONCE_BOOL_OPTION(ovrd_direct_mode_gpu_sync, "OVRD_DIRECT_MODE_GPU_SYNC", true)
+/*!
+ * In direct mode, hand SteamVR the headset pose Monado's tracking predicts for the display time of the frame being
+ * rendered (Monado's compositor gives it), with zero velocity so SteamVR doesn't extrapolate: the game then draws with
+ * the same prediction as on the OpenXR path, instead of SteamVR's straight-line one (ALVR also sends a pre-predicted
+ * head pose with zero velocity).
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(ovrd_direct_mode_pose, "OVRD_DIRECT_MODE_POSE", true)
+//! Direct mode diagnostics: capture one frame's layer images this many seconds into the game (OvrdDirectMode).
+DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_direct_mode_capture_s, "OVRD_DIRECT_MODE_CAPTURE", 0.0f)
 
 //! OVRD_LOG_EVENTS=1: log SteamVR events the plugin doesn't handle (off: SteamVR's frame loop doesn't write them).
 DEBUG_GET_ONCE_BOOL_OPTION(ovrd_log_events, "OVRD_LOG_EVENTS", false)
@@ -288,6 +301,17 @@ public:
 		if (container != vr::k_ulInvalidPropertyContainer && m_container_count < ARRAY_SIZE(m_containers)) {
 			m_containers[m_container_count++] = container;
 		}
+	}
+
+	//! The current room transform (SteamVR's world from our driver space).
+	ovrd_room_transform
+	transform()
+	{
+		if (!m_enabled) {
+			return ovrd_room_transform_identity();
+		}
+		std::lock_guard<std::mutex> lock(m_mutex);
+		return m_transform;
 	}
 
 	//! Put the room transform in a pose (all devices get the same one).
@@ -1925,7 +1949,11 @@ private:
 	OvrdPoseLog m_poseLog;          //!< OVRD_POSE_LOG
 	bool m_directModeOn = false;    //!< OVRD_DIRECT_MODE
 	OvrdDirectMode m_directMode;
-	bool m_lastPosTracked = false; //!< position tracked flag of the last GetPose (for the pose log)
+public:
+	//! Monado's compositor for direct mode (created by the server driver), before Activate.
+	struct xrt_compositor_native *m_directXcn = NULL;
+private:
+	std::atomic<bool> m_lastPosTracked{false}; //!< position tracked flag of the last GetPose (pose log; 2 threads)
 	int64_t m_eyeCheckNs = 0;      //!< last IPD check (pose thread)
 
 	// clang-format on
@@ -2000,12 +2028,23 @@ CDeviceDriver_Monado::PoseUpdateThreadFunction()
 	bool announced = false;
 	int64_t start_ns = (int64_t)os_monotonic_get_ns();
 	int64_t last_clock_log_ns = 0;
-	ovrd_log("Headset pose mode: %s%s\n", mode,
+	ovrd_log("Headset pose mode: %s%s%s\n", mode,
+	         m_directModeOn && m_directMode.hasOutput() && debug_get_bool_option_ovrd_direct_mode_pose()
+	             ? " (until direct mode's first frame)"
+	             : "",
 	         display_mode    ? " (predicted to display time, no velocities)"
 	         : measured_mode ? " (pose at its measurement time, negative poseTimeOffset, velocities)"
 	         : novel_mode    ? " (now, no velocities)"
 	                         : " (now + velocities, SteamVR predicts)");
 
+	const bool direct_pose = m_directModeOn && m_directMode.hasOutput() && debug_get_bool_option_ovrd_direct_mode_pose();
+	if (direct_pose) {
+		ovrd_log("Headset pose: Monado's prediction for each frame's display time (direct mode, zero velocity); "
+		         "this replaces OVRD_POSE_MODE\n");
+		if (strcmp(mode, "steamvr") != 0) {
+			ovrd_log("OVRD_POSE_MODE=%s is ignored in direct mode (OVRD_DIRECT_MODE_POSE=0 to use it)\n", mode);
+		}
+	}
 	while (m_poseUpdating) {
 		//! @todo figure out the best pose update rate
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -2031,6 +2070,14 @@ CDeviceDriver_Monado::PoseUpdateThreadFunction()
 					announced = true;
 					last_clock_log_ns = t0;
 				}
+			}
+		}
+		// Direct mode with Monado's compositor: the pose for the display time of the frame being rendered.
+		if (direct_pose) {
+			const int64_t at = m_directMode.displayTarget();
+			if (at > t0 - 30 * (int64_t)U_TIME_1MS_IN_NS && at < t0 + 100 * (int64_t)U_TIME_1MS_IN_NS) {
+				target_ns = at;
+				use_display = true;
 			}
 		}
 		vr::DriverPose_t pose;
@@ -2203,6 +2250,44 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 		                                    true);
 		vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer,
 		                                    vr::Prop_DriverDirectModeSendsVsyncEvents_Bool, true);
+		// SteamVR's world -> the device's space: undo the room transform, then the tracking origin offset (the
+		// reverse of GetPoseAt).
+		struct xrt_device *xdev = m_xdev;
+		m_directMode.world_to_device = [xdev](const struct xrt_pose &world) {
+			ovrd_room_transform T = g_room.transform();
+			struct xrt_pose room = {T.rotation, T.translation};
+			struct xrt_pose room_inv, offset_inv, driver, device;
+			math_pose_invert(&room, &room_inv);
+			math_pose_transform(&room_inv, &world, &driver);
+			math_pose_invert(&xdev->tracking_origin->initial_offset, &offset_inv);
+			math_pose_transform(&offset_inv, &driver, &device);
+			return device;
+		};
+		m_directMode.check_head = m_xdev;
+		if (debug_get_bool_option_ovrd_direct_mode_pose()) {
+			// The pose for the new frame's display time, submitted before SteamVR wakes the game (see on_frame_start).
+			m_directMode.on_frame_start = [this](int64_t display_ns) {
+				if (m_trackedDeviceIndex == vr::k_unTrackedDeviceIndexInvalid) {
+					return;
+				}
+				vr::DriverPose_t pose = GetPoseAt(display_ns, true, 0.0);
+				vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_trackedDeviceIndex, pose,
+				                                                   sizeof(vr::DriverPose_t));
+			};
+		}
+		m_directMode.gpu_sync = debug_get_bool_option_ovrd_direct_mode_gpu_sync();
+		m_directMode.capture_after_s = debug_get_float_option_ovrd_direct_mode_capture_s();
+		if (m_directXcn != NULL) {
+			OvrdDirectMode::Output out;
+			out.xcn = m_directXcn;
+			out.head = m_xdev;
+			// SteamVR renders each eye with GetProjectionRaw's frustum and our eye-to-head poses.
+			out.fov[0] = m_xdev->hmd->distortion.fov[0];
+			out.fov[1] = m_xdev->hmd->distortion.fov[1];
+			out.eye_in_head[0] = m_view_pose[0];
+			out.eye_in_head[1] = m_view_pose[1];
+			m_directMode.setOutput(out);
+		}
 		m_directMode.start(m_flDisplayFrequency, debug_get_option_ovrd_direct_mode_log());
 	}
 	// clang-format off
@@ -2391,6 +2476,9 @@ CDeviceDriver_Monado::UpdateEyeToHead(bool force)
 	}
 	m_view_pose[0] = view_pose[0];
 	m_view_pose[1] = view_pose[1];
+	if (m_directModeOn) {
+		m_directMode.setEyes(m_view_pose);
+	}
 	vr::HmdMatrix34_t left, right;
 	create_translation_rotation_matrix(&m_view_pose[0], &left);
 	create_translation_rotation_matrix(&m_view_pose[1], &right);
@@ -2689,6 +2777,12 @@ private:
 	struct xrt_system *m_xsys = NULL;
 	struct xrt_system_devices *m_xsysd = NULL;
 	struct xrt_space_overseer *m_xso = NULL;
+	// Direct mode (OVRD_DIRECT_MODE): Monado's compositor inside vrserver, SteamVR's frames are its client.
+	struct xrt_system_compositor *m_xsysc = NULL;
+	struct xrt_session *m_xs = NULL;
+	struct xrt_compositor_native *m_xcn = NULL;
+	bool CreateDirectModeCompositor();
+	void DestroyDirectModeCompositor();
 	struct xrt_device *m_xhmd = NULL;
 
 	CDeviceDriver_Monado *m_MonadoDeviceDriver = NULL;
@@ -2715,13 +2809,33 @@ CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 	// Before any device is added, so SteamVR reads the prepared chaperone file.
 	g_room.init(debug_get_float_option_ovrd_play_area_size());
 
+	/*
+	 * PS VR2 head position aided by the 2 kHz accelerometer by default under SteamVR (the OpenXR path keeps the
+	 * driver's own default): replaying the 2026-11-18 09:14, 10:01 and 10:11 recordings through the real pose filter
+	 * at SteamVR's 11 ms prediction, position jitter while turning p90 0.13-0.15 -> 0.08-0.10 mm, fast turns
+	 * 0.29-0.60 -> 0.18-0.44 mm, prediction error p90 0.58-0.85 -> 0.11-0.15 mm, still unchanged; the user reported
+	 * it "feels better" on 2026-11-17. PSVR2_ACCEL_FUSION=0 turns it off.
+	 */
+	setenv("PSVR2_ACCEL_FUSION", "1", 0);
+
 	xret = xrt_instance_create(NULL, &m_xinst);
 	if (xret != XRT_SUCCESS) {
 		ovrd_log("Failed to create instance\n");
 		return vr::VRInitError_Init_HmdNotFound;
 	}
 
-	xret = xrt_instance_create_system(m_xinst, &m_xsys, &m_xsysd, &m_xso, NULL);
+	// Direct mode: with Monado's system compositor (it takes the headset's display), else devices only.
+	xret = xrt_instance_create_system(m_xinst, &m_xsys, &m_xsysd, &m_xso,
+	                                  debug_get_bool_option_ovrd_direct_mode() ? &m_xsysc : NULL);
+	if (xret < 0 && m_xsysc == NULL && debug_get_bool_option_ovrd_direct_mode()) {
+		ovrd_log("Direct mode: no Monado compositor (%d), the frames are only logged\n", (int)xret);
+		if (m_xsys != NULL) {
+			xrt_space_overseer_destroy(&m_xso);
+			xrt_system_devices_destroy(&m_xsysd);
+			xrt_system_destroy(&m_xsys);
+		}
+		xret = xrt_instance_create_system(m_xinst, &m_xsys, &m_xsysd, &m_xso, NULL);
+	}
 	if (xret < 0) {
 		ovrd_log("Failed to create system devices\n");
 		xrt_instance_destroy(&m_xinst);
@@ -2741,6 +2855,9 @@ CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 
 	ovrd_log("Selected HMD %s\n", m_xhmd->str);
 	m_MonadoDeviceDriver = new CDeviceDriver_Monado(m_xinst, m_xhmd);
+	if (m_xsysc != NULL && CreateDirectModeCompositor()) {
+		m_MonadoDeviceDriver->m_directXcn = m_xcn;
+	}
 	//! @todo provide a serial number
 	vr::VRServerDriverHost()->TrackedDeviceAdded(m_xhmd->str, vr::TrackedDeviceClass_HMD, m_MonadoDeviceDriver);
 
@@ -2772,6 +2889,45 @@ CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 	return vr::VRInitError_None;
 }
 
+bool
+CServerDriver_Monado::CreateDirectModeCompositor()
+{
+	// As an in-process OpenXR session does (oxr_session_create_native_compositor + xrBeginSession).
+	struct xrt_session_info xsi = {};
+	xrt_result_t xret = xrt_system_create_session(m_xsys, &xsi, &m_xs, &m_xcn);
+	if (xret != XRT_SUCCESS || m_xcn == NULL) {
+		ovrd_log("Direct mode: can't create a session on Monado's compositor (%d)\n", (int)xret);
+		xrt_session_destroy(&m_xs);
+		return false;
+	}
+	if (m_xsysc->xmcc != NULL) {
+		xrt_syscomp_set_state(m_xsysc, &m_xcn->base, true, true, os_monotonic_get_ns());
+		xrt_syscomp_set_z_order(m_xsysc, &m_xcn->base, 0);
+	}
+	struct xrt_begin_session_info begin = {};
+	begin.view_type = XRT_VIEW_TYPE_STEREO;
+	xret = xrt_comp_begin_session(&m_xcn->base, &begin);
+	if (xret != XRT_SUCCESS) {
+		ovrd_log("Direct mode: Monado's compositor won't begin the session (%d)\n", (int)xret);
+		xrt_comp_native_destroy(&m_xcn);
+		xrt_session_destroy(&m_xs);
+		return false;
+	}
+	ovrd_log("Direct mode: Monado's compositor is running, SteamVR's frames go to it\n");
+	return true;
+}
+
+void
+CServerDriver_Monado::DestroyDirectModeCompositor()
+{
+	if (m_xcn != NULL) {
+		xrt_comp_end_session(&m_xcn->base);
+		xrt_comp_native_destroy(&m_xcn);
+	}
+	xrt_session_destroy(&m_xs);
+	xrt_syscomp_destroy(&m_xsysc);
+}
+
 void
 CServerDriver_Monado::Cleanup()
 {
@@ -2779,6 +2935,7 @@ CServerDriver_Monado::Cleanup()
 		delete m_MonadoDeviceDriver;
 		m_MonadoDeviceDriver = NULL;
 	}
+	DestroyDirectModeCompositor();
 
 	xrt_space_overseer_destroy(&m_xso);
 	xrt_system_devices_destroy(&m_xsysd);

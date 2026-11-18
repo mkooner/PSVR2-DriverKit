@@ -104,6 +104,21 @@ if(XRT_FEATURE_STEAMVR_PLUGIN)
 	target_sources(tests_ovrd_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_drv/ovrd_room.cpp)
 	target_include_directories(tests_ovrd_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_drv)
 	target_link_libraries(tests_ovrd_room PRIVATE aux_math xrt-interfaces)
+
+	# Offline check of the plugin's driver direct mode with Monado's compositor; needs a GPU, so not a ctest.
+	if(TARGET target_instance AND XRT_HAVE_VULKAN)
+		add_executable(ovrd_direct_mode_harness ovrd_direct_mode_harness.cpp)
+		target_include_directories(
+			ovrd_direct_mode_harness PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_drv
+			)
+		target_link_libraries(
+			ovrd_direct_mode_harness PRIVATE target_instance target_lists st_prober aux_math aux_os xrt-interfaces
+							 xrt-external-openvr Vulkan::Vulkan
+			)
+		if(TARGET drv_euroc)
+			target_link_libraries(ovrd_direct_mode_harness PRIVATE drv_euroc)
+		endif()
+	endif()
 endif()
 
 if(XRT_BUILD_DRIVER_HANDTRACKING)

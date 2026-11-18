@@ -13,6 +13,8 @@ add_library(
 	comp_documentation.h
 	comp_main_interface.h
 	comp_renderer.c
+	comp_frame_log.c
+	comp_frame_log.h
 	comp_renderer.h
 	comp_settings.c
 	comp_settings.h

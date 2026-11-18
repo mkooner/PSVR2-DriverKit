@@ -100,12 +100,16 @@ t_instance_create_system(struct xrt_instance *xinst,
 		return xret;
 	}
 
-	// Early out if we only want devices.
+	struct xrt_device *head = xsysd->static_roles.head;
+
+	// Early out if we only want devices (as target_instance_no_comp, which also fills in the properties).
 	if (out_xsysc == NULL) {
+		if (head != NULL) {
+			b_system_fill_properties(bsys, head->str);
+		}
 		goto out;
 	}
 
-	struct xrt_device *head = xsysd->static_roles.head;
 	b_system_fill_properties(bsys, head->str);
 
 	bool use_null = debug_get_bool_option_use_null();

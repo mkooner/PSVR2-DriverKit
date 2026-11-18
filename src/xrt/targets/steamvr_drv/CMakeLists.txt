@@ -30,8 +30,15 @@ target_link_libraries(
 		st_ovrd
 		st_prober
 		target_lists
-		target_instance_no_comp
 	)
+
+# With Monado's compositor when it is built: driver direct mode (OVRD_DIRECT_MODE=1) runs it inside vrserver and
+# shows SteamVR's frames with it. Without the option no compositor is created (devices only, as before).
+if(TARGET target_instance)
+	target_link_libraries(driver_monado PRIVATE target_instance)
+else()
+	target_link_libraries(driver_monado PRIVATE target_instance_no_comp)
+endif()
 
 # meta data that the steamvr plugin needs in the base directory of the steamvr plugin
 file(COPY driver.vrdrivermanifest DESTINATION ${PROJECT_BINARY_DIR}/steamvr-monado)

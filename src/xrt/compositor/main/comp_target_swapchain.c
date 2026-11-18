@@ -13,6 +13,7 @@
 
 #include "util/u_misc.h"
 #include "util/u_pacing.h"
+#include "comp_frame_log.h"
 #include "util/u_debug.h"
 #include "util/u_pretty_print.h"
 #include "util/u_thread_priority.h"
@@ -628,6 +629,7 @@ run_vblank_event_thread(void *ptr)
 
 		if (valid) {
 			cts->vblank.last_vblank_ns = when_ns;
+			comp_frame_log_vblank(when_ns);
 		}
 	}
 
@@ -1010,6 +1012,7 @@ comp_target_swapchain_present(struct comp_target *ct,
 	struct vk_bundle *vk = get_vk(cts);
 
 	assert(present_queue != NULL);
+	comp_frame_log_present(cts->current_frame_id, desired_present_time_ns);
 	assert(cts->current_frame_id > 0);
 	assert(cts->current_frame_id <= UINT32_MAX);
 

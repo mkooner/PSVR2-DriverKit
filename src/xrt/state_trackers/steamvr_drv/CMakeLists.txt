@@ -10,6 +10,8 @@ target_include_directories(st_ovrd INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(
 	st_ovrd PRIVATE xrt-interfaces xrt-external-openvr aux_math ovrd_generated_bindings
 	)
+# Driver direct mode waits on SteamVR's per-texture timeline semaphores with a small Vulkan device.
+target_link_libraries(st_ovrd PRIVATE Vulkan::Vulkan)
 
 # The room calibration measures the floor with a resting Sense controller's LED outline.
 if(XRT_BUILD_DRIVER_PSSENSE)

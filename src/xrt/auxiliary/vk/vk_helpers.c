@@ -569,6 +569,12 @@ vk_create_image_from_native(struct vk_bundle *vk,
 		 */
 		VK_ERROR(vk, "size must be greater than 0");
 
+	} else if (image_native->size == 0) {
+		/*
+		 * Size unknown (xrt_image_native::size: "set to 0 if unknown"), e.g. SteamVR's shared images in the
+		 * plugin's driver direct mode, whose opaque fds don't report one: the exporter created the image with
+		 * the same parameters, so allocate what this image needs (as ALVR imports them).
+		 */
 	} else if (requirements.size > image_native->size) {
 		VK_ERROR(vk, "size mismatch, exported %" PRIu64 " but requires %" PRIu64, image_native->size,
 		         requirements.size);

@@ -18,6 +18,7 @@
 #include "xrt/xrt_results.h"
 
 #include "os/os_time.h"
+#include "comp_frame_log.h"
 
 #include "math/m_api.h"
 #include "math/m_matrix_2x2.h"
@@ -362,6 +363,14 @@ calc_pose_data(struct comp_renderer *r,
 		u_pp_xrt_result(dg, xret);
 		U_LOG_E("xrt_device_get_view_poses failed: %s", sink.buffer);
 		return;
+	}
+
+	{
+		// Diagnostics (XRT_COMPOSITOR_FRAME_LOG): this displayed frame's re-warp target and the client frame it uses.
+		const struct comp_layer *layers = r->c->base.layer_accum.layers;
+		const uint32_t layer_count = r->c->base.layer_accum.layer_count;
+		comp_frame_log_render(r->c->frame.rendering.id, begin_timestamp_ns, layer_count,
+		                      layer_count > 0 ? layers[0].data.timestamp : 0, &head_relation[0].pose);
 	}
 
 	// Pose at end of scanout
