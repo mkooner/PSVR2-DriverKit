@@ -69,6 +69,29 @@ struct psvr2_pose_filter_params
 	 * output stays continuous when a SLAM position arrives; the correction is fully in after this time.
 	 */
 	time_duration_ns pos_blend_ns;
+	/*!
+	 * Accelerometer-aided position (psvr2_pose_filter_push_accel): between SLAM poses, velocity follows the 2 kHz
+	 * accelerometer (gravity and bias removed by a slow average, accel_gravity_tau_s) and SLAM only corrects drift,
+	 * with alpha-beta gains from pos_tau_s. Off: the velocity comes from SLAM positions alone and steps at the SLAM
+	 * rate, which SteamVR's prediction turns into position wobble while the head moves.
+	 */
+	bool accel_enable;
+	float accel_gravity_tau_s;
+	/*!
+	 * Gyro bias estimation: the part of the SLAM orientation error that keeps pointing the same way is a gyro offset;
+	 * it is learned with this time constant (seconds, the integral term of a Mahony-style complementary filter) and
+	 * subtracted from every gyro sample. 0: off, the raw gyro is integrated and SLAM corrections undo its drift in
+	 * steps at the SLAM rate.
+	 */
+	float gyro_bias_tau_s;
+	/*!
+	 * Accelerometer-aided position: don't update the gravity/bias average while turning faster than this (rad/s, 0:
+	 * always update). Fast head motion disturbs the average: in replay of three 2026-11-17 recordings pausing above
+	 * 30 deg/s cut the 250 ms prediction drift in fast turns from 4.8 to 2.7 mm, slow motion unchanged (0.70 mm).
+	 */
+	float accel_gravity_pause_rad_s;
+	//! Turning speed reported with each SLAM update: max gyro rate over this long before the pose (diagnostics).
+	time_duration_ns pos_rate_window_ns;
 };
 
 //! What one SLAM update did, for logging/tuning.
@@ -82,6 +105,8 @@ struct psvr2_pose_filter_update
 	float pos_residual_m;
 	//! A lone position jump was skipped, waiting for confirmation (pos_confirm_jumps).
 	bool position_skipped;
+	//! Turning speed around the SLAM pose's timestamp (rad/s, max over pos_rate_window_ns).
+	float rate_rad_s;
 };
 
 struct psvr2_pose_filter
@@ -106,12 +131,16 @@ struct psvr2_pose_filter
 	timepoint_ns orient_ts;
 	struct xrt_vec3 last_gyro;
 	timepoint_ns last_slam_ts;
+	//! Estimated gyro bias (rad/s, IMU frame), subtracted from each sample (gyro_bias_tau_s).
+	struct xrt_vec3 gyro_bias;
 
 	//! Recent integrated orientations, to compare against SLAM at its own timestamp.
 	struct
 	{
 		timepoint_ns ts;
 		struct xrt_quat orientation;
+		//! Gyro rate magnitude (rad/s) of the sample that brought this state, for the SLAM noise model.
+		float rate;
 	} history[PSVR2_POSE_FILTER_HISTORY];
 	uint32_t history_next;
 	uint32_t history_count;
@@ -120,6 +149,21 @@ struct psvr2_pose_filter
 	struct xrt_vec3 position;
 	struct xrt_vec3 velocity;
 	timepoint_ns pos_ts;
+
+	//! Accelerometer-aided position (accel_enable): the IMU point's velocity, gravity estimate, pending correction.
+	bool have_accel;
+	struct xrt_vec3 v_imu;
+	struct xrt_vec3 gravity;
+	struct xrt_vec3 pending_correction;
+	timepoint_ns last_slam_pos_ts;
+	//! Recent pivot positions at IMU rate, to compare against SLAM at its own timestamp.
+	struct
+	{
+		timepoint_ns ts;
+		struct xrt_vec3 position;
+	} pos_history[PSVR2_POSE_FILTER_HISTORY];
+	uint32_t pos_history_next;
+	uint32_t pos_history_count;
 };
 
 void
@@ -134,6 +178,13 @@ psvr2_pose_filter_reset(struct psvr2_pose_filter *f);
 //! Push a gyro sample (body frame, rad/s), timestamps in one consistent clock.
 void
 psvr2_pose_filter_push_gyro(struct psvr2_pose_filter *f, timepoint_ns ts, const struct xrt_vec3 *gyro);
+
+/*!
+ * Feed the accelerometer sample (m/s^2, IMU/body frame, the same frame as the gyro) for the gyro sample just pushed
+ * with the same @p ts. Only used with params.accel_enable.
+ */
+void
+psvr2_pose_filter_push_accel(struct psvr2_pose_filter *f, timepoint_ns ts, const struct xrt_vec3 *accel);
 
 //! Push a SLAM pose taken at @p ts. @p out_update may be NULL.
 void

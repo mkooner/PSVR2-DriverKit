@@ -70,12 +70,11 @@
  */
 #define COUNT_EDGE_RESOLUTION_NS (U_TIME_1US_IN_NS * 100)
 /*!
- * Where the window's edges can be: the blink plus the camera's exposure, which the PS VR2 doesn't report (it sends a
+ * Where the window's right edge can be: the blink plus the camera's exposure, which the PS VR2 doesn't report (it sends a
  * fixed setting) and which moved 606-1000us between and within sessions. The searches used to assume the setting
  * (0.9-1.1x of blink + 840us): a 2106us window sat on that limit, and in simulation an exposure of 1150us never
  * finished (psvr2-test/ledsync/calib_sim).
  */
-#define COUNT_MIN_EXPOSURE_NS (U_TIME_1US_IN_NS * 300)
 #define COUNT_MAX_EXPOSURE_NS (U_TIME_1US_IN_NS * 1400)
 /*!
  * Edge confirmation distance. PSVR2Toolkit uses 50us, but on hardware the window drifted more than that between the
@@ -651,7 +650,15 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 			 * on hardware read as +2340us in 3.5s (662ppm, against a real few ppm) and pushed the trim to its
 			 * limit, walking that controller's LEDs out of the window. Drift comes only from the hold.
 			 */
-			cc->lower_ns = cc->left_ns + refinement->current_blink_duration_ns + COUNT_MIN_EXPOSURE_NS;
+			/*
+			 * From inside any real window: it is the blink plus the exposure, so 3/4 of the blink after the left
+			 * edge is always still lit. Starting at blink + 300us (as before) missed short exposures: with Sony's
+			 * LED detector settings the window measured 1868us (exposure ~370us), the search began 70us before
+			 * its right edge where the LEDs are barely exposed, and the left controller's calibration failed for
+			 * the whole 15:38 session ("right edge search never saw the LEDs"; calib_sim at 368us: 90/100 never
+			 * finished, now 0).
+			 */
+			cc->lower_ns = cc->left_ns + (refinement->current_blink_duration_ns * 3) / 4;
 			cc->upper_ns = cc->left_ns + refinement->current_blink_duration_ns + COUNT_MAX_EXPOSURE_NS;
 			cc->edge_seen_on = false;
 			cc->state = COUNT_CALIB_RIGHT_EDGE;
@@ -683,7 +690,7 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 			 */
 			bool edges_seen = cc->left_seen_off && cc->edge_seen_off && cc->edge_seen_on;
 			cc->pass_plausible =
-			    edges_seen && width_ns > refinement->current_blink_duration_ns + COUNT_MIN_EXPOSURE_NS &&
+			    edges_seen && width_ns > (refinement->current_blink_duration_ns * 4) / 5 &&
 			    width_ns < refinement->current_blink_duration_ns + COUNT_MAX_EXPOSURE_NS;
 			if (!edges_seen) {
 				count_calib_research(refinement, !cc->left_seen_off ? "left edge not seen"

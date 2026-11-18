@@ -101,6 +101,12 @@ DEBUG_GET_ONCE_BOOL_OPTION(ovrd_room, "OVRD_ROOM", true)
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_vsync_to_photons_s, "OVRD_VSYNC_TO_PHOTONS_S", -1.0f)
 
+/*!
+ * Seconds from photons to the next vblank reported to SteamVR (Prop_SecondsFromPhotonsToVblank_Float), part of how
+ * SteamVR times frames against the display. Negative: the default for the headset, see below; 0: not reported.
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(ovrd_photons_to_vblank_s, "OVRD_PHOTONS_TO_VBLANK_S", -1.0f)
+
 #define MODELNUM_LEN (XRT_DEVICE_NAME_LEN + 9) // "[Monado] "
 
 
@@ -1751,6 +1757,17 @@ public:
 		}
 		m_flSecondsFromVsyncToPhotons = vsync_to_photons;
 
+		/*
+		 * PS VR2: Sony's driver reports 0.0103 s ("playstation_vr2: VsyncToPhotons: 0.001360, PhotonsToVblank:
+		 * 0.010300" in vrserver.txt, 2026-11-17); we didn't report it at all, the only display timing value where we
+		 * differed while our view shook in slow head motion and Sony's didn't (same SteamVR, GPU, mode, async off).
+		 */
+		float photons_to_vblank = debug_get_float_option_ovrd_photons_to_vblank_s();
+		if (photons_to_vblank < 0.0f) {
+			photons_to_vblank = m_xdev->name == XRT_DEVICE_PSVR2 ? 0.0103f : 0.0f;
+		}
+		m_flSecondsFromPhotonsToVblank = photons_to_vblank;
+
 		float ns = (float)m_xdev->hmd->screens->nominal_frame_interval_ns;
 		m_flDisplayFrequency = 1.f / ns * 1000.f * 1000.f * 1000.f;
 		ovrd_log("display frequency from device: %f\n", m_flDisplayFrequency);
@@ -1778,6 +1795,8 @@ public:
 		m_flIPD = actual_ipd;
 
 		ovrd_log("Seconds from Vsync to Photons: %f\n", m_flSecondsFromVsyncToPhotons);
+		ovrd_log("Seconds from Photons to Vblank: %f%s\n", m_flSecondsFromPhotonsToVblank,
+		         m_flSecondsFromPhotonsToVblank > 0.0f ? "" : " (not reported)");
 		ovrd_log("Display Frequency: %f\n", m_flDisplayFrequency);
 		ovrd_log("IPD: %f\n", m_flIPD);
 	};
@@ -1813,6 +1832,7 @@ private:
 	vr::PropertyContainerHandle_t m_ulPropertyContainer = vr::k_ulInvalidPropertyContainer;
 
 	float m_flSecondsFromVsyncToPhotons = -1;
+	float m_flSecondsFromPhotonsToVblank = 0;
 	float m_flDisplayFrequency = -1;
 	float m_flIPD = -1;
 
@@ -1901,6 +1921,10 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 	vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_UserHeadToEyeDepthMeters_Float, 0.f);
 	vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_DisplayFrequency_Float, m_flDisplayFrequency);
 	vr::VRProperties()->SetFloatProperty( m_ulPropertyContainer, vr::Prop_SecondsFromVsyncToPhotons_Float, m_flSecondsFromVsyncToPhotons);
+	if (m_flSecondsFromPhotonsToVblank > 0.0f) {
+		vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_SecondsFromPhotonsToVblank_Float,
+		                                     m_flSecondsFromPhotonsToVblank);
+	}
 
 	// Universe 2 (the saved room) or 3 (this session only), see OvrdRoom; never 0 (invalid) or 1 (Oculus)
 	vr::VRProperties()->SetUint64Property( m_ulPropertyContainer, vr::Prop_CurrentUniverseId_Uint64, g_room.universe());

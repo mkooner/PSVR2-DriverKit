@@ -760,7 +760,8 @@ euroc_player_push_pending_cams(euroc_player *ep)
 			auto &cam = ep->cams[i];
 
 			while (auto next = cam.getNext(ep->playback_ns)) {
-				xrt_frame *frame;
+				// Must start null: euroc_player_load_next_frame takes "null or a valid frame" (wrapL8 references it).
+				xrt_frame *frame = nullptr;
 				euroc_player_load_next_frame(ep, i, frame);
 
 				// Push the frame

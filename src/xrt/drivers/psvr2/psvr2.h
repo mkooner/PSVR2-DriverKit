@@ -18,6 +18,7 @@
  */
 #pragma once
 
+#include "psvr2_imu_time.h"
 #include "tracking/t_constellation.h"
 #include "tracking/t_time_sync.h"
 #include "xrt/xrt_data_source.h"
@@ -339,6 +340,8 @@ struct psvr2_hmd
 	bool ld_config_checked;
 	//! Host time of the first IMU sample, to keep the stream's startup backlog out of the camera clock.
 	timepoint_ns imu_stream_start_ns;
+	//! IMU sample times (two samples per VTS millisecond), see psvr2_imu_time.h.
+	struct psvr2_imu_time imu_time;
 
 	/* Tracking state */
 	struct m_relation_history *slam_relation_history;

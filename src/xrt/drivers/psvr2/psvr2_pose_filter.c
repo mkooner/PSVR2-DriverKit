@@ -34,6 +34,11 @@ psvr2_pose_filter_default_params(struct psvr2_pose_filter_params *out_params)
 	    // it cut position jitter while turning 3.5x (p50 0.108 -> 0.031 mm/frame) for ~15% more error against SLAM;
 	    // 33 ms smoothed 6x for +37%, 50 ms no smoother than 33 (psvr2-test/analysis/jitter).
 	    .pos_blend_ns = U_TIME_1MS_IN_NS * 17,
+	    .accel_enable = false,
+	    .accel_gravity_tau_s = 1.0f,
+	    .gyro_bias_tau_s = 0.0f,
+	    .accel_gravity_pause_rad_s = 0.0f,
+	    .pos_rate_window_ns = U_TIME_1MS_IN_NS * 50,
 	};
 }
 
@@ -80,6 +85,7 @@ integrate_gyro(struct xrt_quat *orientation, const struct xrt_vec3 *gyro, double
 static void
 history_push(struct psvr2_pose_filter *f, timepoint_ns ts, const struct xrt_quat *orientation)
 {
+	f->history[f->history_next].rate = m_vec3_len(f->last_gyro);
 	f->history[f->history_next].ts = ts;
 	f->history[f->history_next].orientation = *orientation;
 	f->history_next = (f->history_next + 1) % PSVR2_POSE_FILTER_HISTORY;
@@ -94,6 +100,31 @@ history_index(const struct psvr2_pose_filter *f, uint32_t age)
 {
 	return (f->history_next + PSVR2_POSE_FILTER_HISTORY - 1 - age) % PSVR2_POSE_FILTER_HISTORY;
 }
+
+//! Highest gyro rate (rad/s) in the pos_rate_window_ns before @p ts (and a few ms after, the SLAM pose's exposure).
+static float
+rate_at(const struct psvr2_pose_filter *f, timepoint_ns ts)
+{
+	float best = m_vec3_len(f->last_gyro);
+	bool any = false;
+	for (uint32_t age = 0; age < f->history_count; age++) {
+		uint32_t idx = history_index(f, age);
+		timepoint_ns t = f->history[idx].ts;
+		if (t > ts + U_TIME_1MS_IN_NS * 5) {
+			continue;
+		}
+		if (t < ts - f->params.pos_rate_window_ns) {
+			break;
+		}
+		if (!any || f->history[idx].rate > best) {
+			best = f->history[idx].rate;
+		}
+		any = true;
+	}
+	return best;
+}
+
+
 
 /*!
  * The integrated orientation at @p ts: interpolated from history, extrapolated with the last gyro sample when newer
@@ -134,8 +165,10 @@ orientation_at(const struct psvr2_pose_filter *f, timepoint_ns ts, struct xrt_qu
 }
 
 void
-psvr2_pose_filter_push_gyro(struct psvr2_pose_filter *f, timepoint_ns ts, const struct xrt_vec3 *gyro)
+psvr2_pose_filter_push_gyro(struct psvr2_pose_filter *f, timepoint_ns ts, const struct xrt_vec3 *gyro_raw)
 {
+	struct xrt_vec3 corrected = m_vec3_sub(*gyro_raw, f->gyro_bias);
+	const struct xrt_vec3 *gyro = &corrected;
 	if (!f->have_orientation) {
 		// Nothing to integrate onto yet, but remember the rate for extrapolation.
 		f->last_gyro = *gyro;
@@ -210,6 +243,29 @@ update_orientation(struct psvr2_pose_filter *f,
 		u->orientation_snapped = true;
 	}
 
+	/*
+	 * Gyro bias (integral term): a gyro offset b makes the integrated orientation run ahead by about b * tau between
+	 * corrections, so the error SLAM sees settles at -R b * tau. Learn b from it slowly; jumps (snaps) and big errors
+	 * are SLAM's, not the gyro's.
+	 */
+	if (f->params.gyro_bias_tau_s > 0.0f && !u->orientation_snapped && dt_ns > 0 && dt_ns < U_TIME_1MS_IN_NS * 100 &&
+	    angle < 0.035f) {
+		struct xrt_quat inv;
+		math_quat_invert(&filtered, &inv);
+		struct xrt_vec3 error_body;
+		math_quat_rotate_vec3(&inv, &error_aa, &error_body);
+		float dt = (float)time_ns_to_s(dt_ns);
+		float tau = f->params.orient_tau_s > 0.0f ? f->params.orient_tau_s : 0.15f;
+		// error ~ -b * tau at steady state: step b towards -error / tau with time constant gyro_bias_tau_s.
+		struct xrt_vec3 target_step = m_vec3_mul_scalar(error_body, -dt / (tau * f->params.gyro_bias_tau_s));
+		f->gyro_bias = m_vec3_add(f->gyro_bias, target_step);
+		float len = m_vec3_len(f->gyro_bias);
+		const float max_bias = 0.1f; // 5.7 deg/s, far above the ~1 deg/s seen
+		if (len > max_bias) {
+			f->gyro_bias = m_vec3_mul_scalar(f->gyro_bias, max_bias / len);
+		}
+	}
+
 	struct xrt_vec3 scaled = m_vec3_mul_scalar(error_aa, gain);
 	struct xrt_quat correction;
 	math_quat_exp_so3(&scaled, &correction);
@@ -226,9 +282,19 @@ update_orientation(struct psvr2_pose_filter *f,
  * The filtered (pivot) position at @p at_ts: the estimate extrapolated with its velocity (capped), plus what's left
  * of a blended correction (pos_blend_ns).
  */
+static bool
+pos_history_at(const struct psvr2_pose_filter *f, timepoint_ns ts, struct xrt_vec3 *out);
+
 static struct xrt_vec3
 position_output(const struct psvr2_pose_filter *f, timepoint_ns at_ts)
 {
+	// Accelerometer-aided: a time in the past (the tracker's camera times) comes from the history.
+	if (f->params.accel_enable && f->have_accel && at_ts < f->pos_ts) {
+		struct xrt_vec3 past;
+		if (pos_history_at(f, at_ts, &past)) {
+			return past;
+		}
+	}
 	time_duration_ns pos_dt_ns = at_ts - f->pos_ts;
 	if (pos_dt_ns > f->params.max_extrapolation_ns) {
 		pos_dt_ns = f->params.max_extrapolation_ns;
@@ -245,12 +311,188 @@ position_output(const struct psvr2_pose_filter *f, timepoint_ns at_ts)
 	return position;
 }
 
+static uint32_t
+pos_history_index(const struct psvr2_pose_filter *f, uint32_t age)
+{
+	return (f->pos_history_next + PSVR2_POSE_FILTER_HISTORY - 1 - age) % PSVR2_POSE_FILTER_HISTORY;
+}
+
+//! The accel-propagated pivot position at @p ts (from history), false when older than the history.
+static bool
+pos_history_at(const struct psvr2_pose_filter *f, timepoint_ns ts, struct xrt_vec3 *out)
+{
+	for (uint32_t age = 0; age < f->pos_history_count; age++) {
+		uint32_t idx = pos_history_index(f, age);
+		if (f->pos_history[idx].ts <= ts) {
+			if (age == 0) {
+				*out = f->pos_history[idx].position;
+				return true;
+			}
+			uint32_t newer = pos_history_index(f, age - 1);
+			timepoint_ns t0 = f->pos_history[idx].ts, t1 = f->pos_history[newer].ts;
+			float t = t1 > t0 ? (float)(ts - t0) / (float)(t1 - t0) : 0.0f;
+			*out = m_vec3_lerp(f->pos_history[idx].position, f->pos_history[newer].position, t);
+			return true;
+		}
+	}
+	return false;
+}
+
+static void
+pos_history_shift(struct psvr2_pose_filter *f, struct xrt_vec3 d)
+{
+	for (uint32_t age = 0; age < f->pos_history_count; age++) {
+		uint32_t idx = pos_history_index(f, age);
+		f->pos_history[idx].position = m_vec3_add(f->pos_history[idx].position, d);
+	}
+}
+
+void
+psvr2_pose_filter_push_accel(struct psvr2_pose_filter *f, timepoint_ns ts, const struct xrt_vec3 *accel)
+{
+	if (!f->params.accel_enable || !f->have_orientation || !f->have_position) {
+		return;
+	}
+	// The world-frame specific force at the IMU, with the orientation the gyro sample of this ts brought.
+	struct xrt_vec3 a_w;
+	math_quat_rotate_vec3(&f->orientation, accel, &a_w);
+	if (!f->have_accel) {
+		f->have_accel = true;
+		f->gravity = a_w;
+		f->v_imu = f->velocity;
+		f->pos_ts = ts;
+		f->pending_correction = (struct xrt_vec3)XRT_VEC3_ZERO;
+		f->pos_history_count = 0;
+		return;
+	}
+	time_duration_ns dt_ns = ts - f->pos_ts;
+	if (dt_ns <= 0) {
+		return;
+	}
+	if (dt_ns > U_TIME_1MS_IN_NS * 20) {
+		dt_ns = U_TIME_1MS_IN_NS * 20; // a gap: don't integrate across it
+	}
+	float dt = (float)time_ns_to_s(dt_ns);
+	/*
+	 * Without SLAM the accelerometer alone drifts: in a 250 ms SLAM dropout (15:48, looking down at -80 deg pitch
+	 * and shaking the head at ~140 deg/s) it built up ~1 m/s while the head stayed in place. Coast on it only as
+	 * long as the SLAM-only path extrapolates (max_extrapolation_ns), then hold the position until SLAM is back.
+	 */
+	if (f->last_slam_pos_ts != 0 && ts - f->last_slam_pos_ts > f->params.max_extrapolation_ns) {
+		f->v_imu = (struct xrt_vec3)XRT_VEC3_ZERO;
+		f->velocity = (struct xrt_vec3)XRT_VEC3_ZERO;
+		f->pos_ts = ts;
+		f->pos_history[f->pos_history_next].ts = ts;
+		f->pos_history[f->pos_history_next].position = f->position;
+		f->pos_history_next = (f->pos_history_next + 1) % PSVR2_POSE_FILTER_HISTORY;
+		if (f->pos_history_count < PSVR2_POSE_FILTER_HISTORY) {
+			f->pos_history_count++;
+		}
+		return;
+	}
+	/*
+	 * Gravity, plus the accelerometer's bias and scale error, as a slow average: a head doesn't keep accelerating
+	 * one way for a second, so what stays is the offset.
+	 */
+	float k = dt / (f->params.accel_gravity_tau_s + dt);
+	if (f->params.accel_gravity_pause_rad_s > 0.0f && m_vec3_len(f->last_gyro) > f->params.accel_gravity_pause_rad_s) {
+		k = 0.0f; // fast head motion: keep the estimate from before it
+	}
+	f->gravity = m_vec3_add(f->gravity, m_vec3_mul_scalar(m_vec3_sub(a_w, f->gravity), k));
+	struct xrt_vec3 a_lin = m_vec3_sub(a_w, f->gravity);
+	f->v_imu = m_vec3_add(f->v_imu, m_vec3_mul_scalar(a_lin, dt));
+
+	// The pivot moves with the IMU point minus the turn's lever arm velocity w x (R r).
+	struct xrt_vec3 w_w, lever, lever_v;
+	math_quat_rotate_vec3(&f->orientation, &f->last_gyro, &w_w);
+	math_quat_rotate_vec3(&f->orientation, &f->params.pivot_offset, &lever);
+	math_vec3_cross(&w_w, &lever, &lever_v);
+	f->velocity = m_vec3_sub(f->v_imu, lever_v);
+	f->position = m_vec3_add(f->position, m_vec3_mul_scalar(f->velocity, dt));
+
+	// Bring the last SLAM correction in over pos_blend_ns instead of stepping.
+	if (f->params.pos_blend_ns > 0) {
+		float frac = (float)dt_ns / (float)f->params.pos_blend_ns;
+		if (frac > 1.0f) {
+			frac = 1.0f;
+		}
+		struct xrt_vec3 step = m_vec3_mul_scalar(f->pending_correction, frac);
+		f->position = m_vec3_add(f->position, step);
+		f->pending_correction = m_vec3_sub(f->pending_correction, step);
+	}
+	f->pos_ts = ts;
+
+	f->pos_history[f->pos_history_next].ts = ts;
+	f->pos_history[f->pos_history_next].position = f->position;
+	f->pos_history_next = (f->pos_history_next + 1) % PSVR2_POSE_FILTER_HISTORY;
+	if (f->pos_history_count < PSVR2_POSE_FILTER_HISTORY) {
+		f->pos_history_count++;
+	}
+}
+
+//! A SLAM pivot position with accelerometer-aided propagation (accel_enable).
+static void
+update_position_accel(struct psvr2_pose_filter *f,
+                      timepoint_ns ts,
+                      const struct xrt_vec3 *slam,
+                      struct psvr2_pose_filter_update *u)
+{
+	struct xrt_vec3 at_ts;
+	if (!pos_history_at(f, ts, &at_ts)) {
+		return; // older than the history (a stall): the next one compares
+	}
+
+	// The correction still being blended in counts as already applied.
+	struct xrt_vec3 residual = m_vec3_sub(m_vec3_sub(*slam, at_ts), f->pending_correction);
+	u->pos_residual_m = m_vec3_len(residual);
+	float dt = f->last_slam_pos_ts != 0 ? (float)time_ns_to_s(ts - f->last_slam_pos_ts) : 0.0f;
+	f->last_slam_pos_ts = ts;
+
+	if (u->pos_residual_m > f->params.pos_snap_m && f->params.pos_confirm_jumps && dt > 0.0f) {
+		// As without the accelerometer: a lone jump waits for the next SLAM position to confirm it.
+		bool confirmed = f->have_pending && ts > f->pending_ts &&
+		                 m_vec3_len(m_vec3_sub(*slam, f->pending)) <
+		                     0.03f + m_vec3_len(f->velocity) * (float)time_ns_to_s(ts - f->pending_ts);
+		if (!confirmed) {
+			f->have_pending = true;
+			f->pending = *slam;
+			f->pending_ts = ts;
+			f->jumps_skipped++;
+			u->position_skipped = true;
+			return;
+		}
+	}
+	f->have_pending = false;
+	if (u->pos_residual_m > f->params.pos_snap_m || dt <= 0.0f || dt > time_ns_to_s(f->params.pos_reset_gap_ns)) {
+		// Jump, start or a long gap: take SLAM (shifted to now) and restart the velocity.
+		struct xrt_vec3 d = m_vec3_add(residual, f->pending_correction);
+		f->position = m_vec3_add(f->position, d);
+		pos_history_shift(f, d);
+		f->pending_correction = (struct xrt_vec3)XRT_VEC3_ZERO;
+		f->v_imu = (struct xrt_vec3)XRT_VEC3_ZERO;
+		u->position_reset = true;
+		return;
+	}
+	float alpha = f->params.pos_tau_s > 0.0f ? 1.0f - expf(-dt / f->params.pos_tau_s) : 1.0f;
+	float beta = alpha * alpha / (2.0f - alpha);
+	struct xrt_vec3 corr = m_vec3_mul_scalar(residual, alpha);
+	f->pending_correction = m_vec3_add(f->pending_correction, corr);
+	// History as if already corrected, so the next comparison doesn't see this again.
+	pos_history_shift(f, corr);
+	f->v_imu = m_vec3_add(f->v_imu, m_vec3_mul_scalar(residual, beta / dt));
+}
+
 static void
 update_position(struct psvr2_pose_filter *f,
                 timepoint_ns ts,
                 const struct xrt_vec3 *slam,
                 struct psvr2_pose_filter_update *u)
 {
+	if (f->params.accel_enable && f->have_accel) {
+		update_position_accel(f, ts, slam, u);
+		return;
+	}
+
 	time_duration_ns dt_ns = ts - f->pos_ts;
 
 	if (!f->have_position || dt_ns > f->params.pos_reset_gap_ns) {
@@ -326,6 +568,7 @@ psvr2_pose_filter_push_slam(struct psvr2_pose_filter *f,
                             struct psvr2_pose_filter_update *out_update)
 {
 	struct psvr2_pose_filter_update u = {0};
+	u.rate_rad_s = rate_at(f, ts);
 	update_orientation(f, ts, &pose->orientation, &u);
 	// Filter the pivot: the head point minus the turn's lever arm (at this SLAM pose's own orientation).
 	struct xrt_vec3 lever;

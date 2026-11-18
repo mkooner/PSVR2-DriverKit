@@ -59,6 +59,7 @@
 #define BCDEC_BC4BC5_PRECISE
 #include "bcdec.h"
 
+#include "psvr2_imu_time.h"
 #include "psvr2.h"
 #include "psvr2_camera_recorder.h"
 #include "psvr2_interface.h"
@@ -95,6 +96,21 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_pose_pos_tau, "PSVR2_POSE_POS_TAU", 0.03f)
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_floor_height, "PSVR2_FLOOR_HEIGHT", 1.6f)
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_recenter, "PSVR2_RECENTER", true)
+/*!
+ * Accelerometer-aided head position in the pose filter (accel_enable): velocity from the 2 kHz accelerometer between
+ * SLAM poses. Off until tested on the headset; steamvr_sim SIM_ACCEL=1 replays it.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_accel_fusion, "PSVR2_ACCEL_FUSION", false)
+/*!
+ * Gyro bias estimation time constant in seconds (pose filter gyro_bias_tau_s), 0: off. This headset's gyro reads
+ * about (0.8, -0.2, 0.05) deg/s at rest (same in four recordings, 2026-11-17); steamvr_sim SIM_GYRO_BIAS_TAU replays.
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_gyro_bias_tau, "PSVR2_GYRO_BIAS_TAU", 0.0f)
+/*!
+ * With PSVR2_ACCEL_FUSION: pause the gravity/bias average while turning faster than this (deg/s, 0: never). Replay of
+ * three 2026-11-17 recordings: 250 ms prediction drift in fast turns 4.8 -> 2.7 mm, slow motion unchanged.
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_gravity_pause_deg, "PSVR2_GRAVITY_PAUSE_DEG", 30.0f)
 //! Carry the head position across mid-session SLAM resets (PSVR2_SLAM_CARRY=0 for the previous behaviour).
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_slam_carry, "PSVR2_SLAM_CARRY", true)
 //! Head position correction blend time (ms, 0 steps at each SLAM update), see pos_blend_ns.
@@ -398,14 +414,16 @@ process_imu_record(struct psvr2_hmd *hmd, size_t index, struct imu_usb_record *i
 		hmd->timestamp_samples++;
 	}
 
+	// Two samples share each VTS millisecond, see psvr2_imu_time.h.
 	struct xrt_imu_sample sample = {
-	    .timestamp_ns = hmd->last_imu_vts_ns,
+	    .timestamp_ns = psvr2_imu_time_fix(&hmd->imu_time, hmd->last_imu_vts_ns),
 	    .accel_m_s2 = {hmd->last_accel.x, hmd->last_accel.y, hmd->last_accel.z},
 	    .gyro_rad_secs = {hmd->last_gyro.x, hmd->last_gyro.y, hmd->last_gyro.z},
 	};
 
 	m_ff_vec3_f32_push(hmd->ff_gyro, &hmd->last_gyro, sample.timestamp_ns);
 	psvr2_pose_filter_push_gyro(&hmd->pose_filter, sample.timestamp_ns, &hmd->last_gyro);
+	psvr2_pose_filter_push_accel(&hmd->pose_filter, sample.timestamp_ns, &hmd->last_accel);
 
 	if (hmd->record_file != NULL) {
 		fprintf(hmd->record_file, "I,%" PRId64 ",%" PRId64 ",%.7f,%.7f,%.7f,%.5f,%.5f,%.5f\n",
@@ -2062,6 +2080,13 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	pose_filter_params.pos_tau_s = debug_get_float_option_psvr2_pose_pos_tau();
 	pose_filter_params.pivot_offset.z = -debug_get_float_option_psvr2_head_pivot_m();
 	pose_filter_params.pos_blend_ns = (time_duration_ns)(debug_get_float_option_psvr2_pose_blend_ms() * U_TIME_1MS_IN_NS);
+	pose_filter_params.accel_enable = debug_get_bool_option_psvr2_accel_fusion();
+	pose_filter_params.gyro_bias_tau_s = debug_get_float_option_psvr2_gyro_bias_tau();
+	pose_filter_params.accel_gravity_pause_rad_s = DEG_TO_RAD(debug_get_float_option_psvr2_gravity_pause_deg());
+	PSVR2_INFO(hmd, "Gyro bias estimation: %s (PSVR2_GYRO_BIAS_TAU %.1f s)",
+	           pose_filter_params.gyro_bias_tau_s > 0.0f ? "on" : "off", pose_filter_params.gyro_bias_tau_s);
+	PSVR2_INFO(hmd, "Head position: %s (PSVR2_ACCEL_FUSION)",
+	         pose_filter_params.accel_enable ? "accelerometer-aided" : "SLAM only");
 	psvr2_pose_filter_init(&hmd->pose_filter, &pose_filter_params);
 	// ~2s of IMU samples (2kHz)
 	hmd->ld_clock = m_clock_windowed_skew_tracker_alloc(4096);
