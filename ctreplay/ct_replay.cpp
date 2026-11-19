@@ -543,6 +543,7 @@ main(int argc, char **argv)
 	const int64_t t0 = samples.front().timestamp_ns;
 	std::vector<t_blob> blobs;
 	std::vector<double> frame_us; // per camera frame: processing time in the push (deterministic: fast + slow)
+	const bool dump_frame_times = getenv("CT_REPLAY_DUMP_FRAME_TIMES") != nullptr;
 	size_t frames = 0;
 	const int64_t wall0 = os_monotonic_get_ns();
 	for (auto &s : samples) {
@@ -626,6 +627,12 @@ main(int argc, char **argv)
 		int64_t p0 = os_monotonic_get_ns();
 		sink->push_blobs(sink, &tbo);
 		frame_us.push_back((os_monotonic_get_ns() - p0) / 1000.0);
+		if (dump_frame_times) {
+			// Per camera frame: what made it slow (blob counts before / after the background map, how many of them
+			// the live tracker had matched to LEDs) next to its processing time.
+			printf("FT,%u,%lld,%u,%zu,%zu,%.0f\n", s.camera_index, (long long)s.timestamp_ns, (unsigned)s.blob_count,
+			       blobs.size(), (size_t)std::count(live_led.begin(), live_led.end(), true), frame_us.back());
+		}
 		frames++;
 	}
 
