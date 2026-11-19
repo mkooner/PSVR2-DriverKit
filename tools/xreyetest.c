@@ -10,7 +10,11 @@
 // Look left, right, up and down: the numbers should follow. "no gaze" means the runtime gave no valid eye pose.
 //
 // Build: gcc -O2 -o xreyetest xreyetest.c -lopenxr_loader -lm
+#define XR_USE_TIMESPEC
+#include <time.h>
+#include <unistd.h>
 #include <openxr/openxr.h>
+#include <openxr/openxr_platform.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -31,14 +35,19 @@ main(int argc, char **argv)
 {
 	const double seconds = argc > 1 ? atof(argv[1]) : 30.0;
 
-	const char *ext[] = {"XR_MND_headless", "XR_EXT_eye_gaze_interaction"};
+	// Headless sessions have no compositor, so no xrWaitFrame/xrBeginFrame: the time comes from the system clock
+	// (XR_KHR_convert_timespec_time).
+	const char *ext[] = {"XR_MND_headless", "XR_EXT_eye_gaze_interaction", "XR_KHR_convert_timespec_time"};
 	XrInstanceCreateInfo ici = {XR_TYPE_INSTANCE_CREATE_INFO};
 	strcpy(ici.applicationInfo.applicationName, "xreyetest");
 	ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-	ici.enabledExtensionCount = 2;
+	ici.enabledExtensionCount = 3;
 	ici.enabledExtensionNames = ext;
 	XrInstance inst;
 	CK(xrCreateInstance(&ici, &inst));
+
+	PFN_xrConvertTimespecTimeToTimeKHR toXrTime = NULL;
+	CK(xrGetInstanceProcAddr(inst, "xrConvertTimespecTimeToTimeKHR", (PFN_xrVoidFunction *)&toXrTime));
 
 	XrSystemGetInfo sgi = {XR_TYPE_SYSTEM_GET_INFO};
 	sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
@@ -116,10 +125,11 @@ main(int argc, char **argv)
 		if (!running) {
 			continue;
 		}
-		XrFrameState fs = {XR_TYPE_FRAME_STATE};
-		CK(xrWaitFrame(s, NULL, &fs));
-		CK(xrBeginFrame(s, NULL));
-		const XrTime t = fs.predictedDisplayTime;
+		usleep(10000); // 100 samples a second
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		XrTime t = 0;
+		CK(toXrTime(inst, &ts, &t));
 		if (start == 0) {
 			start = t;
 		}
@@ -153,10 +163,6 @@ main(int argc, char **argv)
 			fflush(stdout);
 		}
 
-		XrFrameEndInfo fe = {XR_TYPE_FRAME_END_INFO};
-		fe.displayTime = t;
-		fe.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-		CK(xrEndFrame(s, &fe));
 		if ((t - start) / 1e9 >= seconds) {
 			break;
 		}
