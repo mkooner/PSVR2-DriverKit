@@ -23,6 +23,27 @@ BUILD="${MONADO_BUILD:-$HERE/../trial/build}"
 # PLUGIN_DIR=<build>/steamvr-monado-upstream: register another build of the plugin (e.g. Monado's upstream
 # steamvr_drv, built against the same PS VR2 driver, for an A/B of the adapter). Default: ours.
 PLUGIN="${PLUGIN_DIR:-$BUILD/steamvr-monado}"
+DRIVER=driver_monado
+# NATIVE=1 (the default): the rebuilt driver (trial/src/xrt/state_trackers/steamvr_psvr2, driver_monado_psvr2): SteamVR
+# owns the display. The old plugin's options (DIRECT_MODE, OVRD_*) don't apply to it. NATIVE=0: the old plugin
+# (steamvr_drv, driver_monado); DIRECT_MODE=1 or PLUGIN_DIR=... select it too unless NATIVE=1 is given.
+if [ -z "${NATIVE:-}" ]; then
+	if [ "${DIRECT_MODE:-0}" = 1 ] || [ -n "${PLUGIN_DIR:-}" ]; then
+		NATIVE=0
+	else
+		NATIVE=1
+	fi
+fi
+echo "  NATIVE=$NATIVE: $([ "$NATIVE" = 1 ] && echo "rebuilt driver (driver_monado_psvr2)" || echo "old plugin (driver_monado)")"
+if [ "$NATIVE" = 1 ]; then
+	PLUGIN="$BUILD/steamvr-monado-psvr2"
+	DRIVER=driver_monado_psvr2
+	[ "${DIRECT_MODE:-0}" = 1 ] && { echo "NATIVE=1 has no direct mode (SteamVR owns the display)"; exit 1; }
+	# Defaults for the rebuilt driver, the user's best run (2026-11-18 17:44): SteamVR's async reprojection on and the
+	# SteamVRLinuxFixes layer off. ASYNC=0 / LINUX_FIXES=1 give the old behaviour.
+	export ASYNC="${ASYNC:-1}"
+	LINUX_FIXES="${LINUX_FIXES:-0}"
+fi
 VRPATH="$HOME/.config/openvr/openvrpaths.vrpath"
 BACKUP="$VRPATH.psvr2-test-backup"
 STEAM_ROOT="${STEAM_ROOT:-$HOME/.local/share/Steam}"
@@ -37,6 +58,29 @@ restore_config() {
 		mv -f "$BACKUP" "$VRPATH"
 		echo "Restored original OpenVR config ($VRPATH)."
 	fi
+	async_restore
+}
+
+# ASYNC=1 writes enableLinuxVulkanAsync into SteamVR's settings for this session only: take it out again when SteamVR
+# has closed, so other drivers (Sony's) keep SteamVR's default.
+ASYNC_MARK="$HOME/.config/openvr/psvr2-test-async-set"
+async_restore() {
+	[ -f "$ASYNC_MARK" ] || return 0
+	pgrep -x vrserver >/dev/null && return 0 # SteamVR still running
+	python3 -I - "$(cat "$ASYNC_MARK")" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (OSError, ValueError):
+    sys.exit(0)
+if cfg.get("steamvr", {}).pop("enableLinuxVulkanAsync", None) is not None:
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=3)
+    print("Async reprojection setting removed from SteamVR's settings again (SteamVR default).")
+PYEOF
+	rm -f "$ASYNC_MARK"
 }
 
 # When SteamVR is closed, disconnect the Sense controllers over Bluetooth so they don't stay on (like Sony's
@@ -64,7 +108,7 @@ fi
 echo "== Pre-flight"
 fail() { echo "  [!!] $*"; exit 1; }
 [ -f "$PLUGIN/driver.vrdrivermanifest" ] || fail "plugin not built: $PLUGIN (build with XRT_FEATURE_STEAMVR_PLUGIN=ON)"
-[ -f "$PLUGIN/bin/linux64/driver_monado.so" ] || fail "driver_monado.so missing in $PLUGIN"
+[ -f "$PLUGIN/bin/linux64/$DRIVER.so" ] || fail "$DRIVER.so missing in $PLUGIN"
 [ -x "$STEAMVR/bin/vrstartup.sh" ] || fail "SteamVR not found at $STEAMVR (set STEAMVR_DIR)"
 [ -f "$VRPATH" ] || fail "no OpenVR config at $VRPATH: run SteamVR once normally first"
 command -v python3 >/dev/null || fail "python3 is needed to edit the OpenVR config"
@@ -86,8 +130,8 @@ if pgrep -f 'ignition_server.exe' >/dev/null; then
 		fail "stop it first: pkill -f ignition_server.exe"
 	fi
 fi
-missing=$(ldd "$PLUGIN/bin/linux64/driver_monado.so" | grep -c 'not found')
-[ "$missing" = 0 ] || fail "driver_monado.so has $missing unresolved libraries (ldd)"
+missing=$(ldd "$PLUGIN/bin/linux64/$DRIVER.so" | grep -c 'not found')
+[ "$missing" = 0 ] || fail "$DRIVER.so has $missing unresolved libraries (ldd)"
 echo "  [ok] plugin: $PLUGIN"
 echo "  [ok] SteamVR: $STEAMVR"
 lsusb | grep -qi '054c:0cde' && echo "  [ok] PS VR2 headset on USB" || echo "  [??] PS VR2 headset not seen on USB (054c:0cde)"
@@ -125,25 +169,26 @@ mkdir -p "$LOGDIR"
 VRSETTINGS="$STEAM_ROOT/config/steamvr.vrsettings"
 if [ -f "$VRSETTINGS" ]; then
 	cp -f "$VRSETTINGS" "$LOGDIR/steamvr.vrsettings.backup-$STAMP"
-	python3 -I - "$VRSETTINGS" <<'EOF'
+	ASYNC_MARK="$ASYNC_MARK" python3 -I - "$VRSETTINGS" "$DRIVER" <<'EOF'
 import json, sys
 path = sys.argv[1]
 with open(path) as f:
     cfg = json.load(f)
-drv = cfg.setdefault("driver_monado", {})
+drv = cfg.setdefault(sys.argv[2], {})
 if drv.get("blocked_by_safe_mode"):
-    print("  unblocked driver_monado (was blocked by a previous SteamVR safe mode event)")
+    print("  unblocked " + sys.argv[2] + " (was blocked by a previous SteamVR safe mode event)")
 drv["blocked_by_safe_mode"] = False
 drv["enable"] = True
-# Async reprojection: SteamVR's own default, which on NVIDIA under Linux is off ("Async: Automatically disabled as
-# default based on the detected Vulkan environment" in vrcompositor.txt, RTX 5080), the same as Sony's driver ran with.
-# It was forced on while frames ran late (per-eye render size bug); since that fix SteamVR reports no late frames.
-# ASYNC=1 ./launch-steamvr.sh still forces it on.
+# Async reprojection: SteamVR's own default on NVIDIA under Linux is off ("Async: Automatically disabled as default
+# based on the detected Vulkan environment" in vrcompositor.txt, RTX 5080). ASYNC=1 (the default with NATIVE=1) forces
+# it on for this session; async_restore takes the setting out again when SteamVR closes.
 import os
 sv = cfg.setdefault("steamvr", {})
 if os.environ.get("ASYNC", "0") == "1":
     sv["enableLinuxVulkanAsync"] = True
-    print("  async reprojection forced on (ASYNC=1)")
+    print("  async reprojection forced on for this session (ASYNC=1; ASYNC=0 for SteamVR's default)")
+    with open(os.environ["ASYNC_MARK"], "w") as f:
+        f.write(path)
 else:
     sv.pop("enableLinuxVulkanAsync", None)
     print("  async reprojection: SteamVR default (ASYNC=1 forces it on)")
@@ -179,6 +224,14 @@ fi
 #   ROOM_SETUP=1   no 2 m square in universe 3 either (SteamVR's Room Setup then starts on its own)
 #   ROOM_FORGET=1  delete the saved room anchor before starting (to set the room up again)
 #   OVRD_ROOM=0    the previous behaviour: a fixed 2 m play area handed to SteamVR, nothing saved
+#   PLAY_AREA=<m>  side of the square play area the driver gives SteamVR (default 2). With NATIVE=1 the saved room gets
+#                  it too, so SteamVR's Room Setup isn't needed (a room drawn there is kept).
+#   SCALE=<%>      per-eye render size as a percentage of the panel's eye size (NATIVE=1, the default: 100 = 2000x2040; 170 = Sony's 3400x3468)
+[ -n "${PLAY_AREA:-}" ] && export OVRD_PLAY_AREA_SIZE="$PLAY_AREA" && echo "  PLAY_AREA=$PLAY_AREA m"
+[ -n "${SCALE:-}" ] && export XRT_COMPOSITOR_SCALE_PERCENTAGE="$SCALE" && echo "  SCALE=$SCALE%: per-eye render size"
+#   SONY_PROPS=<groups>  (NATIVE=1, the default) report Sony's display properties: "all", or a comma list of throttle, framerate,
+#                  syslayer, texindex, supersample, dsc, edid, display, mask (default: none)
+[ -n "${SONY_PROPS:-}" ] && export OVRN_SONY_PROPS="$SONY_PROPS" && echo "  SONY_PROPS=$SONY_PROPS: Sony's display properties reported"
 if [ "${ROOM_SETUP:-0}" = 1 ]; then
 	export OVRD_PLAY_AREA_SIZE=0
 	echo "  ROOM_SETUP=1: no play area in the session universe, SteamVR room setup will run"
@@ -251,9 +304,21 @@ export T_CONSTELLATION_SENSOR_FUSION_LOG=${FUSION_LOG:-$LOG_LEVEL}
 # Head pose: record raw IMU/SLAM for offline replay, and allow A/B against the old behaviour with
 # POSE_FILTER=0 ./script.sh
 export PSVR2_POSE_FILTER="${POSE_FILTER:-1}"
-export PSVR2_RECORD_FILE="$LOGDIR/record-$(date +%Y%m%d-%H%M%S)-filter${PSVR2_POSE_FILTER}.csv"
-# The Sense controllers' IMU (gyro, accelerometer, orientation), one CSV per controller, for offline analysis.
-export PSSENSE_RECORD_FILE="$LOGDIR/sense-$STAMP"
+# TRACKING=0: no measurement at all, to rule it out: no headset/controller recordings, no direct-mode or compositor
+# frame logs, no SteamVR-side tools, and the game starts without the frame-timing layer.
+if [ "${TRACKING:-0}" = 1 ]; then
+	export PSVR2_RECORD_FILE="$LOGDIR/record-$(date +%Y%m%d-%H%M%S)-filter${PSVR2_POSE_FILTER}.csv"
+	# The Sense controllers' IMU (gyro, accelerometer, orientation), one CSV per controller, for offline analysis.
+	export PSSENSE_RECORD_FILE="$LOGDIR/sense-$STAMP"
+else
+	unset PSVR2_RECORD_FILE PSSENSE_RECORD_FILE OVRD_POSE_LOG OVRD_DIRECT_MODE_LOG XRT_COMPOSITOR_FRAME_LOG
+	echo "  TRACKING=0: all recordings and frame logs off"
+	# POSELOG=1 (below) needs the headset's own recording (raw gyro), and only that one.
+	if [ "${POSELOG:-0}" = 1 ]; then
+		export PSVR2_RECORD_FILE="$LOGDIR/record-$(date +%Y%m%d-%H%M%S)-filter${PSVR2_POSE_FILTER}.csv"
+		echo "  POSELOG=1: headset recording to $PSVR2_RECORD_FILE"
+	fi
+fi
 # JITTER_CHECK=1: record what tells tracking jitter from compositor judder, and analyse it when SteamVR exits:
 #   - every headset pose the plugin hands SteamVR (OVRD_POSE_LOG, ~9 MB a minute)
 #   - SteamVR's per-frame timing and the pose the game rendered each frame with (tools/vrframetiming, 30 s summaries)
@@ -279,20 +344,30 @@ fi
 # stays dark. Off by default.
 if [ "${DIRECT_MODE:-0}" = 1 ]; then
 	export OVRD_DIRECT_MODE=1
-	export OVRD_DIRECT_MODE_LOG="$LOGDIR/direct-$STAMP.csv"
+	# TRACKING=0 (below) leaves out this log and the compositor's.
+	[ "${TRACKING:-0}" = 1 ] && export OVRD_DIRECT_MODE_LOG="$LOGDIR/direct-$STAMP.csv"
 	# CAPTURE=<s>: once, <s> seconds after the game's layers appear, save that frame's layer images
 	# (logs/direct-<stamp>-layer<N>.rgba, analysis/layer_capture.py makes PNGs). Off by default: on 2026-11-18 11:25 it
 	# froze the frames for 1.8 s and SteamVR then ran at 30 fps for 8 s.
 	export OVRD_DIRECT_MODE_CAPTURE="${CAPTURE:-0}"
 	# What reached the screen, per displayed frame (Monado's compositor: re-warp pose, client frame used, present
 	# and vblank times): analysis/screen_jitter.py logs/compframes-<stamp>.csv logs/direct-<stamp>.csv
-	export XRT_COMPOSITOR_FRAME_LOG="$LOGDIR/compframes-$STAMP.csv"
+	[ "${TRACKING:-0}" = 1 ] && export XRT_COMPOSITOR_FRAME_LOG="$LOGDIR/compframes-$STAMP.csv"
+	# FRAME_LOG=1: frame timing only (logs/frames-<stamp>.csv, analysis/frame_log.py), built not to disturb the frames:
+	# live threads only copy ~60 bytes into memory, an idle-priority thread writes the file once a second, no pose
+	# reads. Independent of TRACKING, so it can run with everything else off.
+	# OVERLAY=0: only SteamVR's scene layer goes to Monado (its dashboard/overlay layer is left out).
+	[ "${OVERLAY:-1}" = 0 ] && export OVRD_DIRECT_MODE_LAYERS=1 && echo "  OVERLAY=0: SteamVR's overlay layer off"
+	[ "${FRAME_LOG:-0}" = 1 ] && export OVRD_FRAME_LOG="$LOGDIR/frames-$STAMP.csv" && echo "  FRAME_LOG=1: frame timing to $OVRD_FRAME_LOG"
 	echo "  DIRECT_MODE=1: SteamVR's frames are shown by Monado's compositor (plugin direct mode)"
 fi
 # LINUX_FIXES=0: turn off the VK_LAYER_BNUUY_steamvr_linux_fixes Vulkan layer (installed with Ignition, implicit, so it
 # loads into vrcompositor in every session). Since a SteamVR update it only half-applies: it switches the compositor's
 # present mode to FIFO_LATEST_READY but can't find WaitForPendingPresent to patch ("WaitForPendingPresent target
 # function not resolved" in Steam/logs/vrcompositor-linux.txt, every session since 2026-11-04).
+# With NATIVE=1 it is off by default (LINUX_FIXES=1 turns it on): on SteamVR 2.19.3 its WaitForPendingPresent patch
+# finds nothing, but it still replaces vrcompositor's GPU event queries using struct offsets from an older SteamVR
+# build (vrcompositor_patches.cpp), and the user saw clearly more judder with it (2026-11-18 17:44 vs 17:46).
 if [ "${LINUX_FIXES:-1}" = 0 ]; then
 	export DISABLE_STEAMVR_LINUX_FIXES=1
 	echo "  LINUX_FIXES=0: SteamVR Linux fixes layer off (compositor runs SteamVR's own present path)"
@@ -301,13 +376,22 @@ fi
 # head motion instead of the headset's) pass through to the plugin: one variable per run, same input with the replay.
 [ -n "${OVRD_POSE_MODE:-}" ] && echo "  OVRD_POSE_MODE=$OVRD_POSE_MODE"
 [ -n "${OVRD_POSE_REPLAY:-}" ] && echo "  OVRD_POSE_REPLAY=$OVRD_POSE_REPLAY (recorded head motion, not the headset's)"
-if [ "${JITTER_CHECK:-0}" = 1 ]; then
+# Tracking (off by default, TRACKING=1 turns it on): the same per-frame measurements as launch-openxr.sh, so every
+# session can be compared with analysis/screen_jitter.py:
+#   - every headset pose the plugin hands SteamVR (OVRD_POSE_LOG)
+#   - SteamVR's per-frame timing with the pose the game rendered each frame with, and SteamVR's own head pose 1000 times
+#     a second (tools/vrframetiming: steamvr-frames-<stamp>.csv, steamvr-vrposes-<stamp>.csv)
+#   - with DIRECT_MODE=1 also Monado's compositor (compframes-<stamp>.csv, set above) and the plugin's direct log
+# JITTER_CHECK=1 adds SteamVR's pose prediction probe and per-thread CPU sampling.
+# Direct mode measures itself (compositor + plugin logs, the 11:25 setup that didn't change frame timing), so these
+# SteamVR-side tools run only in normal mode unless JITTER_CHECK=1 asks for them.
+if { [ "${TRACKING:-0}" = 1 ] && [ "${DIRECT_MODE:-0}" != 1 ]; } || [ "${JITTER_CHECK:-0}" = 1 ]; then
 	export OVRD_POSE_LOG="$LOGDIR/steamvr-pose-$STAMP.csv"
 	FRAMES_CSV="$LOGDIR/steamvr-frames-$STAMP.csv"
 	if [ -x "$HERE/tools/vrframetiming" ]; then
-		echo "  JITTER_CHECK=1: submitted poses to $OVRD_POSE_LOG, frame timing to $FRAMES_CSV"
+		echo "  tracking: submitted poses to $OVRD_POSE_LOG, frame timing to $FRAMES_CSV"
 	else
-		echo "  [!!] JITTER_CHECK=1 but tools/vrframetiming isn't built (see its Build: line); poses only"
+		echo "  [!!] tracking: tools/vrframetiming isn't built (see its Build: line); poses only"
 	fi
 fi
 
@@ -326,10 +410,18 @@ if ! pgrep -x vrserver >/dev/null; then
 else
 	echo "  vrserver running (pid $(pgrep -x vrserver | head -1))"
 	FT_PID=""
-	if [ "${JITTER_CHECK:-0}" = 1 ] && [ -x "$HERE/tools/vrframetiming" ]; then
+	if [ -n "${FRAMES_CSV:-}" ] && [ -x "$HERE/tools/vrframetiming" ]; then
 		"$HERE/tools/vrframetiming" 36000 "$FRAMES_CSV" "$LOGDIR/steamvr-vrposes-$STAMP.csv" \
 			2>"$LOGDIR/steamvr-frames-$STAMP-summary.txt" &
 		FT_PID=$!
+	fi
+	# POSELOG=1: what SteamVR hands a game as the head pose, once per refresh (tools/vrposelog, the tool behind the
+	# 2026-11-16 comparison with Sony's driver; analysis/jitter/logjitter.py), with the headset's own recording.
+	POSELOG_PID=""
+	if [ "${POSELOG:-0}" = 1 ] && [ -x "$HERE/tools/vrposelog" ]; then
+		( sleep 15; "$HERE/tools/vrposelog" 36000 "$LOGDIR/vrposelog-$STAMP.csv" 2>"$LOGDIR/vrposelog-$STAMP.txt" ) &
+		POSELOG_PID=$!
+		echo "  POSELOG=1: SteamVR's head pose per refresh to $LOGDIR/vrposelog-$STAMP.csv"
 	fi
 	PROBE_PID=""
 	if [ "${JITTER_CHECK:-0}" = 1 ] && [ -x "$HERE/tools/vrposeprobe" ]; then
@@ -351,7 +443,13 @@ else
 		for _ in $(seq 1 60); do pgrep -x vrcompositor >/dev/null && break; sleep 1; done
 		sleep 5
 		echo "  starting $GAME with the frame-timing layer (log: $LOGDIR/steamvr-$STAMP-game.txt)"
-		"$HERE/tools/xr_frame_log/run-with-frame-log.sh" "$GAME" >"$LOGDIR/steamvr-$STAMP-game.txt" 2>&1 &
+		# The game's frame-timing layer (call times and poses of each game frame, written by the game's process): with
+		# TRACKING=1, and with FRAME_LOG=1 for analysis/sync_check.py. It was on in the smooth OpenXR sessions.
+		if [ "${TRACKING:-0}" = 1 ] || [ "${FRAME_LOG:-0}" = 1 ]; then
+			"$HERE/tools/xr_frame_log/run-with-frame-log.sh" "$GAME" >"$LOGDIR/steamvr-$STAMP-game.txt" 2>&1 &
+		else
+			"$GAME" >"$LOGDIR/steamvr-$STAMP-game.txt" 2>&1 &
+		fi
 		GAME_PID=$!
 	fi
 	while pgrep -x vrserver >/dev/null; do sleep 2; done
@@ -361,7 +459,8 @@ else
 		echo; echo "== The game's OpenXR frame timing on SteamVR"
 		sed -n '/^[0-9]* frames over/,$p' "$LOGDIR/steamvr-$STAMP-game.txt"
 	fi
-	for pid in $FT_PID $CPU_PID $PROBE_PID; do
+	[ -n "${POSELOG_PID:-}" ] && pkill -x vrposelog 2>/dev/null
+	for pid in $FT_PID $CPU_PID $PROBE_PID ${POSELOG_PID:-}; do
 		kill -INT "$pid" 2>/dev/null
 		wait "$pid" 2>/dev/null
 	done

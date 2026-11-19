@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <thread>
 
 using namespace vr;
@@ -84,7 +85,13 @@ main(int argc, char **argv)
 		perror(argv[2]);
 		return 1;
 	}
-	fprintf(f, "# HMD %s (%s), %.3f Hz, vsync_to_photons %.5f\n", model, driver, hz, v2p);
+	{
+		// t_s = 0 on CLOCK_MONOTONIC (in the one header line), to line the rows up with the driver's own recordings.
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		fprintf(f, "# HMD %s (%s), %.3f Hz, vsync_to_photons %.5f, t0_mono_ns %lld\n", model, driver, hz, v2p,
+		        (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec);
+	}
 	fprintf(f, "t_s,pred_s");
 	for (const char *tag : {"P", "N"})
 		fprintf(f, ",%s_valid,%s_result,%s_qx,%s_qy,%s_qz,%s_qw,%s_px,%s_py,%s_pz,%s_vx,%s_vy,%s_vz,%s_wx,%s_wy,%s_wz",

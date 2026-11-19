@@ -1,0 +1,165 @@
+diff --git a/src/xrt/drivers/psvr2/psvr2.c b/src/xrt/drivers/psvr2/psvr2.c
+index 0529d7e3a..bfb5e3795 100644
+--- a/src/xrt/drivers/psvr2/psvr2.c
++++ b/src/xrt/drivers/psvr2/psvr2.c
+@@ -116,6 +116,11 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_gyro_bias_tau, "PSVR2_GYRO_BIAS_TAU", 0.0f)
+  * three 2026-11-17 recordings: 250 ms prediction drift in fast turns 4.8 -> 2.7 mm, slow motion unchanged.
+  */
+ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_gravity_pause_deg, "PSVR2_GRAVITY_PAUSE_DEG", 30.0f)
++/*
++ * Accelerometer-aided position without Basalt: SLAM positions further than this (mm) from where the IMU says the head
++ * is are kept out of the pose as SLAM errors (psvr2_pose_filter_params.imu_jump_m). 0: off.
++ */
++DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_slam_imu_check_mm, "PSVR2_SLAM_IMU_CHECK_MM", 8.0f)
+ /*!
+  * Basalt VIO (bottom camera pair + IMU, camera mode 0x10) as the referee of the headset's SLAM steps in the pose filter
+  * (psvr2_basalt.h): a SLAM step the IMU and Basalt both reject is replaced by the IMU step. Needs libbasalt.so
+@@ -2294,6 +2299,8 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
+ 	if (debug_get_bool_option_psvr2_basalt()) {
+ 		// The referee needs the accelerometer-aided position. 3 mm: 13 catches in the 19:12 replay, all real.
+ 		pose_filter_params.ref_jump_m = 0.003f;
++	} else if (pose_filter_params.accel_enable) {
++		pose_filter_params.imu_jump_m = debug_get_float_option_psvr2_slam_imu_check_mm() / 1000.0f;
+ 	}
+ 	pose_filter_params.gyro_bias_tau_s = debug_get_float_option_psvr2_gyro_bias_tau();
+ 	pose_filter_params.accel_gravity_pause_rad_s = DEG_TO_RAD(debug_get_float_option_psvr2_gravity_pause_deg());
+@@ -2301,6 +2308,10 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
+ 	           pose_filter_params.gyro_bias_tau_s > 0.0f ? "on" : "off", pose_filter_params.gyro_bias_tau_s);
+ 	PSVR2_INFO(hmd, "Head position: %s (PSVR2_ACCEL_FUSION)",
+ 	         pose_filter_params.accel_enable ? "accelerometer-aided" : "SLAM only");
++	if (pose_filter_params.imu_jump_m > 0.0f) {
++		PSVR2_INFO(hmd, "SLAM positions checked against the IMU: over %.1f mm off is a SLAM error (PSVR2_SLAM_IMU_CHECK_MM)",
++		           pose_filter_params.imu_jump_m * 1000.0f);
++	}
+ 	psvr2_pose_filter_init(&hmd->pose_filter, &pose_filter_params);
+ 	// ~2s of IMU samples (2kHz)
+ 	hmd->ld_clock = m_clock_windowed_skew_tracker_alloc(4096);
+diff --git a/src/xrt/drivers/psvr2/psvr2_pose_filter.c b/src/xrt/drivers/psvr2/psvr2_pose_filter.c
+index f670230ad..a87ed0fbf 100644
+--- a/src/xrt/drivers/psvr2/psvr2_pose_filter.c
++++ b/src/xrt/drivers/psvr2/psvr2_pose_filter.c
+@@ -45,6 +45,13 @@ psvr2_pose_filter_default_params(struct psvr2_pose_filter_params *out_params)
+ 	    .ref_offset_tau_s = 1.0f,
+ 	    .ref_wait_ns = U_TIME_1MS_IN_NS * 40,
+ 	    .ref_imu_decides = true,
++	    .imu_jump_m = 0.0f,
++	    .imu_jump_per_rad_s = 0.002f,
++	    .imu_jump_per_s = 0.05f,
++	    .imu_offset_rate_mps = 0.02f,
++	    .imu_offset_motion_gain = 0.2f,
++	    .imu_check_max_rad_s = 0.0f,
++	    .imu_offset_max_m = 0.0f,
+ 	};
+ }
+ 
+@@ -572,13 +579,45 @@ update_position_accel(struct psvr2_pose_filter *f,
+ 		slam = &slam_checked;
+ 	}
+ 
++	float dt = f->last_slam_pos_ts != 0 ? (float)time_ns_to_s(ts - f->last_slam_pos_ts) : 0.0f;
++	const bool imu_check = f->params.imu_jump_m > 0.0f && f->params.ref_jump_m <= 0.0f;
++	if (imu_check && dt > 0.0f) {
++		// The offset fades towards zero: slowly with the head still, faster while it moves (hidden by the motion).
++		float speed = m_vec3_len(f->velocity);
++		float fade = (f->params.imu_offset_rate_mps + f->params.imu_offset_motion_gain * speed) * dt;
++		float len = m_vec3_len(f->imu_offset);
++		f->imu_offset = len > fade ? m_vec3_mul_scalar(f->imu_offset, (len - fade) / len)
++		                           : (struct xrt_vec3)XRT_VEC3_ZERO;
++	}
++	if (imu_check) {
++		slam_checked = m_vec3_sub(*slam, f->imu_offset);
++		slam = &slam_checked;
++	}
++
+ 	// The correction still being blended in counts as already applied.
+ 	struct xrt_vec3 residual = m_vec3_sub(m_vec3_sub(*slam, at_ts), f->pending_correction);
+ 	u->pos_residual_m = m_vec3_len(residual);
+-	float dt = f->last_slam_pos_ts != 0 ? (float)time_ns_to_s(ts - f->last_slam_pos_ts) : 0.0f;
+ 	f->last_slam_pos_ts = ts;
+ 
+-	if (u->pos_residual_m > f->params.pos_snap_m && f->params.pos_confirm_jumps && dt > 0.0f) {
++	if (imu_check && dt > 0.0f && dt <= time_ns_to_s(f->params.max_extrapolation_ns)) {
++		// Within the IMU's coasting time it knows where the head is to a few mm; a SLAM position further off than that
++		// is SLAM's error, not the head's motion: keep it out of the pose.
++		float thr = f->params.imu_jump_m + f->params.imu_jump_per_rad_s * u->rate_rad_s + f->params.imu_jump_per_s * dt;
++		const bool slow = f->params.imu_check_max_rad_s <= 0.0f || u->rate_rad_s < f->params.imu_check_max_rad_s;
++		struct xrt_vec3 next = m_vec3_add(f->imu_offset, residual);
++		const bool fits = f->params.imu_offset_max_m <= 0.0f || m_vec3_len(next) <= f->params.imu_offset_max_m;
++		if (u->pos_residual_m > thr && slow && fits) {
++			f->imu_offset = next;
++			f->imu_jumps++;
++			u->imu_jump = true;
++			residual = (struct xrt_vec3)XRT_VEC3_ZERO;
++		}
++	}
++	u->imu_offset_m = m_vec3_len(f->imu_offset);
++	// What is left to correct (zero for a SLAM error the IMU check kept out); u->pos_residual_m stays the raw one.
++	const float residual_m = m_vec3_len(residual);
++
++	if (residual_m > f->params.pos_snap_m && f->params.pos_confirm_jumps && dt > 0.0f) {
+ 		// As without the accelerometer: a lone jump waits for the next SLAM position to confirm it.
+ 		bool confirmed = f->have_pending && ts > f->pending_ts &&
+ 		                 m_vec3_len(m_vec3_sub(*slam, f->pending)) <
+@@ -593,7 +632,7 @@ update_position_accel(struct psvr2_pose_filter *f,
+ 		}
+ 	}
+ 	f->have_pending = false;
+-	if (u->pos_residual_m > f->params.pos_snap_m || dt <= 0.0f || dt > time_ns_to_s(f->params.pos_reset_gap_ns)) {
++	if (residual_m > f->params.pos_snap_m || dt <= 0.0f || dt > time_ns_to_s(f->params.pos_reset_gap_ns)) {
+ 		// Jump, start or a long gap: take SLAM (shifted to now) and restart the velocity.
+ 		struct xrt_vec3 d = m_vec3_add(residual, f->pending_correction);
+ 		f->position = m_vec3_add(f->position, d);
+diff --git a/src/xrt/drivers/psvr2/psvr2_pose_filter.h b/src/xrt/drivers/psvr2/psvr2_pose_filter.h
+index 87681e746..c2f14460c 100644
+--- a/src/xrt/drivers/psvr2/psvr2_pose_filter.h
++++ b/src/xrt/drivers/psvr2/psvr2_pose_filter.h
+@@ -123,6 +123,28 @@ struct psvr2_pose_filter_params
+ 	 * drifted from SLAM by up to cm in the 19:12 replay.
+ 	 */
+ 	bool ref_imu_decides;
++	/*!
++	 * IMU check of every SLAM position (accelerometer-aided position, used when there is no referee: ref_jump_m 0).
++	 * A SLAM position further than imu_jump_m (+ imu_jump_per_rad_s * turn rate + imu_jump_per_s * time since the last
++	 * SLAM position) from where the IMU says the head is, is a SLAM error: the difference goes into an offset on SLAM
++	 * instead of into the pose, so the pose follows the IMU through it. The offset is brought back to zero at
++	 * imu_offset_rate_mps plus imu_offset_motion_gain times the head's speed (m/s per m/s), so a SLAM that stays where it
++	 * jumped to is followed slowly and mostly while the head moves, and one that comes back cancels its offset.
++	 * Without it (imu_jump_m 0) a SLAM error under pos_snap_m is followed at pos_tau_s and one over it snaps at once
++	 * (2026-11-18 16:43 run: SLAM stepped 10-104 mm with the head nearly still after fast turns, and the view slid and
++	 * jumped with it). Offline on that recording: normal SLAM positions were within 4.5 mm of the IMU's, the glitch's
++	 * 140 updates over 8 mm.
++	 */
++	float imu_jump_m;
++	float imu_jump_per_rad_s;
++	float imu_jump_per_s;
++	float imu_offset_rate_mps;
++	float imu_offset_motion_gain;
++	//! The IMU check judges only while turning slower than this (rad/s, 0: always): fast turns throw the IMU's position
++	//! off too (2026-11-18 16:43 replay: unchecked, 30 cm drift in 0.7 s at 100-270 deg/s).
++	float imu_check_max_rad_s;
++	//! The offset never grows past this (m, 0: no limit): a SLAM that stays further away is followed (blended in).
++	float imu_offset_max_m;
+ };
+ 
+ //! What one SLAM update did, for logging/tuning.
+@@ -142,6 +164,10 @@ struct psvr2_pose_filter_update
+ 	float ref_disagree_m;
+ 	float ref_vs_imu_m;
+ 	bool ref_replaced;
++	//! IMU check (imu_jump_m): the SLAM position was judged a SLAM error and went into the offset.
++	bool imu_jump;
++	//! IMU check: the offset on SLAM after this update (m).
++	float imu_offset_m;
+ };
+ 
+ struct psvr2_pose_filter
+@@ -218,6 +244,9 @@ struct psvr2_pose_filter
+ 	struct xrt_vec3 ref_prev_imu;
+ 	struct xrt_vec3 ref_offset;
+ 	uint32_t ref_replacements;
++	//! IMU check (imu_jump_m): the offset taken off SLAM positions, and how many SLAM positions were judged errors.
++	struct xrt_vec3 imu_offset;
++	uint32_t imu_jumps;
+ 	//! Recent pivot positions at IMU rate, to compare against SLAM at its own timestamp.
+ 	struct
+ 	{
