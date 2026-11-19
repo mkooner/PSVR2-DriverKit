@@ -7,10 +7,10 @@
  * The chaperone file handling follows lbgos/rift-s-linux (ovrd_chaperone_origin.cpp, BSL-1.0): seed a plain entry
  * for the universe Room Setup draws in, write atomically and never over a concurrent SteamVR update.
  *
- * @ingroup st_ovrd
+ * @ingroup st_ovrn
  */
 
-#include "ovrd_room.hpp"
+#include "ovrn_room.hpp"
 
 #include "math/m_api.h"
 #include "util/u_json.h"

@@ -4,13 +4,13 @@
  * @file
  * @brief  The room calibration's state (OvrdRoom), shared by the SteamVR plugin (ovrd_driver.cpp) and the native
  *         PS VR2 SteamVR driver (st_ovrn): the room transform every device's pose carries, captures, universes.
- * @ingroup st_ovrd
+ * @ingroup st_ovrn
  */
 
 #pragma once
 
-#include "ovrd_log.hpp"
-#include "ovrd_room.hpp"
+#include "ovrn_room_log.hpp"
+#include "ovrn_room.hpp"
 
 #include "math/m_api.h"
 #include "math/m_vec3.h"

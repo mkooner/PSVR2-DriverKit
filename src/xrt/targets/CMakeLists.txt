@@ -45,7 +45,6 @@ if(XRT_FEATURE_SERVICE AND XRT_FEATURE_OPENXR)
 endif()
 
 if(XRT_FEATURE_STEAMVR_PLUGIN)
-	add_subdirectory(steamvr_drv)
 	add_subdirectory(steamvr_psvr2)
 endif()
 

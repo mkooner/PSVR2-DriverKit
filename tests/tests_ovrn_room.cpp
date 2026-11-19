@@ -5,7 +5,7 @@
  * @brief  Tests for the SteamVR driver's room calibration (ovrd_room).
  */
 
-#include "ovrd_room.hpp"
+#include "ovrn_room.hpp"
 
 #include "math/m_api.h"
 #include "util/u_json.h"

@@ -9,8 +9,8 @@
 
 #include "ovrn_backend.hpp"
 
-// The room calibration, shared with the previous plugin (steamvr_drv): the saved room and its files stay valid.
-#include "ovrd_room_state.hpp"
+// The room calibration (ovrn_room*, from the previous plugin, removed 2026-11-18): the saved room and its files stay valid.
+#include "ovrn_room_state.hpp"
 
 #include "math/m_api.h"
 #include "math/m_space.h"

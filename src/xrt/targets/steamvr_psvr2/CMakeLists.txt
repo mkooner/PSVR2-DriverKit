@@ -19,12 +19,12 @@ target_link_libraries(
 
 file(COPY driver.vrdrivermanifest DESTINATION ${OVRN_DIR})
 
-# The resources (input profiles, icons, localization) are the previous plugin's, with its driver name in the
+# The resources (input profiles, icons, localization), first written for the previous plugin, with its driver name in the
 # resource paths ({monado}) replaced by this driver's ({monado_psvr2}).
-file(COPY ../steamvr_drv/resources DESTINATION ${OVRN_DIR})
+file(COPY resources DESTINATION ${OVRN_DIR})
 # Copied at configure time: re-run the configure step when a resource file changes, so an edited binding or profile
 # reaches the built plugin (it didn't: the legacy binding's poses, 2026-11-18).
-file(GLOB_RECURSE OVRN_RESOURCE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../steamvr_drv/resources/*")
+file(GLOB_RECURSE OVRN_RESOURCE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/resources/*")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${OVRN_RESOURCE_SOURCES})
 file(GLOB_RECURSE OVRN_RESOURCE_TEXT "${OVRN_DIR}/resources/*.json" "${OVRN_DIR}/resources/*.vrresources"
      "${OVRN_DIR}/resources/*.vrsettings"

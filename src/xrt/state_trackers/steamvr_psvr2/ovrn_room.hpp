@@ -18,7 +18,7 @@
  * give the anchor. The first capture defines the room frame (floor to y = 0, no turn or shift); later captures, with
  * the controller in the same place pointing the same way, recover T_room_raw for the new session.
  *
- * @ingroup st_ovrd
+ * @ingroup st_ovrn
  */
 
 #pragma once
