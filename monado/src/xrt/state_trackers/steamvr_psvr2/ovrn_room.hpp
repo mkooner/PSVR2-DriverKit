@@ -18,7 +18,7 @@
  * give the anchor. The first capture defines the room frame (floor to y = 0, no turn or shift); later captures, with
  * the controller in the same place pointing the same way, recover T_room_raw for the new session.
  *
- * @ingroup st_ovrd
+ * @ingroup st_ovrn
  */
 
 #pragma once
@@ -26,6 +26,7 @@
 #include "xrt/xrt_defines.h"
 
 #include <string>
+#include <vector>
 
 
 //! A position and a heading (rotation about +Y, radians, 0 = facing -Z, positive turns left).
@@ -216,8 +217,56 @@ ovrd_room_chaperone_path(void);
  *    to draw in (without one SteamVR logs "Failed to update shared data" and Room Setup shows the devices as Off).
  * @p out_has_room is set when universe 2 already has a drawn room (a play area or collision bounds).
  */
+/*!
+ * @p room_size > 0: the room (universe 2) gets a square play area of that size from the driver, as ALVR gives SteamVR
+ * a rectangle instead of using Room Setup, unless a room was drawn there in Room Setup (a drawn room is never
+ * replaced). The driver's rectangle is marked ("monado_rectangle") so a new size replaces it.
+ */
+/*!
+ * @p room_universe / @p session_universe: the universe ids to use (SteamVR stores them as strings). The old plugin
+ * keeps 2 and 3 in SteamVR's own file; the PS VR2 driver uses its own ids in its own file
+ * (Prop_DriverProvidedChaperonePath_String). The file's folder is created if missing.
+ */
 bool
-ovrd_room_prepare_chaperone(const std::string &path, float session_size, bool *out_has_room, std::string *out_error);
+ovrd_room_prepare_chaperone(const std::string &path,
+                            float session_size,
+                            bool *out_has_room,
+                            std::string *out_error,
+                            float room_size = 0.0f,
+                            const char *room_universe = "2",
+                            const char *session_universe = "3");
+
+/*!
+ * One universe of a chaperone file as SteamVR uses it, and what is wrong with it. collision_bounds are quads of four
+ * points (bottom, top, top, bottom: SteamVR's own files) relative to the setup-standing origin, which is the standing
+ * origin when there is no setup_standing2; the floor is y = 0 there.
+ */
+struct ovrd_room_universe_info
+{
+	bool found = false;
+	float play_width = 0, play_depth = 0; //!< play_area, 0 0 if none
+	size_t walls = 0;                     //!< collision_bounds quads
+	float perimeter_m = 0;                //!< length of the boundary on the floor
+	float area_m2 = 0;                    //!< floor area inside the boundary (0 if not a closed polygon)
+	int winding = 0;                      //!< +1 counter-clockwise, -1 clockwise seen from above (+Y), 0 unknown
+	bool has_standing = false;
+	struct ovrd_room_yaw_pose standing = {{0, 0, 0}, 0}; //!< translation, yaw (radians) of the standing origin
+	bool has_setup_standing = false;                      //!< setup_standing2 present
+	std::string time;                                     //!< "time" as SteamVR wrote it
+	std::vector<std::string> issues;                      //!< empty: valid
+};
+
+/*!
+ * Check one universe entry (its JSON text): quads well formed (4 finite points, vertical, bottom on the floor, top
+ * above it), walls joined end to start and closed, no zero-length wall or repeated corner, the boundary not crossing
+ * itself, the play area inside it, standing/seated finite. False only if @p universe_json isn't a universe object.
+ */
+bool
+ovrd_room_check_universe(const std::string &universe_json, struct ovrd_room_universe_info *out);
+
+//! The same for universe @p id of the chaperone file at @p path (out->found false if it has no such universe).
+bool
+ovrd_room_read_universe(const std::string &path, const char *id, struct ovrd_room_universe_info *out);
 
 //! Load the saved room, false if missing or invalid (version, finite numbers).
 bool

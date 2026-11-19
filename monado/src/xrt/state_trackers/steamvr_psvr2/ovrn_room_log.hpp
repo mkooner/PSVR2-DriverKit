@@ -4,7 +4,7 @@
  * @file
  * @brief  Logger code.
  * @author Jakob Bornecrantz <jakob@collabora.com>
- * @ingroup st_ovrd
+ * @ingroup st_ovrn
  */
 
 #pragma once

@@ -85,17 +85,28 @@ TEST_CASE("psvr2_slam_carry: a mid-session reset is carried over")
 	CHECK(r.max_step < 0.0084 + 1e-3);
 }
 
-TEST_CASE("psvr2_slam_carry: resets during the first 20 s replace the world, loops are carried but count")
+TEST_CASE("psvr2_slam_carry: resets during the first 20 s are carried too, loops are carried but count")
 {
 	Run r({5.0, 25.0, 25.5});
 	r.go(30);
 	REQUIRE(r.events.size() == 3);
-	CHECK(r.events[0] == PSVR2_SLAM_CARRY_NOT_CARRIED_SETTLING);
+	CHECK(r.events[0] == PSVR2_SLAM_CARRY_CARRIED);
 	CHECK(r.events[1] == PSVR2_SLAM_CARRY_CARRIED);
 	CHECK(r.events[2] == PSVR2_SLAM_CARRY_CARRIED_LOOP);
-	CHECK(r.carry.world_changes == 2);
-	CHECK(r.carry.carried == 2);
-	CHECK(r.max_step > 1.0); // the startup reset isn't carried
+	CHECK(r.carry.world_changes == 1);
+	CHECK(r.carry.carried == 3);
+	CHECK(r.max_step < 0.0084 + 1e-3); // no step at any reset, the startup one included
+}
+
+TEST_CASE("psvr2_slam_carry: a startup burst like the 2026-11-18 17:24 run stays continuous")
+{
+	// 4 resets in the first 8 s (2.9, 5.8, 7.7, 8.0 s), the last two under 1 s apart (a loop).
+	Run r({2.9, 5.8, 7.7, 8.0});
+	r.go(12);
+	REQUIRE(r.events.size() == 4);
+	CHECK(r.carry.carried == 4);
+	CHECK(r.carry.world_changes == 1);
+	CHECK(r.max_step < 0.0084 + 1e-3);
 }
 
 TEST_CASE("psvr2_slam_carry: a session starting away from the origin (after Sony's driver)")

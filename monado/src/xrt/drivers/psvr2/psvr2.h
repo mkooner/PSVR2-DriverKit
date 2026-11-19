@@ -65,6 +65,7 @@ extern "C" {
 #include <stdio.h>
 #include <assert.h>
 #include <libusb.h>
+#include "psvr2_interface.h"
 
 
 #define NUM_CAM_XFERS 1
@@ -224,6 +225,12 @@ struct psvr2_hmd
 	//! Optical hand tracking device (psvr2_hand_tracking.h), or NULL. Set once by the builder, under data_lock.
 	struct xrt_device *hand_tracker;
 	//! Bottom pair (cameras 0, 1) calibration and poses in the head frame, for hand tracking; under data_lock.
+	//! Bottom camera images for a client (psvr2_set_camera_image_callback), protected by data_lock.
+	psvr2_camera_image_cb camera_image_cb;
+	void *camera_image_user;
+	//! psvr2_request_bottom_camera_images requests, and the mode to go back to when there are none.
+	uint32_t camera_image_requests;
+	enum psvr2_camera_mode camera_mode_default;
 	bool ht_cams_valid;
 	struct t_camera_calibration ht_cams[2];
 	struct xrt_pose ht_cam_poses[2];

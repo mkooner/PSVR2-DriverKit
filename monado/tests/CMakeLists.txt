@@ -57,7 +57,10 @@ if(XRT_BUILD_DRIVER_HANDTRACKING)
 	list(APPEND tests tests_levenbergmarquardt)
 endif()
 if(XRT_FEATURE_STEAMVR_PLUGIN)
-	list(APPEND tests tests_ovrd_room)
+	list(APPEND tests tests_ovrn_room)
+	if(XRT_BUILD_DRIVER_PSVR2)
+		list(APPEND tests tests_ovrn_camera)
+	endif()
 endif()
 if(XRT_BUILD_DRIVER_PSVR2)
 	list(APPEND tests tests_psvr2_slam_carry)
@@ -101,24 +104,29 @@ if(XRT_BUILD_DRIVER_PSVR2)
 	target_link_libraries(tests_psvr2_pose_filter PRIVATE aux_math xrt-interfaces)
 endif()
 if(XRT_FEATURE_STEAMVR_PLUGIN)
-	target_sources(tests_ovrd_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_drv/ovrd_room.cpp)
-	target_include_directories(tests_ovrd_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_drv)
-	target_link_libraries(tests_ovrd_room PRIVATE aux_math xrt-interfaces)
-
-	# Offline check of the plugin's driver direct mode with Monado's compositor; needs a GPU, so not a ctest.
-	if(TARGET target_instance AND XRT_HAVE_VULKAN)
-		add_executable(ovrd_direct_mode_harness ovrd_direct_mode_harness.cpp)
+	target_sources(tests_ovrn_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2/ovrn_room.cpp)
+	target_include_directories(tests_ovrn_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2)
+	target_link_libraries(tests_ovrn_room PRIVATE aux_math xrt-interfaces)
+	if(XRT_BUILD_DRIVER_PSVR2)
 		target_include_directories(
-			ovrd_direct_mode_harness PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_drv
+			tests_ovrn_camera PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2
 			)
 		target_link_libraries(
-			ovrd_direct_mode_harness PRIVATE target_instance target_lists st_prober aux_math aux_os xrt-interfaces
-							 xrt-external-openvr Vulkan::Vulkan
+			tests_ovrn_camera PRIVATE xrt-external-openvr xrt-external-bcdec aux_tracking aux_util aux_math
+						  xrt-interfaces
 			)
-		if(TARGET drv_euroc)
-			target_link_libraries(ovrd_direct_mode_harness PRIVATE drv_euroc)
-		endif()
 	endif()
+
+	# Offline check of the native PS VR2 SteamVR driver: loads the built driver as vrserver does, with a fake SteamVR.
+	add_executable(ovrn_driver_harness ovrn_driver_harness.cpp)
+	target_link_libraries(ovrn_driver_harness PRIVATE xrt-external-openvr ${CMAKE_DL_LIBS})
+	add_dependencies(ovrn_driver_harness driver_monado_psvr2)
+	target_compile_definitions(
+		ovrn_driver_harness
+		PRIVATE
+			OVRN_DRIVER_PATH="${PROJECT_BINARY_DIR}/steamvr-monado-psvr2/bin/linux64/driver_monado_psvr2.so"
+		)
+
 endif()
 
 if(XRT_BUILD_DRIVER_HANDTRACKING)

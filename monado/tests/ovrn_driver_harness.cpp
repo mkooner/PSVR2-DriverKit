@@ -1,0 +1,859 @@
+// Copyright 2026, Mehrab Kooner
+// SPDX-License-Identifier: BSL-1.0
+/*!
+ * @file
+ * @brief  Offline check of the native PS VR2 SteamVR driver (st_ovrn): loads the built driver_monado_psvr2.so as
+ *         vrserver does (dlopen + HmdDriverFactory) and plays SteamVR's side of the driver interface.
+ *
+ * What it can't see: anything real SteamVR does with the poses and properties (prediction, reprojection, the display).
+ * It checks the driver's own behaviour: lifecycle, what it reports, pose cadence and content, clean shutdown.
+ */
+
+#include "openvr_driver.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <dlfcn.h>
+#include <sys/stat.h>
+#include <map>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+using namespace vr;
+
+namespace {
+
+int g_fails = 0;
+
+void
+check(bool ok, const char *what)
+{
+	printf("%s: %s\n", ok ? "PASS" : "FAIL", what);
+	g_fails += ok ? 0 : 1;
+}
+
+int64_t
+now_ns()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+struct Added
+{
+	std::string serial;
+	ETrackedDeviceClass cls;
+	ITrackedDeviceServerDriver *driver;
+};
+
+struct PoseLog
+{
+	std::vector<int64_t> times;
+	DriverPose_t last = {};
+	DriverPose_t prev = {}; //!< the one before, with their arrival times, to check velocities against the motion
+	int64_t last_ns = 0, prev_ns = 0;
+};
+
+std::mutex g_mutex;
+std::vector<Added> g_added;
+std::map<uint32_t, PoseLog> g_poses;
+std::map<uint32_t, int> g_eyeToHead;
+HmdMatrix34_t g_eyeMatrix[2] = {};
+const char *g_dumpPath = nullptr; //!< --real --dump <file>: the display as the driver describes it (vrdisplaydump format)
+std::map<uint64_t, std::map<int, std::vector<uint8_t>>> g_props; //!< container -> property -> bytes
+
+struct FakeLog : IVRDriverLog
+{
+	void
+	Log(const char *m) override
+	{
+		fputs(m, stdout);
+	}
+};
+
+struct FakeHost : IVRServerDriverHost
+{
+	bool
+	TrackedDeviceAdded(const char *serial, ETrackedDeviceClass cls, ITrackedDeviceServerDriver *driver) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_added.push_back({serial, cls, driver});
+		return true;
+	}
+	void
+	TrackedDevicePoseUpdated(uint32_t which, const DriverPose_t &pose, uint32_t size) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		if (size != sizeof(DriverPose_t)) {
+			g_fails++;
+		}
+		PoseLog &pl = g_poses[which];
+		pl.times.push_back(now_ns());
+		pl.prev = pl.last;
+		pl.prev_ns = pl.last_ns;
+		pl.last = pose;
+		pl.last_ns = pl.times.back();
+	}
+	void VsyncEvent(double) override {}
+	void VendorSpecificEvent(uint32_t, EVREventType, const VREvent_Data_t &, double) override {}
+	bool IsExiting() override { return false; }
+	bool PollNextEvent(VREvent_t *event, uint32_t size) override;
+	void GetRawTrackedDevicePoses(float, TrackedDevicePose_t *, uint32_t) override {}
+	void RequestRestart(const char *, const char *, const char *, const char *) override {}
+	uint32_t GetFrameTimings(Compositor_FrameTiming *, uint32_t) override { return 0; }
+	void
+	SetDisplayEyeToHead(uint32_t which, const HmdMatrix34_t &left, const HmdMatrix34_t &right) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_eyeToHead[which]++;
+		g_eyeMatrix[0] = left;
+		g_eyeMatrix[1] = right;
+	}
+	void SetDisplayProjectionRaw(uint32_t, const HmdRect2_t &, const HmdRect2_t &) override {}
+	void SetRecommendedRenderTargetSize(uint32_t, uint32_t, uint32_t) override {}
+};
+
+struct FakeProperties : IVRProperties
+{
+	ETrackedPropertyError
+	ReadPropertyBatch(PropertyContainerHandle_t, PropertyRead_t *batch, uint32_t n) override
+	{
+		for (uint32_t i = 0; i < n; i++) {
+			batch[i].eError = TrackedProp_UnknownProperty;
+			batch[i].unRequiredBufferSize = 0;
+		}
+		return TrackedProp_Success;
+	}
+	ETrackedPropertyError
+	WritePropertyBatch(PropertyContainerHandle_t container, PropertyWrite_t *batch, uint32_t n) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		for (uint32_t i = 0; i < n; i++) {
+			const uint8_t *b = (const uint8_t *)batch[i].pvBuffer;
+			g_props[container][batch[i].prop] = std::vector<uint8_t>(b, b + batch[i].unBufferSize);
+			batch[i].eError = TrackedProp_Success;
+		}
+		return TrackedProp_Success;
+	}
+	const char *GetPropErrorNameFromEnum(ETrackedPropertyError) override { return "error"; }
+	PropertyContainerHandle_t
+	TrackedDeviceToPropertyContainer(TrackedDeviceIndex_t device) override
+	{
+		return 1000 + device;
+	}
+};
+
+//! Boolean settings the driver wrote ("section/key"), as SteamVR's settings file would hold them.
+std::map<std::string, bool> g_bools;
+
+struct FakeSettings : IVRSettings
+{
+	const char *GetSettingsErrorNameFromEnum(EVRSettingsError) override { return "error"; }
+	void
+	SetBool(const char *section, const char *key, bool value, EVRSettingsError *) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_bools[std::string(section) + "/" + key] = value;
+	}
+	void SetInt32(const char *, const char *, int32_t, EVRSettingsError *) override {}
+	void SetFloat(const char *, const char *, float, EVRSettingsError *) override {}
+	void SetString(const char *, const char *, const char *, EVRSettingsError *) override {}
+	bool
+	GetBool(const char *section, const char *key, EVRSettingsError *e) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		auto it = g_bools.find(std::string(section) + "/" + key);
+		if (e != nullptr) {
+			*e = it != g_bools.end() ? VRSettingsError_None : VRSettingsError_UnsetSettingHasNoDefault;
+		}
+		return it != g_bools.end() && it->second;
+	}
+	int32_t
+	GetInt32(const char *, const char *, EVRSettingsError *e) override
+	{
+		if (e != nullptr) {
+			*e = VRSettingsError_UnsetSettingHasNoDefault;
+		}
+		return 0;
+	}
+	float
+	GetFloat(const char *, const char *, EVRSettingsError *e) override
+	{
+		if (e != nullptr) {
+			*e = VRSettingsError_UnsetSettingHasNoDefault;
+		}
+		return 0;
+	}
+	void
+	GetString(const char *, const char *, char *value, uint32_t len, EVRSettingsError *e) override
+	{
+		if (len > 0) {
+			value[0] = '\0';
+		}
+		if (e != nullptr) {
+			*e = VRSettingsError_UnsetSettingHasNoDefault;
+		}
+	}
+	void RemoveSection(const char *, EVRSettingsError *) override {}
+	void
+	RemoveKeyInSection(const char *section, const char *key, EVRSettingsError *) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_bools.erase(std::string(section) + "/" + key);
+	}
+};
+
+struct FakeDriverManager : IVRDriverManager
+{
+	uint32_t GetDriverCount() const override { return 1; }
+	uint32_t GetDriverName(DriverId_t, char *, uint32_t) override { return 0; }
+	DriverHandle_t GetDriverHandle(const char *) override { return 1; }
+	bool IsEnabled(DriverId_t) const override { return true; }
+};
+
+struct FakeResources : IVRResources
+{
+	uint32_t LoadSharedResource(const char *, char *, uint32_t) override { return 0; }
+	uint32_t GetResourceFullPath(const char *, const char *, char *, uint32_t) override { return 0; }
+};
+
+//! Input components as SteamVR keeps them: created per container, updated by handle.
+struct Component
+{
+	uint64_t container;
+	std::string path;
+	int kind; //!< 0 boolean, 1 scalar, 2 haptic
+	float value;
+	int updates;
+};
+std::vector<Component> g_components; //!< handle = index + 1
+
+struct FakeInput : IVRDriverInput
+{
+	EVRInputError
+	add(PropertyContainerHandle_t c, const char *name, int kind, VRInputComponentHandle_t *h)
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_components.push_back({c, name, kind, 0.0f, 0});
+		*h = g_components.size();
+		return VRInputError_None;
+	}
+	EVRInputError
+	set(VRInputComponentHandle_t h, float v)
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		if (h == 0 || h > g_components.size()) {
+			return VRInputError_InvalidHandle;
+		}
+		g_components[h - 1].value = v;
+		g_components[h - 1].updates++;
+		return VRInputError_None;
+	}
+	EVRInputError CreateBooleanComponent(PropertyContainerHandle_t c, const char *n, VRInputComponentHandle_t *h) override { return add(c, n, 0, h); }
+	EVRInputError UpdateBooleanComponent(VRInputComponentHandle_t h, bool v, double) override { return set(h, v ? 1.0f : 0.0f); }
+	EVRInputError CreateScalarComponent(PropertyContainerHandle_t c, const char *n, VRInputComponentHandle_t *h, EVRScalarType, EVRScalarUnits) override { return add(c, n, 1, h); }
+	EVRInputError UpdateScalarComponent(VRInputComponentHandle_t h, float v, double) override { return set(h, v); }
+	EVRInputError CreateHapticComponent(PropertyContainerHandle_t c, const char *n, VRInputComponentHandle_t *h) override { return add(c, n, 2, h); }
+	EVRInputError CreateSkeletonComponent(PropertyContainerHandle_t, const char *, const char *, const char *, EVRSkeletalTrackingLevel, const VRBoneTransform_t *, uint32_t, VRInputComponentHandle_t *) override { return VRInputError_None; }
+	EVRInputError UpdateSkeletonComponent(VRInputComponentHandle_t, EVRSkeletalMotionRange, const VRBoneTransform_t *, uint32_t) override { return VRInputError_None; }
+	EVRInputError CreatePoseComponent(PropertyContainerHandle_t, const char *, VRInputComponentHandle_t *) override { return VRInputError_None; }
+	EVRInputError UpdatePoseComponent(VRInputComponentHandle_t, const HmdMatrix34_t *, double) override { return VRInputError_None; }
+	EVRInputError CreateEyeTrackingComponent(PropertyContainerHandle_t, const char *, VRInputComponentHandle_t *) override { return VRInputError_None; }
+	EVRInputError UpdateEyeTrackingComponent(VRInputComponentHandle_t, const VREyeTrackingData_t *, double) override { return VRInputError_None; }
+};
+
+std::vector<VREvent_t> g_events; //!< events for the driver's next PollNextEvent calls
+
+bool
+FakeHost::PollNextEvent(VREvent_t *event, uint32_t size)
+{
+	std::lock_guard<std::mutex> l(g_mutex);
+	if (g_events.empty() || size < sizeof(VREvent_t)) {
+		return false;
+	}
+	*event = g_events.front();
+	g_events.erase(g_events.begin());
+	return true;
+}
+
+FakeSettings g_settings;
+FakeDriverManager g_driverManager;
+FakeResources g_resources;
+FakeInput g_input;
+FakeLog g_log;
+FakeHost g_host;
+FakeProperties g_properties;
+
+struct FakeContext : IVRDriverContext
+{
+	void *
+	GetGenericInterface(const char *version, EVRInitError *error) override
+	{
+		if (error != nullptr) {
+			*error = VRInitError_None;
+		}
+		if (!strcmp(version, IVRServerDriverHost_Version)) {
+			return static_cast<IVRServerDriverHost *>(&g_host);
+		}
+		if (!strcmp(version, IVRDriverLog_Version)) {
+			return static_cast<IVRDriverLog *>(&g_log);
+		}
+		if (!strcmp(version, IVRProperties_Version)) {
+			return static_cast<IVRProperties *>(&g_properties);
+		}
+		if (!strcmp(version, IVRDriverInput_Version)) {
+			return static_cast<IVRDriverInput *>(&g_input);
+		}
+		if (!strcmp(version, IVRSettings_Version)) {
+			return static_cast<IVRSettings *>(&g_settings);
+		}
+		if (!strcmp(version, IVRDriverManager_Version)) {
+			return static_cast<IVRDriverManager *>(&g_driverManager);
+		}
+		if (!strcmp(version, IVRResources_Version)) {
+			return static_cast<IVRResources *>(&g_resources);
+		}
+		if (error != nullptr) {
+			*error = VRInitError_Init_InterfaceNotFound;
+		}
+		return nullptr;
+	}
+	DriverHandle_t GetDriverHandle() override { return 1; }
+};
+
+template <typename T>
+bool
+prop(uint32_t device, int id, T *out)
+{
+	std::lock_guard<std::mutex> l(g_mutex);
+	auto c = g_props.find(1000 + device);
+	if (c == g_props.end() || c->second.find(id) == c->second.end() || c->second[id].size() != sizeof(T)) {
+		return false;
+	}
+	memcpy(out, c->second[id].data(), sizeof(T));
+	return true;
+}
+
+size_t
+pose_count(uint32_t device)
+{
+	std::lock_guard<std::mutex> l(g_mutex);
+	return g_poses[device].times.size();
+}
+
+void
+sleep_ms(int ms)
+{
+	std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+} // namespace
+
+int
+main(int argc, char **argv)
+{
+	// --monado: Monado's simulated headset through the Monado backend (no hardware is opened); default: the driver's
+	// own simulated backend.
+	// --real: the Monado backend on whatever headset is plugged in (opens it over USB; no display, no SteamVR).
+	const bool real = argc > 1 && !strcmp(argv[1], "--real");
+	if (real && argc > 3 && !strcmp(argv[2], "--dump")) {
+		g_dumpPath = argv[3];
+	}
+	// --room: Monado's simulated headset with the room calibration on, against a temporary SteamVR config folder
+	// (XDG_CONFIG_HOME points at a scratch folder, so the user's SteamVR files are never touched).
+	const bool room = argc > 1 && !strcmp(argv[1], "--room");
+	const bool monado = real || room || (argc > 1 && !strcmp(argv[1], "--monado"));
+	// --predicted: the driver-predicted, zero-velocity pose model (OVRN_POSE_MODEL=predicted).
+	const bool predicted = argc > 1 && !strcmp(argv[1], "--predicted");
+	if (predicted) {
+		setenv("OVRN_POSE_MODEL", "predicted", 1);
+	}
+	// The room calibration prepares a chaperone file: not the user's from a test (a fixed play area instead, or with
+	// --room a scratch config folder).
+	std::string room_dir, room_steam_config;
+	if (room) {
+		char tmpl[] = "/tmp/ovrn_room_XXXXXX";
+		if (mkdtemp(tmpl) == nullptr) {
+			printf("FAIL: no scratch folder\n");
+			return 1;
+		}
+		room_dir = tmpl;
+		room_steam_config = room_dir + "/steamconfig";
+		mkdir((room_dir + "/openvr").c_str(), 0755);
+		mkdir(room_steam_config.c_str(), 0755);
+		FILE *f = fopen((room_dir + "/openvr/openvrpaths.vrpath").c_str(), "w");
+		fprintf(f, "{\"config\":[\"%s\"],\"version\":1}\n", room_steam_config.c_str());
+		fclose(f);
+		setenv("XDG_CONFIG_HOME", room_dir.c_str(), 1);
+		unsetenv("OVRD_ROOM");
+	} else {
+		setenv("OVRD_ROOM", "0", 1);
+	}
+	if (real) {
+		// nothing more: Monado probes the hardware
+	} else if (monado) {
+		setenv("SIMULATED_ENABLE", "true", 1);
+	} else {
+		setenv("OVRN_BACKEND", "sim", 1);
+	}
+	if (argc > 1 && !strcmp(argv[1], "--late")) {
+		setenv("OVRN_SIM_LATE_LEFT", "1", 1);
+	}
+	const char *path = OVRN_DRIVER_PATH;
+	void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+	if (lib == nullptr) {
+		printf("FAIL: dlopen %s: %s\n", path, dlerror());
+		return 1;
+	}
+	typedef void *(*Factory)(const char *, int *);
+	Factory factory = (Factory)dlsym(lib, "HmdDriverFactory");
+	check(factory != nullptr, "the driver exports HmdDriverFactory");
+	if (factory == nullptr) {
+		return 1;
+	}
+	int rc = 0;
+	check(factory("IVRNotAThing_001", &rc) == nullptr && rc == VRInitError_Init_InterfaceNotFound,
+	      "an unknown interface is refused with InterfaceNotFound");
+	IServerTrackedDeviceProvider *provider =
+	    (IServerTrackedDeviceProvider *)factory(IServerTrackedDeviceProvider_Version, &rc);
+	check(provider != nullptr, "the driver returns its IServerTrackedDeviceProvider");
+	if (provider == nullptr) {
+		return 1;
+	}
+	FakeContext context;
+
+	// --late: the simulated left controller appears only after the start (a Sense controller connecting late):
+	// the driver adds it to SteamVR from RunFrame, and its poses flow once SteamVR activates it.
+	if (argc > 1 && !strcmp(argv[1], "--late")) {
+		check(provider->Init(&context) == VRInitError_None, "Init succeeds");
+		std::vector<Added> added;
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			added = g_added;
+		}
+		check(added.size() == 2 && added[0].cls == TrackedDeviceClass_HMD && added[1].cls == TrackedDeviceClass_Controller,
+		      "late left: the headset and the right controller only at the start");
+		for (uint32_t i = 0; i < added.size(); i++) {
+			check(added[i].driver->Activate(i) == VRInitError_None, "Activate succeeds");
+		}
+		for (int i = 0; i < 4; i++) {
+			provider->RunFrame();
+		}
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_added.size() == 2, "late left: nothing added before it connects");
+		}
+		for (int i = 0; i < 3; i++) {
+			provider->RunFrame();
+		}
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			added = g_added;
+		}
+		check(added.size() == 3 && added[2].cls == TrackedDeviceClass_Controller && added[2].serial != added[1].serial,
+		      "late left: added to SteamVR once it connects (RunFrame), with its own serial");
+		for (int i = 0; i < 3; i++) {
+			provider->RunFrame();
+		}
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_added.size() == 3, "late left: added once only");
+		}
+		if (added.size() == 3) {
+			sleep_ms(30);
+			check(pose_count(2) == 0, "late left: no pose before SteamVR activates it");
+			check(added[2].driver->Activate(2) == VRInitError_None, "late left: Activate succeeds");
+			int32_t role = 0;
+			check(prop(2, Prop_ControllerRoleHint_Int32, &role) && role == TrackedControllerRole_LeftHand,
+			      "late left: it is the left hand");
+			sleep_ms(100);
+			bool valid = false;
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				valid = g_poses[2].last.poseIsValid;
+			}
+			check(pose_count(2) > 50 && valid, "late left: its poses flow after activation");
+		}
+		provider->Cleanup();
+		check(dlclose(lib) == 0, "the driver unloads");
+		printf("%s\n", g_fails ? "FAILED" : "all checks passed");
+		return g_fails ? 1 : 0;
+	}
+
+	// Real hardware: one round (Monado's PS VR2 driver can't re-claim the USB interfaces within one process; under
+	// SteamVR every start is a new vrserver process).
+	for (int round = 0; round < (real ? 1 : 2); round++) {
+		printf("--- round %d (%s)\n", round + 1, round == 0 ? "first start" : "restart after Cleanup");
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			g_added.clear();
+			g_poses.clear();
+			g_props.clear();
+			g_eyeToHead.clear();
+			g_components.clear();
+			g_events.clear();
+		}
+		unsetenv("DISABLE_STEAMVR_LINUX_FIXES");
+		check(provider->Init(&context) == VRInitError_None, "Init succeeds");
+		{
+			const char *off = getenv("DISABLE_STEAMVR_LINUX_FIXES");
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(off != nullptr && strcmp(off, "1") == 0,
+			      "the SteamVRLinuxFixes layer is switched off for the compositor (environment it inherits)");
+			check(g_bools.count("steamvr/enableLinuxVulkanAsync") && g_bools["steamvr/enableLinuxVulkanAsync"],
+			      "SteamVR's async reprojection is switched on before the compositor starts");
+		}
+		check(provider->GetInterfaceVersions() != nullptr, "interface versions are reported");
+		std::vector<Added> added;
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			added = g_added;
+		}
+		int hmds = 0, controllers = 0;
+		for (const Added &a : added) {
+			hmds += a.cls == TrackedDeviceClass_HMD;
+			controllers += a.cls == TrackedDeviceClass_Controller;
+		}
+		const size_t n_dev = monado ? 1 : 3; // Monado's simulated system has a headset only
+		check(hmds == 1 && controllers == (int)n_dev - 1 && added.size() == n_dev &&
+		          added[0].cls == TrackedDeviceClass_HMD,
+		      monado ? "one headset is registered" : "one headset (first) and two controllers are registered");
+		bool distinct = !added.empty() && !added[0].serial.empty();
+		for (size_t i = 1; i < added.size(); i++) {
+			distinct = distinct && added[i].serial != added[i - 1].serial;
+		}
+		check(distinct, "the devices have distinct, non-empty serial numbers");
+		if (added.size() != n_dev) {
+			provider->Cleanup();
+			return 1;
+		}
+		sleep_ms(50);
+		check(pose_count(0) + pose_count(1) + pose_count(2) == 0, "no pose is sent before a device is activated");
+
+		for (uint32_t i = 0; i < n_dev; i++) {
+			check(added[i].driver->Activate(i) == VRInitError_None, "Activate succeeds");
+		}
+		ITrackedDeviceServerDriver *hmd = added[0].driver;
+		float hz = 0, ipd = 0, v2p = -1;
+		bool has_display = false, on_desktop = true;
+		check(prop(0, Prop_DisplayFrequency_Float, &hz) && (monado ? (hz > 1.0f && hz < 1000.0f) : fabsf(hz - 90.0f) < 0.01f),
+		      "display frequency is set");
+		check(prop(0, Prop_UserIpdMeters_Float, &ipd) && ipd > 0.05f && ipd < 0.08f, "a plausible IPD is set");
+		check(prop(0, Prop_SecondsFromVsyncToPhotons_Float, &v2p) && v2p >= 0.0f, "vsync-to-photons is set");
+		{
+			int32_t style = -1;
+			check(prop(0, Prop_HmdTrackingStyle_Int32, &style) && style == HmdTrackingStyle_InsideOutCameras,
+			      "the headset reports inside-out tracking (Prop_HmdTrackingStyle_Int32 = InsideOutCameras)");
+		}
+		if (monado && !room) {
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_props[1000].count(Prop_DriverProvidedChaperoneJson_String) == 1,
+			      "with the room calibration off a play area is given to SteamVR");
+		}
+		if (room) {
+			std::string published;
+			uint64_t universe = 0;
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				const auto &b = g_props[1000][Prop_DriverProvidedChaperonePath_String];
+				published.assign(b.begin(), b.end());
+				published = published.c_str(); // up to the terminating NUL
+			}
+			const std::string expected = room_steam_config + "/monado_psvr2/chaperone_info.vrchap";
+			check(published == expected, "the driver publishes its own chaperone file (Prop_DriverProvidedChaperonePath_String)");
+			check(prop(0, Prop_CurrentUniverseId_Uint64, &universe) && universe == 5023,
+			      "the session universe (5023) is active until a floor capture anchors the room");
+			FILE *own = fopen(expected.c_str(), "r");
+			std::string text;
+			if (own != nullptr) {
+				char buf[4096];
+				size_t n;
+				while ((n = fread(buf, 1, sizeof(buf), own)) > 0) {
+					text.append(buf, n);
+				}
+				fclose(own);
+			}
+			check(text.find("\"universeID\":\t\"5022\"") != std::string::npos &&
+			          text.find("\"universeID\":\t\"5023\"") != std::string::npos,
+			      "the driver's file holds the room universe (5022) and the session universe (5023)");
+			FILE *global = fopen((room_steam_config + "/chaperone_info.vrchap").c_str(), "r");
+			check(global == nullptr, "SteamVR's own chaperone file is not touched");
+			if (global != nullptr) {
+				fclose(global);
+			}
+		}
+				check(prop(0, Prop_HasDisplayComponent_Bool, &has_display) && has_display &&
+		          prop(0, Prop_IsOnDesktop_Bool, &on_desktop) && !on_desktop,
+		      "the headset is declared as a display that is not on the desktop");
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_eyeToHead[0] == 1, "eye-to-head transforms are given to SteamVR once");
+		}
+		int32_t role[3] = {0, 0, 0};
+		if (!monado) {
+			check(prop(1, Prop_ControllerRoleHint_Int32, &role[1]) &&
+			          prop(2, Prop_ControllerRoleHint_Int32, &role[2]) &&
+			          role[1] == TrackedControllerRole_LeftHand && role[2] == TrackedControllerRole_RightHand,
+			      "the controllers are left and right hand");
+		}
+
+		IVRDisplayComponent *display = (IVRDisplayComponent *)hmd->GetComponent(IVRDisplayComponent_Version);
+		check(display != nullptr, "the headset has a display component");
+		check(hmd->GetComponent(IVRDriverDirectModeComponent_Version) == nullptr &&
+		          hmd->GetComponent(IVRVirtualDisplay_Version) == nullptr,
+		      "no direct mode or virtual display component: SteamVR owns the display");
+		if (display != nullptr) {
+			int32_t x, y;
+			uint32_t w, h;
+			display->GetWindowBounds(&x, &y, &w, &h);
+			check(monado ? (w > 0 && h > 0) : (w == 4000 && h == 2040), "window bounds are the panel size");
+			const uint32_t pw = w, ph = h;
+			check(display->IsDisplayRealDisplay() && !display->IsDisplayOnDesktop(), "real display, not on desktop");
+			uint32_t rw, rh;
+			display->GetRecommendedRenderTargetSize(&rw, &rh);
+			check(monado ? (rw > 0 && rh > 0) : (rw == 2000 && rh == 2040), "recommended render target per eye");
+			uint32_t vx[2], vy, vw[2], vh;
+			display->GetEyeOutputViewport(Eye_Left, &vx[0], &vy, &vw[0], &vh);
+			display->GetEyeOutputViewport(Eye_Right, &vx[1], &vy, &vw[1], &vh);
+			check(vx[0] + vw[0] <= pw && vx[1] + vw[1] <= pw && vx[1] >= vx[0] + vw[0] && vw[0] > 0 && vw[1] > 0 &&
+			          vh > 0 && vh <= ph && (monado || (vx[1] == 2000 && vw[0] == 2000 && vh == 2040)),
+			      "eye viewports are side by side inside the panel");
+			float l, r, t, b;
+			display->GetProjectionRaw(Eye_Left, &l, &r, &t, &b);
+			check(l < 0 && r > 0 && t < 0 && b > 0 && (monado || (fabsf(l + 1.0f) < 0.01f && fabsf(b - 1.0f) < 0.01f)),
+			      "projection: left and top negative, right and bottom positive (OpenVR convention)");
+			DistortionCoordinates_t d = display->ComputeDistortion(Eye_Right, 0.3f, 0.7f);
+			check(monado ? (std::isfinite(d.rfGreen[0]) && std::isfinite(d.rfRed[1]) && std::isfinite(d.rfBlue[0]))
+			             : (d.rfGreen[0] == 0.3f && d.rfGreen[1] == 0.7f && d.rfRed[0] == 0.3f && d.rfBlue[1] == 0.7f),
+			      monado ? "distortion comes from the device" : "distortion falls back to the identity");
+		}
+
+		if (real && display != nullptr && g_dumpPath != nullptr) {
+			// The same lines as psvr2-test/tools/vrdisplaydump writes from a running SteamVR, straight from the driver
+			// (SteamVR passes these through), for analysis/display_diff.py against a dump of Sony's driver.
+			FILE *df = fopen(g_dumpPath, "w");
+			if (df != nullptr) {
+				uint32_t rw, rh;
+				display->GetRecommendedRenderTargetSize(&rw, &rh);
+				fprintf(df, "render_target %u %u\n", rw, rh);
+				for (int eye = 0; eye < 2; eye++) {
+					float l, r, t, b;
+					display->GetProjectionRaw((EVREye)eye, &l, &r, &t, &b);
+					fprintf(df, "projection_raw %d %.6f %.6f %.6f %.6f\n", eye, l, r, t, b);
+					fprintf(df, "eye_to_head %d", eye);
+					for (int a = 0; a < 3; a++) {
+						for (int c = 0; c < 4; c++) {
+							fprintf(df, " %.6f", g_eyeMatrix[eye].m[a][c]);
+						}
+					}
+					fprintf(df, "\n");
+					const int N = 33;
+					for (int y = 0; y < N; y++) {
+						for (int x = 0; x < N; x++) {
+							const float u = (float)x / (N - 1), v = (float)y / (N - 1);
+							DistortionCoordinates_t d = display->ComputeDistortion((EVREye)eye, u, v);
+							fprintf(df, "distortion %d %.4f %.4f 1 %.6f %.6f %.6f %.6f %.6f %.6f\n", eye, u, v,
+							        d.rfRed[0], d.rfRed[1], d.rfGreen[0], d.rfGreen[1], d.rfBlue[0], d.rfBlue[1]);
+						}
+					}
+				}
+				fclose(df);
+				printf("REAL: display description written to %s\n", g_dumpPath);
+			}
+		}
+		if (real && display != nullptr) {
+			// What the driver tells SteamVR about the real headset, for comparison with the known values.
+			float l, r, t, b;
+			uint32_t rw, rh, vx, vy, vw, vh;
+			float p2v = -1;
+			int32_t mesh = 0;
+			prop(0, Prop_SecondsFromPhotonsToVblank_Float, &p2v);
+			prop(0, Prop_DistortionMeshResolution_Int32, &mesh);
+			display->GetRecommendedRenderTargetSize(&rw, &rh);
+			printf("REAL: %.3f Hz, IPD %.2f mm, vsync-to-photons %.5f, photons-to-vblank %.5f, mesh %d, render %ux%u\n",
+			       hz, ipd * 1000.0f, v2p, p2v, mesh, rw, rh);
+			for (int e = 0; e < 2; e++) {
+				display->GetProjectionRaw((EVREye)e, &l, &r, &t, &b);
+				display->GetEyeOutputViewport((EVREye)e, &vx, &vy, &vw, &vh);
+				DistortionCoordinates_t c = display->ComputeDistortion((EVREye)e, 0.5f, 0.5f);
+				DistortionCoordinates_t k = display->ComputeDistortion((EVREye)e, 0.1f, 0.1f);
+				printf("REAL eye %d: viewport %u,%u %ux%u; projection L%.4f R%.4f T%.4f B%.4f; distortion centre "
+				       "g(%.4f,%.4f), at 0.1,0.1 r(%.4f,%.4f) g(%.4f,%.4f) b(%.4f,%.4f)\n",
+				       e, vx, vy, vw, vh, l, r, t, b, c.rfGreen[0], c.rfGreen[1], k.rfRed[0], k.rfRed[1],
+				       k.rfGreen[0], k.rfGreen[1], k.rfBlue[0], k.rfBlue[1]);
+			}
+		}
+		if (real) {
+			// The headset needs a few seconds before it reports an orientation.
+			for (int w = 0; w < 150; w++) {
+				sleep_ms(100);
+				std::lock_guard<std::mutex> l(g_mutex);
+				if (g_poses[0].last.poseIsValid) {
+					printf("REAL: first valid head pose after %.1f s\n", (w + 1) * 0.1);
+					break;
+				}
+			}
+		}
+		if (!monado) {
+			// Controllers of the simulated backend: 3 inputs and a haptic output each; a universe that changes after
+			// 30 frames; a room transform 25 cm up.
+			uint64_t universe0 = 0;
+			prop(1, Prop_CurrentUniverseId_Uint64, &universe0);
+			for (int i = 0; i < 40; i++) {
+				provider->RunFrame();
+			}
+			size_t n_inputs[2] = {0, 0}, n_haptic[2] = {0, 0};
+			float trigger = -1, stick_l = 0, stick_r = 0;
+			int trigger_updates = 0;
+			uint64_t haptic_handle = 0;
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				for (size_t k = 0; k < g_components.size(); k++) {
+					const Component &c = g_components[k];
+					const int which = c.container == 1001 ? 0 : (c.container == 1002 ? 1 : -1);
+					if (which < 0) {
+						continue;
+					}
+					(c.kind == 2 ? n_haptic : n_inputs)[which]++;
+					if (c.kind == 2 && which == 1) {
+						haptic_handle = k + 1;
+					}
+					if (c.path == "/input/trigger/value" && which == 0) {
+						trigger = c.value;
+						trigger_updates = c.updates;
+					}
+					if (c.path == "/input/stick/x") {
+						(which == 0 ? stick_l : stick_r) = c.value;
+					}
+				}
+			}
+			check(n_inputs[0] == 3 && n_inputs[1] == 3 && n_haptic[0] == 1 && n_haptic[1] == 1,
+			      "each controller has its input components and a haptic component");
+			check(trigger == 0.5f && trigger_updates >= 40 && stick_l == -1.0f && stick_r == 1.0f,
+			      "input values reach SteamVR every frame, per hand");
+			uint64_t universe1 = 0, universe_c = 0;
+			check(prop(0, Prop_CurrentUniverseId_Uint64, &universe1) && prop(2, Prop_CurrentUniverseId_Uint64, &universe_c) &&
+			          universe0 == 3 && universe1 == 2 && universe_c == 2,
+			      "a universe change (room captured) reaches the headset and the controllers");
+			// A haptic event for the right controller.
+			VREvent_t ev = {};
+			ev.eventType = VREvent_Input_HapticVibration;
+			ev.data.hapticVibration.containerHandle = 1002;
+			ev.data.hapticVibration.componentHandle = haptic_handle;
+			ev.data.hapticVibration.fDurationSeconds = 0.1f;
+			ev.data.hapticVibration.fAmplitude = 0.7f;
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				g_events.push_back(ev);
+			}
+			provider->RunFrame();
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				check(g_events.empty(), "haptic events are taken from SteamVR's queue");
+			}
+		}
+		sleep_ms(real ? 3000 : 1000);
+		if (real) {
+			std::lock_guard<std::mutex> l(g_mutex);
+			const DriverPose_t &q = g_poses[0].last;
+			printf("REAL head pose: valid %d result %d pos %.3f %.3f %.3f rot %.4f %.4f %.4f %.4f\n", q.poseIsValid,
+			       q.result, q.vecPosition[0], q.vecPosition[1], q.vecPosition[2], q.qRotation.x, q.qRotation.y,
+			       q.qRotation.z, q.qRotation.w);
+		}
+		for (int i = 0; i < 20; i++) {
+			provider->RunFrame();
+		}
+		std::map<uint32_t, PoseLog> poses;
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			poses = g_poses;
+		}
+		bool cadence = true;
+		for (uint32_t i = 0; i < n_dev; i++) {
+			const std::vector<int64_t> &t = poses[i].times;
+			std::vector<double> gaps;
+			for (size_t k = 1; k < t.size(); k++) {
+				gaps.push_back((t[k] - t[k - 1]) / 1e6);
+			}
+			std::sort(gaps.begin(), gaps.end());
+			const double med = gaps.empty() ? 0 : gaps[gaps.size() / 2];
+			const double p99 = gaps.empty() ? 0 : gaps[(size_t)(0.99 * (gaps.size() - 1))];
+			printf("device %u: %zu poses, interval median %.3f ms, p99 %.3f ms\n", i, t.size(), med, p99);
+			cadence = cadence && (real || (t.size() > 950 && t.size() < 1100)) && fabs(med - 1.0) < 0.05 && p99 < 1.5;
+		}
+		check(cadence, "every device's pose is sent on a steady 1 ms grid");
+		const DriverPose_t &hp = poses[0].last;
+		const double qn = sqrt(hp.qRotation.w * hp.qRotation.w + hp.qRotation.x * hp.qRotation.x +
+		                       hp.qRotation.y * hp.qRotation.y + hp.qRotation.z * hp.qRotation.z);
+		check(hp.poseIsValid && hp.deviceIsConnected && hp.result == TrackingResult_Running_OK &&
+		          fabs(qn - 1.0) < 1e-5 && (monado || fabs(hp.vecPosition[1] - 1.6) < 1e-9),
+		      "head pose: valid, connected, unit rotation, the backend's position");
+		check(hp.poseTimeOffset <= 0.0 && hp.poseTimeOffset > -0.001,
+		      "head pose: its age is handed over (a time offset between -1 ms and 0)");
+		if (!monado) {
+			// The simulated head yaws at 0.5 rad/s with a 0.3 rad pitch and drifts at 0.1 m/s: extrapolating one pose
+			// with its own velocities, as SteamVR does, must land on the next pose.
+			const DriverPose_t &a = poses[0].prev, &b = poses[0].last;
+			const double dt = ((double)poses[0].last_ns * 1e-9 + b.poseTimeOffset) -
+			                  ((double)poses[0].prev_ns * 1e-9 + a.poseTimeOffset);
+			const double wx = a.vecAngularVelocity[0], wy = a.vecAngularVelocity[1], wz = a.vecAngularVelocity[2];
+			const double wn = sqrt(wx * wx + wy * wy + wz * wz), ang = wn * dt;
+			// q_pred = q_a * exp(w_local * dt)
+			const double s2 = wn > 1e-12 ? sin(ang / 2) / wn : 0, c2 = cos(ang / 2);
+			const double dx = wx * s2, dy = wy * s2, dz = wz * s2, dw = c2;
+			const HmdQuaternion_t &q = a.qRotation;
+			const double px = q.w * dx + q.x * dw + q.y * dz - q.z * dy, py = q.w * dy - q.x * dz + q.y * dw + q.z * dx,
+			             pz = q.w * dz + q.x * dy - q.y * dx + q.z * dw, pw = q.w * dw - q.x * dx - q.y * dy - q.z * dz;
+			const double dot = fabs(px * b.qRotation.x + py * b.qRotation.y + pz * b.qRotation.z + pw * b.qRotation.w);
+			const double err_deg = 2 * acos(fmin(1.0, dot)) * 57.29578;
+			const double pos_err = fabs(a.vecPosition[0] + a.vecVelocity[0] * dt - b.vecPosition[0]);
+			printf("head velocities: |w| %.3f rad/s (local %.3f %.3f %.3f), extrapolated %.2f ms -> %.5f deg and %.5f mm "
+			       "from the next pose\n",
+			       wn, wx, wy, wz, dt * 1e3, err_deg, pos_err * 1e3);
+			check(fabs(wn - 0.5) < 1e-6 && fabs(wz) > 0.1 && err_deg < 0.002 && pos_err < 2e-5 && dt > 0.0005 &&
+			          dt < 0.0015,
+			      "head pose: velocities in the head's own frame, and extrapolating with them reaches the next pose");
+		}
+		check(hp.qWorldFromDriverRotation.w == 1.0 && hp.qDriverFromHeadRotation.w == 1.0,
+		      "head pose: identity world-from-driver and driver-from-head rotations");
+		if (!monado) {
+			check(hp.vecWorldFromDriverTranslation[1] == 0.25 && poses[1].last.vecWorldFromDriverTranslation[1] == 0.25 &&
+			          poses[2].last.vecWorldFromDriverTranslation[1] == 0.25,
+			      "the room transform is in every device's pose, the same for all");
+		}
+		if (!monado) {
+			check(poses[1].last.poseIsValid && poses[2].last.poseIsValid && poses[1].last.vecPosition[0] < 0 &&
+			          poses[2].last.vecPosition[0] > 0,
+			      "controller poses: valid, left on the left and right on the right");
+		}
+		DriverPose_t got = hmd->GetPose();
+		check(got.poseIsValid, "GetPose returns a valid last pose");
+
+		hmd->Deactivate();
+		sleep_ms(20);
+		const size_t h0 = pose_count(0), c0 = pose_count(1);
+		sleep_ms(100);
+		check(pose_count(0) == h0 && (monado || pose_count(1) > c0 + 80),
+		      "a deactivated device stops sending poses, the others keep going");
+
+		provider->Cleanup();
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(!g_bools.count("steamvr/enableLinuxVulkanAsync") && !g_bools.count("driver_monado_psvr2/asyncReprojectionSetByDriver"),
+			      "Cleanup takes the async reprojection setting out again (other drivers keep SteamVR's default)");
+		}
+		const size_t total = pose_count(0) + pose_count(1) + pose_count(2);
+		sleep_ms(100);
+		check(pose_count(0) + pose_count(1) + pose_count(2) == total, "no pose is sent after Cleanup (threads stopped)");
+	}
+
+	check(dlclose(lib) == 0, "the driver unloads");
+	printf("%s\n", g_fails ? "FAILED" : "all checks passed");
+	return g_fails ? 1 : 0;
+}

@@ -5,7 +5,7 @@
  * @brief  Tests for the SteamVR driver's room calibration (ovrd_room).
  */
 
-#include "ovrd_room.hpp"
+#include "ovrn_room.hpp"
 
 #include "math/m_api.h"
 #include "util/u_json.h"
@@ -234,6 +234,50 @@ TEST_CASE("ovrd_room lowest point")
 	CHECK(ovrd_room_lowest_point(grip, outline, 3, 0.0f) == Approx(1.0f - 0.01f));
 }
 
+TEST_CASE("ovrd_room chaperone file: the driver's rectangle in the room universe")
+{
+	std::string dir = temp_dir();
+	std::string path = dir + "/chaperone_info.vrchap";
+	bool has_room = true;
+	std::string err;
+
+	// An undrawn room (seeded without a play area) gets the rectangle; it doesn't count as a drawn room.
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err));
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 3.0f));
+	CHECK_FALSE(has_room);
+	cJSON *doc = cJSON_Parse(slurp(path).c_str());
+	REQUIRE(doc != nullptr);
+	cJSON *u2 = find_universe(doc, "2");
+	REQUIRE(u2 != nullptr);
+	CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(u2, "collision_bounds")) == 4);
+	CHECK(cJSON_GetArrayItem(cJSON_GetObjectItem(u2, "play_area"), 0)->valuedouble == Catch::Approx(3.0));
+	cJSON_Delete(doc);
+
+	// Unchanged on a second run; a new size replaces the driver's own rectangle.
+	std::string before = slurp(path);
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 3.0f));
+	CHECK(slurp(path) == before);
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 2.5f));
+	CHECK_FALSE(has_room);
+	doc = cJSON_Parse(slurp(path).c_str());
+	u2 = find_universe(doc, "2");
+	CHECK(cJSON_GetArrayItem(cJSON_GetObjectItem(u2, "play_area"), 0)->valuedouble == Catch::Approx(2.5));
+
+	// A room drawn in Room Setup (SteamVR rewrites the entry without our mark) is never replaced.
+	cJSON_DeleteItemFromObject(u2, "monado_rectangle");
+	cJSON_ReplaceItemInObject(u2, "play_area", cJSON_Parse("[1.7,2.2]"));
+	char *text = cJSON_Print(doc);
+	FILE *f = fopen(path.c_str(), "w");
+	fputs(text, f);
+	fclose(f);
+	cJSON_free(text);
+	cJSON_Delete(doc);
+	before = slurp(path);
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 3.0f));
+	CHECK(has_room);
+	CHECK(slurp(path) == before);
+}
+
 TEST_CASE("ovrd_room chaperone file: fresh, existing room, idempotent, foreign files")
 {
 	std::string dir = temp_dir();
@@ -324,4 +368,164 @@ TEST_CASE("ovrd_room room file round trip and validation")
 	spit(path, "not json");
 	CHECK_FALSE(ovrd_room_load(path, &loaded));
 	CHECK_FALSE(ovrd_room_load(dir + "/missing.json", &loaded));
+}
+
+namespace {
+
+//! A universe entry with the given floor polygon (x, z corners in order) as SteamVR stores walls: bottom, top, top,
+//! bottom, 2.43 m high; each wall from corner i to corner i+1, closing back to the first.
+std::string
+universe_with_walls(const std::vector<std::pair<float, float>> &corners, float play_w, float play_d, bool close = true)
+{
+	std::ostringstream s;
+	s << "{\"universeID\":\"5022\",\"play_area\":[" << play_w << "," << play_d << "],\"collision_bounds\":[";
+	const size_t n = corners.size(), walls = close ? n : n - 1;
+	for (size_t i = 0; i < walls; i++) {
+		const auto &a = corners[i], &b = corners[(i + 1) % n];
+		s << (i ? "," : "") << "[[" << a.first << ",0," << a.second << "],[" << a.first << ",2.43," << a.second
+		  << "],[" << b.first << ",2.43," << b.second << "],[" << b.first << ",0," << b.second << "]]";
+	}
+	s << "],\"seated\":{\"translation\":[0,0,0],\"yaw\":0},\"standing\":{\"translation\":[0.5,0,-0.25],\"yaw\":"
+	     "1.5708},\"time\":\"Wed Nov 18 20:00:00 2026\"}";
+	return s.str();
+}
+
+bool
+has_issue(const ovrd_room_universe_info &info, const char *text)
+{
+	for (const auto &i : info.issues) {
+		if (i.find(text) != std::string::npos) {
+			return true;
+		}
+	}
+	return false;
+}
+
+} // namespace
+
+TEST_CASE("ovrd_room boundary check: SteamVR's own 2 m rectangle is valid")
+{
+	// As SteamVR wrote it into chaperone_info.vrchap (2026-11-18).
+	const std::string steamvr =
+	    "{\"collision_bounds\":[[[-1,0,-1],[-1,2.43000007,-1],[-1,2.43000007,1],[-1,0,1]],[[-1,0,1],[-1,2.43000007,1],"
+	    "[1,2.43000007,1],[1,0,1]],[[1,0,1],[1,2.43000007,1],[1,2.43000007,-1],[1,0,-1]],[[1,0,-1],[1,2.43000007,-1],"
+	    "[-1,2.43000007,-1],[-1,0,-1]]],\"play_area\":[2,2],\"seated\":{\"translation\":[0,0,0],\"yaw\":0},\"standing\":"
+	    "{\"translation\":[0,0,0],\"yaw\":0},\"time\":\"Wed Nov 18 15:58:17 2026\",\"universeID\":\"2\"}";
+	ovrd_room_universe_info info;
+	REQUIRE(ovrd_room_check_universe(steamvr, &info));
+	CHECK(info.issues.empty());
+	CHECK(info.walls == 4);
+	CHECK(info.perimeter_m == Approx(8.0f));
+	CHECK(info.area_m2 == Approx(4.0f));
+	CHECK(info.winding == 1); // front-left, back-left, back-right, front-right: counter-clockwise seen from above
+	CHECK(info.play_width == Approx(2.0f));
+	CHECK(info.time == "Wed Nov 18 15:58:17 2026");
+}
+
+TEST_CASE("ovrd_room boundary check: a traced L-shaped room, either direction")
+{
+	// 2.5 x 2.5 m with a 0.5 x 1.5 m corner cut out (front right), a 0.8 m play area around the origin.
+	std::vector<std::pair<float, float>> l = {{-1.5f, -1}, {-1.5f, 1.5f}, {1, 1.5f}, {1, 0.5f}, {0.5f, 0.5f}, {0.5f, -1}};
+	ovrd_room_universe_info info;
+	REQUIRE(ovrd_room_check_universe(universe_with_walls(l, 0.8f, 0.8f), &info));
+	CHECK(info.issues.empty());
+	CHECK(info.walls == 6);
+	CHECK(info.area_m2 == Approx(2.5f * 2.5f - 0.5f * 1.5f));
+	// The same room with a 1.2 m play area reaches into the cut-out.
+	ovrd_room_universe_info big;
+	REQUIRE(ovrd_room_check_universe(universe_with_walls(l, 1.2f, 1.2f), &big));
+	CHECK(has_issue(big, "outside the boundary"));
+	CHECK(info.has_standing);
+	CHECK(info.standing.yaw == Approx(1.5708f));
+	std::vector<std::pair<float, float>> r(l.rbegin(), l.rend());
+	ovrd_room_universe_info back;
+	REQUIRE(ovrd_room_check_universe(universe_with_walls(r, 0.8f, 0.8f), &back));
+	CHECK(back.issues.empty());
+	CHECK(back.winding == -info.winding);
+}
+
+TEST_CASE("ovrd_room boundary check: malformed geometry is reported")
+{
+	ovrd_room_universe_info info;
+	const std::vector<std::pair<float, float>> square = {{-1, -1}, {-1, 1}, {1, 1}, {1, -1}};
+
+	// Not closed.
+	REQUIRE(ovrd_room_check_universe(universe_with_walls(square, 1, 1, false), &info));
+	CHECK(has_issue(info, "doesn't end where"));
+	CHECK(info.winding == 0);
+
+	// Walls crossing (a bow tie).
+	REQUIRE(ovrd_room_check_universe(universe_with_walls({{-1, -1}, {1, 1}, {1, -1}, {-1, 1}}, 0.2f, 0.2f), &info));
+	CHECK(has_issue(info, "cross"));
+
+	// A corner repeated (a zero-length wall).
+	REQUIRE(ovrd_room_check_universe(universe_with_walls({{-1, -1}, {-1, 1}, {-1, 1}, {1, 1}, {1, -1}}, 1, 1), &info));
+	CHECK(has_issue(info, "zero length"));
+	CHECK(has_issue(info, "same point"));
+
+	// Play area bigger than the room.
+	REQUIRE(ovrd_room_check_universe(universe_with_walls(square, 3, 3), &info));
+	CHECK(has_issue(info, "outside the boundary"));
+
+	// A wall floating above the floor, a slanted quad, a quad of 3 points.
+	REQUIRE(ovrd_room_check_universe(
+	    "{\"collision_bounds\":[[[0,0.2,0],[0,2.43,0],[1,2.43,0],[1,0.2,0]],[[1,0,0],[1.5,2.43,0],[1,2.43,1],[1,0,1]],"
+	    "[[1,0,1],[1,2.43,1],[0,0,1]]],\"seated\":{\"translation\":[0,0,0],\"yaw\":0},\"standing\":{\"translation\":["
+	    "0,0,0],\"yaw\":0}}",
+	    &info));
+	CHECK(has_issue(info, "not on the floor"));
+	CHECK(has_issue(info, "not a vertical quad"));
+	CHECK(has_issue(info, "not 4 finite points"));
+
+	// No standing origin.
+	REQUIRE(ovrd_room_check_universe("{\"seated\":{\"translation\":[0,0,0],\"yaw\":0}}", &info));
+	CHECK(has_issue(info, "standing"));
+	CHECK_FALSE(ovrd_room_check_universe("[1,2]", &info));
+}
+
+TEST_CASE("ovrd_room chaperone file: a driver-owned file with its own universes")
+{
+	std::string dir = temp_dir();
+	std::string path = dir + "/monado_psvr2/chaperone_info.vrchap"; // the folder doesn't exist yet
+	bool has_room = true;
+	std::string err;
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 0.0f, "5022", "5023"));
+	CHECK_FALSE(has_room);
+
+	// The session universe gets the temporary square, the room universe only a plain origin (no made-up bounds).
+	ovrd_room_universe_info session, room;
+	REQUIRE(ovrd_room_read_universe(path, "5023", &session));
+	CHECK(session.found);
+	CHECK(session.walls == 4);
+	CHECK(session.issues.empty());
+	REQUIRE(ovrd_room_read_universe(path, "5022", &room));
+	CHECK(room.found);
+	CHECK(room.walls == 0);
+	CHECK(room.play_width == 0.0f);
+	CHECK(room.issues.empty());
+	ovrd_room_universe_info none;
+	REQUIRE(ovrd_room_read_universe(path, "2", &none));
+	CHECK_FALSE(none.found);
+
+	// A room drawn in Room Setup (SteamVR rewrites the room universe) is kept, and the session universe is reset.
+	cJSON *doc = cJSON_Parse(slurp(path).c_str());
+	REQUIRE(doc != nullptr);
+	cJSON *u = find_universe(doc, "5022");
+	REQUIRE(u != nullptr);
+	cJSON *drawn = cJSON_Parse(universe_with_walls({{-2, -1}, {-2, 1}, {2, 1}, {2, -1}}, 3, 1.5f).c_str());
+	cJSON_ReplaceItemInObject(drawn, "universeID", cJSON_CreateString("5022"));
+	cJSON_ReplaceItemViaPointer(cJSON_GetObjectItem(doc, "universes"), u, drawn);
+	char *text = cJSON_Print(doc);
+	{
+		std::ofstream f(path);
+		f << text;
+	}
+	cJSON_free(text);
+	cJSON_Delete(doc);
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 0.0f, "5022", "5023"));
+	CHECK(has_room);
+	REQUIRE(ovrd_room_read_universe(path, "5022", &room));
+	CHECK(room.walls == 4);
+	CHECK(room.area_m2 == Approx(8.0f));
+	CHECK(room.issues.empty());
 }
