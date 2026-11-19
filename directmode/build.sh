@@ -1,4 +1,6 @@
 #!/bin/sh
+# NOTE: the old plugin (steamvr_drv, with ovrd_direct_mode.hpp) was removed on 2026-11-18; this prototype no longer
+# builds against the trial tree. Kept for reference.
 # Builds the direct mode harness against the trial tree's plugin header.
 set -e
 cd "$(dirname "$0")"

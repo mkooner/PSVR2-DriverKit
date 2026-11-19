@@ -85,7 +85,7 @@ captures, tracking restarts and jumps.
 
 ### Automated checks
 
-- `tests/tests_ovrd_room.cpp` (14 cases): transforms and captures (below), the driver-owned file with its own
+- `tests/tests_ovrn_room.cpp` (14 cases): transforms and captures (below), the driver-owned file with its own
   universes (folder created, no made-up room bounds, a drawn room kept), and the boundary checker
   (`ovrd_room_check_universe`): SteamVR's own rectangle and a traced L-shaped room valid in both directions; an open
   boundary, crossing walls, a repeated corner, a play area outside the room, a wall off the floor, a slanted quad, a
@@ -101,6 +101,10 @@ Not checked offline: SteamVR's Room Setup itself (needs the headset): tracing, t
 boundary in games, Room Setup's events reaching the driver (the file watch logs the commit either way).
 
 ## The old plugin (driver_monado) and the original design
+
+The old plugin (`steamvr_drv`) was removed on 2026-11-18. Its room code lives on in the PS VR2 driver as
+`steamvr_psvr2/ovrn_room.cpp`, `ovrn_room.hpp` and `ovrn_room_state.hpp` (same functions, same saved files:
+`~/.config/monado/ovrd_room.json`). The section below is kept for its design notes.
 
 ## Coordinate frames
 
@@ -182,7 +186,7 @@ Commands: `echo forget > $XDG_RUNTIME_DIR/monado-room-command` deletes the saved
 
 ## Checked offline
 
-- **Unit tests (`tests/tests_ovrd_room.cpp`, 9 cases, 3,563 checks):**
+- **Unit tests (`tests/tests_ovrn_room.cpp`, 9 cases, 3,563 checks):**
   - Transform composition and inversion: `(a·b)(p) = a(b(p))`, `inverse(a)(a(p)) = p`, and heights are kept.
   - First-capture frame.
   - Recovery in a new session: for 100 random session offsets (yaw and shift), every point lands where it did in session 1.
@@ -197,7 +201,7 @@ Commands: `echo forget > $XDG_RUNTIME_DIR/monado-room-command` deletes the saved
   - Within each rest the measurement is steady: lowest-point spread 0.6–2.6 mm, heading spread 0.1–0.8°.
   - The heading was defined in all 29 rests.
   - Not checked: accuracy against a known floor. No recorded rest was on a surface of known height.
-- **The real capture code on recorded runs** (`analysis/harness/capture_replay.cpp`, which links `ovrd_room.cpp`, with Create held the whole time):
+- **The real capture code on recorded runs** (`analysis/harness/capture_replay.cpp`, which links `ovrn_room.cpp`, with Create held the whole time):
   - Three captures from one placement agreed to 4 mm in position, 7 mm in floor height and 1.1° in heading.
   - Rests 0.37–0.49 m below the head (a lap or a desk) were rejected.
   - Some rests 0.53–0.56 m below the head passed. A seated lap and a crouched floor overlap, so the gesture has to be deliberate.
