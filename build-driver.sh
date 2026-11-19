@@ -112,6 +112,31 @@ PLUGIN="$BUILD/steamvr-monado-psvr2"
 [ -x "$BUILD/src/xrt/targets/service/monado-service" ] || { echo "ERROR: monado-service wasn't built"; exit 1; }
 
 echo "STEP 4/5 DriverKit, scripts and tools"
+# Sony's Sense render models and PS VR2 icons, from the PlayStation VR2 App if it's installed in one of Steam's
+# libraries: copied into the driver's resources (they're Sony's files, so they aren't in the repository). The driver
+# uses them when they're there; without them SteamVR shows Oculus controllers and generic icons.
+SONY_RES=""
+STEAM_ROOT="${STEAM_ROOT:-$HOME/.local/share/Steam}"
+LIBS=("$STEAM_ROOT" "$HOME/.steam/steam")
+if [ -f "$STEAM_ROOT/steamapps/libraryfolders.vdf" ]; then
+	while IFS= read -r lib; do LIBS+=("$lib"); done < <(sed -n 's/^[[:space:]]*"path"[[:space:]]*"\(.*\)"/\1/p' "$STEAM_ROOT/steamapps/libraryfolders.vdf")
+fi
+for lib in "${LIBS[@]}"; do
+	r="$lib/steamapps/common/PlayStation VR2 App/SteamVR_Plug-In/resources"
+	[ -d "$r/rendermodels/playstation_vr2_sense_left" ] && SONY_RES="$r" && break
+done
+if [ -n "$SONY_RES" ]; then
+	mkdir -p "$PLUGIN/resources/rendermodels" "$PLUGIN/resources/icons"
+	for side in left right; do
+		rm -rf "$PLUGIN/resources/rendermodels/playstation_vr2_sense_$side"
+		cp -r "$SONY_RES/rendermodels/playstation_vr2_sense_$side" "$PLUGIN/resources/rendermodels/"
+	done
+	rm -rf "$PLUGIN/resources/icons/playstation_vr2"
+	cp -r "$SONY_RES/icons" "$PLUGIN/resources/icons/playstation_vr2"
+	echo "  PS VR2 render models and icons copied from the PlayStation VR2 App"
+else
+	echo "  note: PlayStation VR2 App not found in Steam's libraries: SteamVR will show generic controller models and icons"
+fi
 mkdir -p "$KIT/tools" "$KIT/analysis" "$KIT/logs"
 for f in launch-steamvr.sh launch-openxr.sh summarize.sh build-driver.sh README.md ROOM.md; do
 	[ -f "$HERE/$f" ] && cp -f "$HERE/$f" "$KIT/"

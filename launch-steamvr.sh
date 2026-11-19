@@ -200,6 +200,8 @@ SONY_MODELS="$STEAM_ROOT/steamapps/common/PlayStation VR2 App/SteamVR_Plug-In/re
 if [ -d "$SONY_MODELS/playstation_vr2_sense_left" ] && [ -d "$SONY_MODELS/playstation_vr2_sense_right" ]; then
 	mkdir -p "$PLUGIN/resources/rendermodels"
 	for side in left right; do
+		# A compiled install has its own copy (build-driver.sh): keep it.
+		[ -d "$PLUGIN/resources/rendermodels/playstation_vr2_sense_$side" ] && [ ! -L "$PLUGIN/resources/rendermodels/playstation_vr2_sense_$side" ] && continue
 		ln -sfn "$SONY_MODELS/playstation_vr2_sense_$side" "$PLUGIN/resources/rendermodels/playstation_vr2_sense_$side"
 	done
 	export OVRD_PSSENSE_RENDER_MODELS=1
@@ -209,7 +211,9 @@ fi
 SONY_ICONS="$(dirname "$SONY_MODELS")/icons"
 if [ -f "$SONY_ICONS/playstation_vr2_sense_left.svg" ]; then
 	mkdir -p "$PLUGIN/resources/icons"
-	ln -sfn "$SONY_ICONS" "$PLUGIN/resources/icons/playstation_vr2"
+	if [ ! -d "$PLUGIN/resources/icons/playstation_vr2" ] || [ -L "$PLUGIN/resources/icons/playstation_vr2" ]; then
+		ln -sfn "$SONY_ICONS" "$PLUGIN/resources/icons/playstation_vr2"
+	fi
 	# The driver then gives SteamVR the PS VR2 headset and Sense controller status icons (ovrn_backend_monado.cpp);
 	# without it SteamVR shows generic devices.
 	export OVRD_PSVR2_SONY_ICONS=1
