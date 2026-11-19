@@ -524,6 +524,30 @@ mod compile_tests {
         assert_eq!(b.fraction(), 1.0);
     }
 
+    /// Turn on writes the four camera settings (booleans as booleans) and keeps the rest; Undo restores the file.
+    #[test]
+    fn psvr2_settings_apply_and_undo() {
+        let _turn = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let real_home = std::env::var("HOME").unwrap_or_default();
+        let home = std::env::temp_dir().join(format!("dk-settings-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let file = home.join("steamvr.vrsettings");
+        let start = r#"{"camera":{"enableCamera":false,"roomViewStyle":2},"steamvr":{"supersampleScale":1.4}}"#;
+        fs::write(&file, start).unwrap();
+        apply_psvr2_settings(&file).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(psvr2_settings_on(&v), 4);
+        assert_eq!(v["camera"]["enableCamera"], serde_json::Value::Bool(true));
+        assert_eq!(v["camera"]["roomViewStyle"], 4);
+        assert_eq!(v["steamvr"]["supersampleScale"], 1.4, "other settings are kept");
+        undo_psvr2_settings(&file).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), start);
+        let _ = fs::remove_dir_all(&home);
+        std::env::set_var("HOME", real_home);
+    }
+
     /// Register replaces Sony's PS VR2 driver with ours and keeps the others; Unregister removes only ours. Run in a
     /// temporary HOME so the real SteamVR config isn't touched.
     #[test]
@@ -1115,6 +1139,77 @@ fn unregister_driver() -> Result<String, String> {
     Ok("Our driver unregistered from SteamVR (the other drivers on the list are left as they are).".to_string())
 }
 
+
+/// The SteamVR settings DriverKit turns on for the PS VR2 (section, key, value): the camera on, Room View available
+/// as the full camera picture, and the camera shown near the play-area walls.
+const PSVR2_STEAMVR_SETTINGS: [(&str, &str, i64); 4] = [
+    ("camera", "enableCamera", 1),
+    ("camera", "roomView", 1),
+    ("camera", "roomViewStyle", 4),
+    ("camera", "enableCameraForCollisionBounds", 1),
+];
+
+/// enableCamera and enableCameraForCollisionBounds are booleans in SteamVR's settings; the others numbers.
+fn setting_value(key: &str, v: i64) -> serde_json::Value {
+    if key.starts_with("enable") {
+        serde_json::Value::from(v != 0)
+    } else {
+        serde_json::Value::from(v)
+    }
+}
+
+/// SteamVR's settings file (<SteamVR config>/steamvr.vrsettings, the config folder from openvrpaths.vrpath).
+fn steamvr_settings_file(steam_root: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let from_vrpath = fs::read_to_string(openvrpaths_file())
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["config"].get(0).and_then(|c| c.as_str()).map(PathBuf::from));
+    from_vrpath
+        .unwrap_or_else(|| {
+            if steam_root.is_empty() {
+                Path::new(&home).join(".local/share/Steam/config")
+            } else {
+                Path::new(steam_root).join("config")
+            }
+        })
+        .join("steamvr.vrsettings")
+}
+
+/// How many of the PS VR2 settings are already on in this settings JSON.
+fn psvr2_settings_on(v: &serde_json::Value) -> usize {
+    PSVR2_STEAMVR_SETTINGS.iter().filter(|(sec, key, val)| v[*sec][*key] == setting_value(key, *val)).count()
+}
+
+/// Turn the PS VR2 settings on in SteamVR's settings (SteamVR closed). The file is backed up first, once, into
+/// ~/.config/PSVR2-DriverKit/steamvr.vrsettings.before-psvr2 (kept for Undo; a later run keeps the first backup).
+fn apply_psvr2_settings(file: &Path) -> Result<String, String> {
+    let text = fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+    let backup = config_dir().join("steamvr.vrsettings.before-psvr2");
+    if !backup.exists() {
+        let _ = fs::create_dir_all(config_dir());
+        fs::write(&backup, &text).map_err(|e| format!("backup {}: {e}", backup.display()))?;
+    }
+    for (sec, key, val) in PSVR2_STEAMVR_SETTINGS {
+        if !v[sec].is_object() {
+            v[sec] = serde_json::json!({});
+        }
+        v[sec][key] = setting_value(key, val);
+    }
+    fs::write(file, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(format!("SteamVR's camera and Room View are on for the PS VR2 (backup: {}).", backup.display()))
+}
+
+/// Undo: SteamVR's settings file back from DriverKit's backup (SteamVR closed).
+fn undo_psvr2_settings(file: &Path) -> Result<String, String> {
+    let backup = config_dir().join("steamvr.vrsettings.before-psvr2");
+    let text = fs::read_to_string(&backup).map_err(|_| "no backup to restore (the features were never turned on from here)".to_string())?;
+    fs::write(file, text).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(&backup);
+    Ok("SteamVR's settings are back as they were before Turn on PS VR2 features.".to_string())
+}
+
 /// The packages build-driver.sh needs (compilers, CMake/Ninja, the Monado build's libraries, Rust for DriverKit).
 const PACKAGES: [(&str, &str); 3] = [
     ("Arch / CachyOS / Manjaro",
@@ -1579,6 +1674,39 @@ impl Launcher {
             ui.label(egui::RichText::new(format!("Driver: {}", plugin.display())).color(theme::SLATE).size(12.0));
         });
 
+        theme::section(ui, "SteamVR features", |ui| {
+            theme::note(ui, "Turns on SteamVR's camera features for the PS VR2, permanently: the camera, Room View as the full camera picture (headset button or double-press PS), and the camera when you get near your play-area walls. Room setup needs nothing here: the driver offers it itself.");
+            let file = steamvr_settings_file(&self.cfg.steam_root);
+            let on = fs::read_to_string(&file)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .map(|v| psvr2_settings_on(&v))
+                .unwrap_or(0);
+            let all = on == PSVR2_STEAMVR_SETTINGS.len();
+            ui.label(egui::RichText::new(if all { "All PS VR2 camera features are on".to_string() } else { format!("{on} of {} PS VR2 camera features are on", PSVR2_STEAMVR_SETTINGS.len()) })
+                .font(theme::bold(14.0))
+                .color(if all { theme::LIT } else { theme::SLATE }));
+            let backup = config_dir().join("steamvr.vrsettings.before-psvr2");
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!steamvr && !all, theme::primary("Turn on PS VR2 features"))
+                    .on_disabled_hover_text(if steamvr { "Close SteamVR first: it rewrites its settings while running." } else { "Already on." })
+                    .clicked()
+                {
+                    self.message = apply_psvr2_settings(&file).unwrap_or_else(|e| format!("Couldn't change SteamVR's settings: {e}"));
+                }
+                if ui
+                    .add_enabled(!steamvr && backup.exists(), egui::Button::new("Undo"))
+                    .on_hover_text("Puts SteamVR's settings back from the backup made when the features were turned on.")
+                    .on_disabled_hover_text(if steamvr { "Close SteamVR first." } else { "Nothing to undo." })
+                    .clicked()
+                {
+                    self.message = undo_psvr2_settings(&file).unwrap_or_else(|e| format!("Couldn't undo: {e}"));
+                }
+            });
+            ui.label(egui::RichText::new(format!("Settings file: {}", file.display())).color(theme::SLATE).size(12.0));
+        });
+
         theme::section(ui, "Packages needed to compile", |ui| {
             theme::note(ui, "Install these first. Copy the line for your distribution into a terminal.");
             for (distro, cmd) in PACKAGES {
@@ -1714,8 +1842,10 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    // --screenshot: a tall window, so a whole tab fits in the picture.
+    let height = if std::env::args().any(|a| a == "--screenshot") { 1500.0 } else { 760.0 };
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 760.0]).with_min_inner_size([720.0, 520.0]).with_title("PSVR2-DriverKit"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, height]).with_min_inner_size([720.0, 520.0]).with_title("PSVR2-DriverKit"),
         ..Default::default()
     };
     let args: Vec<String> = std::env::args().collect();
