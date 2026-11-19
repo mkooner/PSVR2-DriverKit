@@ -63,6 +63,7 @@
 
 #include "psvr2_imu_time.h"
 #include "psvr2_basalt.h"
+#include "psvr2_cam_mount.h"
 #include "psvr2.h"
 #include "psvr2_camera_recorder.h"
 #include "psvr2_interface.h"
@@ -2555,7 +2556,10 @@ psvr2_request_bottom_camera_images(struct xrt_device *xdev, bool on)
 }
 
 bool
-psvr2_get_bottom_cameras(struct xrt_device *xdev, struct t_camera_calibration *out_cams, struct xrt_pose *out_poses)
+psvr2_get_bottom_cameras(struct xrt_device *xdev,
+                         struct t_camera_calibration *out_cams,
+                         struct xrt_pose *out_poses,
+                         bool tracker_poses)
 {
 	struct psvr2_hmd *hmd = psvr2_hmd(xdev);
 	os_mutex_lock(&hmd->data_lock);
@@ -2565,7 +2569,28 @@ psvr2_get_bottom_cameras(struct xrt_device *xdev, struct t_camera_calibration *o
 		memcpy(out_poses, hmd->ht_cam_poses, sizeof(hmd->ht_cam_poses));
 	}
 	os_mutex_unlock(&hmd->data_lock);
-	return valid;
+	if (!valid) {
+		return false;
+	}
+	if (tracker_poses) {
+		return true; // ht_cam_poses as they are
+	}
+	/*
+	 * The poses for a viewer (the SteamVR plugin's passthrough): the cameras' true placement from the calibration
+	 * block (psvr2_bottom_cameras_in_head), not ht_cam_poses, which follow the controller tracker's camera chain with
+	 * its legacy camera 0 mount (PSVR2_CAM0_MOUNT_LEGACY; ~40 deg from the measured direction, which put SteamVR's
+	 * camera picture at the wrong angle, warped and swimming, 2026-11-19).
+	 */
+	os_mutex_lock(&hmd->calib_lock);
+	struct xrt_pose true_poses[2];
+	const bool have = hmd->calib_block != NULL &&
+	                  psvr2_bottom_cameras_in_head(hmd->calib_block, hmd->calib_block_size, true_poses);
+	os_mutex_unlock(&hmd->calib_lock);
+	if (have) {
+		out_poses[0] = true_poses[0];
+		out_poses[1] = true_poses[1];
+	}
+	return true;
 }
 
 uint32_t

@@ -11,6 +11,7 @@
 
 #include "ovrn_camera.hpp"
 #include "ovrn_camera_fit.hpp"
+#include "psvr2/psvr2_cam_mount.h"
 
 #include "catch_amalgamated.hpp"
 
@@ -233,9 +234,10 @@ TEST_CASE("ovrn camera: projection and intrinsics are consistent")
 	ovrn::Camera cam(&backend, info());
 	vr::HmdMatrix44_t p;
 	REQUIRE(cam.GetCameraProjection(0, vr::VRTrackedCameraFrameType_Undistorted, 0.1f, 100.0f, &p));
-	// Centred camera: symmetric frustum, focal 300 / 3.25 over a 1016 px half-width of 508 -> 2 * f / w.
-	CHECK(p.m[0][2] == Approx(0.0f).margin(1e-5));
-	CHECK(p.m[0][0] == Approx(2.0 * (300.0 / 3.25) / 1016.0).epsilon(1e-4));
+	// As PSVR2Toolkit: the frustum's right edge over the side-by-side frame's double width (2032 px), so with the
+	// centre at 508 it spans -508..1524 px: 2 n / (r - l) = f / 1016, (r + l) / (r - l) = 0.5.
+	CHECK(p.m[0][2] == Approx(0.5f).margin(1e-5));
+	CHECK(p.m[0][0] == Approx((300.0 / 3.25) / 1016.0).epsilon(1e-4));
 	vr::HmdVector2_t focal, centre;
 	vr::EVRDistortionFunctionType type;
 	double k[vr::k_unMaxDistortionFunctionParameters];
@@ -246,6 +248,28 @@ TEST_CASE("ovrn camera: projection and intrinsics are consistent")
 	float u = 0, v = 0;
 	REQUIRE(cam.GetCameraDistortion(0, 0.5f, 0.5f, &u, &v));
 	CHECK(u == Approx(0.5f).margin(1e-4));
+	CHECK(v == Approx(0.5f).margin(1e-4));
+}
+
+TEST_CASE("ovrn camera: camera 1's image centre is mirrored (width - cx), as PSVR2Toolkit gives it to SteamVR")
+{
+	ovrn::CameraInfo i = info();
+	i.cx[0] = 500;
+	i.cx[1] = 520; // the right camera's calibration centre, 4 px right of the middle
+	FakeBackend backend;
+	ovrn::Camera cam(&backend, i);
+	vr::HmdVector2_t focal, centre;
+	vr::EVRDistortionFunctionType type;
+	double k[vr::k_unMaxDistortionFunctionParameters];
+	REQUIRE(cam.GetCameraIntrinsics(0, vr::VRTrackedCameraFrameType_Distorted, &focal, &centre, &type, k));
+	CHECK(centre.v[0] == Approx(500.0f)); // camera 0 as calibrated
+	REQUIRE(cam.GetCameraIntrinsics(1, vr::VRTrackedCameraFrameType_Distorted, &focal, &centre, &type, k));
+	CHECK(centre.v[0] == Approx(1016.0f - 520.0f)); // camera 1 mirrored
+	CHECK(centre.v[1] == Approx(508.0f));           // vertical unchanged
+	// The mirrored centre is where camera 1's distortion is centred: it maps to itself.
+	float u = 0, v = 0;
+	REQUIRE(cam.GetCameraDistortion(1, (1016.0f - 520.0f) / 1016.0f, 0.5f, &u, &v));
+	CHECK(u == Approx((1016.0f - 520.0f) / 1016.0f).margin(1e-4));
 	CHECK(v == Approx(0.5f).margin(1e-4));
 }
 
@@ -324,4 +348,33 @@ TEST_CASE("ovrn camera: streams while SteamVR's frame queue has a reader (Room V
 	CHECK(backend.stops == 1);
 	cam.readerCheck(false, 11 * s);
 	CHECK(backend.stops == 2);
+}
+
+TEST_CASE("ovrn camera: the passthrough cameras' true placement from a calibration block (OVRN_CAMERA_TEST_BLOCK)")
+{
+	const char *path = getenv("OVRN_CAMERA_TEST_BLOCK");
+	if (path == nullptr) {
+		SUCCEED("no calibration block given");
+		return;
+	}
+	std::ifstream f(path, std::ios::binary);
+	REQUIRE(f.good());
+	std::vector<uint8_t> block((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+	struct xrt_pose c[2];
+	REQUIRE(psvr2_bottom_cameras_in_head(block.data(), (uint32_t)block.size(), c));
+	float pitch[2], yaw[2];
+	for (int i = 0; i < 2; i++) {
+		psvr2_cam_mount_view_angles(&c[i].orientation, &pitch[i], &yaw[i]);
+	}
+	// Camera 0 measured from motion (camera rotation vs gyro, 2026-11-17): 28.2 deg down, 16.1 deg left.
+	CHECK(pitch[0] == Approx(-28.2f).margin(2.0f));
+	CHECK(yaw[0] == Approx(16.1f).margin(2.0f));
+	// Camera 1 the mirror image: down as much, to the right.
+	CHECK(pitch[1] == Approx(pitch[0]).margin(2.0f));
+	CHECK(yaw[1] == Approx(-yaw[0]).margin(2.0f));
+	// Camera 0 on the left, camera 1 on the right, ~8 cm apart.
+	CHECK(c[0].position.x < 0.0f);
+	CHECK(c[1].position.x > 0.0f);
+	const float dx = c[1].position.x - c[0].position.x;
+	CHECK(dx == Approx(0.079f).margin(0.01f));
 }

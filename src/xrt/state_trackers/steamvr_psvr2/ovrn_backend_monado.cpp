@@ -150,14 +150,17 @@ public:
 		 * playstation_vr2/chaperone_info.vrchap), published to SteamVR as Prop_DriverProvidedChaperonePath_String;
 		 * SteamVR's Room Setup writes the rooms drawn there. Universe kSessionUniverse is this session's frame (the
 		 * headset starts a new tracking world at every start: all 26 recordings of 2026-11-18 began at 0 0 0), with
-		 * a temporary square play area around the start (PLAY_AREA, 0: none); kRoomUniverse is the saved room,
-		 * active once a floor capture anchors it, and only ever holds a room drawn in Room Setup (no made-up bounds).
+		 * a square play area around the start (PLAY_AREA, the DriverKit's default play area; 0: none);
+		 * kRoomUniverse is the saved room, active once a floor capture anchors it: the same default square until a
+		 * room is drawn in Room Setup, which then replaces it and is kept (the default play area as ALVR sets one;
+		 * the DriverKit's "Set Default Play Area" takes the drawn room out again, 2026-11-19).
 		 */
 		const std::string global = ovrd_room_chaperone_path();
 		if (!global.empty()) {
 			m_chaperonePath = global.substr(0, global.rfind('/')) + "/monado_psvr2/chaperone_info.vrchap";
 		}
-		m_room.init(debug_get_float_option_ovrn_play_area_size(), 0.0f, m_chaperonePath, kRoomUniverse,
+		const float play_area = debug_get_float_option_ovrn_play_area_size();
+		m_room.init(play_area, play_area, m_chaperonePath, kRoomUniverse,
 		            kSessionUniverse);
 		if (m_room.chaperone_path().empty()) {
 			m_chaperonePath.clear(); // the room code is off or couldn't prepare the file: SteamVR's own file
@@ -646,10 +649,15 @@ public:
 		}
 		struct t_camera_calibration cams[2];
 		struct xrt_pose poses[2];
-		if (!psvr2_get_bottom_cameras(m_head, cams, poses)) {
+		// OVRN_CAMERA_POSES=tracker: the controller tracker's camera poses for the picture, to compare (2026-11-19);
+		// default: the cameras' measured placement. Either way the controller tracker itself is untouched.
+		const char *which = getenv("OVRN_CAMERA_POSES");
+		const bool tracker = which != nullptr && strcmp(which, "tracker") == 0;
+		if (!psvr2_get_bottom_cameras(m_head, cams, poses, tracker)) {
 			return false;
 		}
 		CameraInfo info;
+		info.tracker_poses = tracker;
 		info.width = cams[0].image_size_pixels.w;
 		info.height = cams[0].image_size_pixels.h;
 		for (int c = 0; c < 2; c++) {

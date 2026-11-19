@@ -151,6 +151,8 @@ struct FakeProperties : IVRProperties
 
 //! Boolean settings the driver wrote ("section/key"), as SteamVR's settings file would hold them.
 std::map<std::string, bool> g_bools;
+//! Integer settings the driver wrote ("section/key").
+std::map<std::string, int32_t> g_ints;
 
 struct FakeSettings : IVRSettings
 {
@@ -161,7 +163,12 @@ struct FakeSettings : IVRSettings
 		std::lock_guard<std::mutex> l(g_mutex);
 		g_bools[std::string(section) + "/" + key] = value;
 	}
-	void SetInt32(const char *, const char *, int32_t, EVRSettingsError *) override {}
+	void
+	SetInt32(const char *section, const char *key, int32_t value, EVRSettingsError *) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_ints[std::string(section) + "/" + key] = value;
+	}
 	void SetFloat(const char *, const char *, float, EVRSettingsError *) override {}
 	void SetString(const char *, const char *, const char *, EVRSettingsError *) override {}
 	bool
@@ -175,12 +182,14 @@ struct FakeSettings : IVRSettings
 		return it != g_bools.end() && it->second;
 	}
 	int32_t
-	GetInt32(const char *, const char *, EVRSettingsError *e) override
+	GetInt32(const char *section, const char *key, EVRSettingsError *e) override
 	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		auto it = g_ints.find(std::string(section) + "/" + key);
 		if (e != nullptr) {
-			*e = VRSettingsError_UnsetSettingHasNoDefault;
+			*e = it != g_ints.end() ? VRSettingsError_None : VRSettingsError_UnsetSettingHasNoDefault;
 		}
-		return 0;
+		return it != g_ints.end() ? it->second : 0;
 	}
 	float
 	GetFloat(const char *, const char *, EVRSettingsError *e) override
@@ -206,6 +215,7 @@ struct FakeSettings : IVRSettings
 	{
 		std::lock_guard<std::mutex> l(g_mutex);
 		g_bools.erase(std::string(section) + "/" + key);
+		g_ints.erase(std::string(section) + "/" + key);
 	}
 };
 
@@ -427,6 +437,67 @@ main(int argc, char **argv)
 		return 1;
 	}
 	FakeContext context;
+
+	// --see-through: Sony-style see-through. The user's camera settings (style 2 "Colored Ghosts", camera on, no
+	// roomView key) are saved and the opaque view set for the session; SteamVR's Room View shown / hidden events turn
+	// the game pause and reduced rendering on / off; Cleanup puts the user's settings back exactly.
+	if (argc > 1 && !strcmp(argv[1], "--see-through")) {
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			g_ints["camera/roomViewStyle"] = 2;
+			g_bools["camera/enableCamera"] = true;
+		}
+		check(provider->Init(&context) == VRInitError_None, "Init succeeds");
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_ints["camera/roomViewStyle"] == 4 && g_bools["camera/enableCamera"] && g_ints.count("camera/roomView") &&
+			          g_ints["camera/roomView"] == 1,
+			      "see-through: SteamVR's camera on with the opaque view for the session");
+			check(g_bools["driver_monado_psvr2/seeThroughSettingsSet"], "see-through: noted in the driver's own section");
+		}
+		std::vector<Added> added;
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			added = g_added;
+		}
+		for (uint32_t i = 0; i < added.size(); i++) {
+			added[i].driver->Activate(i);
+		}
+		bool pause = true, reduced = true;
+		check(!prop(0, Prop_DriverRequestsApplicationPause_Bool, &pause) || !pause, "see-through: no pause at the start");
+		for (int type : {(int)VREvent_RoomViewShown, (int)VREvent_RoomViewHidden}) {
+			VREvent_t ev = {};
+			ev.eventType = (uint32_t)type;
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				g_events.push_back(ev);
+			}
+			provider->RunFrame();
+			const bool want = type == VREvent_RoomViewShown;
+			check(prop(0, Prop_DriverRequestsApplicationPause_Bool, &pause) && pause == want &&
+			          prop(0, Prop_DriverRequestsReducedRendering_Bool, &reduced) && reduced == want,
+			      want ? "see-through on: SteamVR asked to pause the game and render less"
+			           : "see-through off: the game runs again at full rendering");
+		}
+		provider->Cleanup();
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_ints.count("camera/roomViewStyle") && g_ints["camera/roomViewStyle"] == 2 && g_bools["camera/enableCamera"] &&
+			          !g_ints.count("camera/roomView"),
+			      "see-through: the user's camera settings put back exactly at Cleanup");
+			bool notes = false;
+			for (auto &kv : g_bools) {
+				notes = notes || kv.first.find("driver_monado_psvr2/seeThrough") == 0;
+			}
+			for (auto &kv : g_ints) {
+				notes = notes || kv.first.find("driver_monado_psvr2/seeThrough") == 0;
+			}
+			check(!notes, "see-through: the driver's notes taken out again");
+		}
+		check(dlclose(lib) == 0, "the driver unloads");
+		printf("%s\n", g_fails ? "FAILED" : "all checks passed");
+		return g_fails ? 1 : 0;
+	}
 
 	// --late: the simulated left controller appears only after the start (a Sense controller connecting late):
 	// the driver adds it to SteamVR from RunFrame, and its poses flow once SteamVR activates it.

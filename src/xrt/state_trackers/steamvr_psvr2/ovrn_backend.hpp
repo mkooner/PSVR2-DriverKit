@@ -106,6 +106,7 @@ struct DeviceInfo
  */
 struct CameraInfo
 {
+	bool tracker_poses = false; //!< cam_in_head from the controller tracker's camera chain (OVRN_CAMERA_POSES=tracker)
 	uint32_t width = 0, height = 0; //!< one camera's image, pixels
 	double fx[2] = {}, fy[2] = {}, cx[2] = {}, cy[2] = {};
 	double ftheta[2][8] = {};

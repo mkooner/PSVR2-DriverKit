@@ -35,6 +35,7 @@
 #define BCDEC_BC4BC5_PRECISE
 #include "bcdec.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -146,10 +147,22 @@ public:
 			m_queue = nullptr;
 			m_queueHandle = vr::k_ulInvalidPropertyContainer;
 		}
+		float pitch[2], yaw[2];
+		for (int i = 0; i < 2; i++) {
+			view_angles(m_info.cam_in_head[i], &pitch[i], &yaw[i]);
+		}
+		const Pose &p0 = m_info.cam_in_head[0], &p1 = m_info.cam_in_head[1];
+		const double baseline = std::sqrt((p1.position.x - p0.position.x) * (p1.position.x - p0.position.x) +
+		                                  (p1.position.y - p0.position.y) * (p1.position.y - p0.position.y) +
+		                                  (p1.position.z - p0.position.z) * (p1.position.z - p0.position.z));
 		log("ovrn: passthrough cameras: %ux%u side by side, NV12, gamma %.2f; lens model fit %.2f / %.2f px rms; "
-		    "camera 0 at %.3f %.3f %.3f in the head; SteamVR's camera frame queue: %s\n",
-		    m_w, m_h, m_gamma, m_info.fit_rms_px[0], m_info.fit_rms_px[1], m_info.cam_in_head[0].position.x,
-		    m_info.cam_in_head[0].position.y, m_info.cam_in_head[0].position.z,
+		    "camera 0 looks %.1f deg %s, %.1f deg %s, camera 1 %.1f deg %s, %.1f deg %s, %.0f mm apart (%s); SteamVR's "
+		    "camera frame queue: %s\n",
+		    m_w, m_h, m_gamma, m_info.fit_rms_px[0], m_info.fit_rms_px[1], std::fabs(pitch[0]),
+		    pitch[0] < 0 ? "down" : "up", std::fabs(yaw[0]), yaw[0] > 0 ? "left" : "right", std::fabs(pitch[1]),
+		    pitch[1] < 0 ? "down" : "up", std::fabs(yaw[1]), yaw[1] > 0 ? "left" : "right", baseline * 1000.0,
+		    m_info.tracker_poses ? "the controller tracker's camera poses, OVRN_CAMERA_POSES=tracker"
+		                         : "measured placement",
 		    m_queue != nullptr ? "yes (used)" : "not offered (published interface only)");
 	}
 
@@ -283,7 +296,7 @@ public:
 			return false;
 		}
 		// From the (zoomed) undistorted image to the camera's own image, both normalized 0..1 per camera.
-		const double x = (u * m_info.width - m_info.cx[cam]) / m_info.fx[cam] * kZoom;
+		const double x = (u * m_info.width - cx(cam)) / m_info.fx[cam] * kZoom;
 		const double y = (v * m_info.height - m_info.cy[cam]) / m_info.fy[cam] * kZoom;
 		const double r = std::hypot(x, y);
 		double s = 1.0;
@@ -295,7 +308,7 @@ public:
 			}
 			s = rd / r;
 		}
-		*out_u = (float)((x * s * m_info.fx[cam] + m_info.cx[cam]) / m_info.width);
+		*out_u = (float)((x * s * m_info.fx[cam] + cx(cam)) / m_info.width);
 		*out_v = (float)((y * s * m_info.fy[cam] + m_info.cy[cam]) / m_info.height);
 		return true;
 	}
@@ -307,7 +320,8 @@ public:
 			return false;
 		}
 		const double fx = m_info.fx[cam] / kZoom, fy = m_info.fy[cam] / kZoom;
-		const double l = -m_info.cx[cam] * n / fx, r = (m_info.width - m_info.cx[cam]) * n / fx;
+		// As PSVR2Toolkit's GetCameraProjection: the right edge over the side-by-side frame's double width.
+		const double l = -cx(cam) * n / fx, r = (2.0 * m_info.width - cx(cam)) * n / fx;
 		const double t = m_info.cy[cam] * n / fy, b = -(m_info.height - m_info.cy[cam]) * n / fy;
 		memset(out, 0, sizeof(*out));
 		out->m[0][0] = (float)(2 * n / (r - l));
@@ -382,7 +396,7 @@ public:
 			focal->v[1] = (float)(m_info.fy[cam] / zoom);
 		}
 		if (center != nullptr) {
-			center->v[0] = (float)m_info.cx[cam];
+			center->v[0] = (float)cx(cam);
 			center->v[1] = (float)m_info.cy[cam];
 		}
 		if (dist != nullptr) {
@@ -427,6 +441,28 @@ public:
 	}
 
 private:
+	/*!
+	 * The image centre SteamVR is given for camera @p cam: camera 1's mirrored (width - cx), as PSVR2Toolkit gives
+	 * Sony's camera to SteamVR ("the center seems to be from the right for the right eye", hmd_device_camera.cpp);
+	 * without it the right camera's picture was laid out the wrong way round (2026-11-19). The lens model fit keeps
+	 * the calibration's own centre, as there.
+	 */
+	double
+	cx(uint32_t cam) const
+	{
+		return cam == 1 ? m_info.width - m_info.cx[1] : m_info.cx[0];
+	}
+
+	//! Where a camera looks (its -Z axis in the head, degrees): pitch positive up, yaw positive left.
+	static void
+	view_angles(const Pose &p, float *pitch, float *yaw)
+	{
+		const vr::HmdMatrix34_t m = matrix(p);
+		const double fx = -m.m[0][2], fy = -m.m[1][2], fz = -m.m[2][2];
+		*pitch = (float)(std::asin(std::max(-1.0, std::min(1.0, fy))) * 180.0 / M_PI);
+		*yaw = (float)(std::atan2(-fx, -fz) * 180.0 / M_PI);
+	}
+
 	static vr::HmdMatrix34_t
 	matrix(const Pose &p)
 	{

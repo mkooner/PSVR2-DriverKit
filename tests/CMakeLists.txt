@@ -110,6 +110,7 @@ if(XRT_FEATURE_STEAMVR_PLUGIN)
 	if(XRT_BUILD_DRIVER_PSVR2)
 		target_include_directories(
 			tests_ovrn_camera PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2
+			${PROJECT_SOURCE_DIR}/src/xrt/drivers
 			)
 		target_link_libraries(
 			tests_ovrn_camera PRIVATE xrt-external-openvr xrt-external-bcdec aux_tracking aux_util aux_math

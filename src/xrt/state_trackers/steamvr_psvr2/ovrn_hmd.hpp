@@ -27,6 +27,21 @@ class Hmd final : public TrackedDevice, public vr::IVRDisplayComponent
 {
 public:
 	/*!
+	 * See-through view on or off (RunFrame thread): as Sony's driver does in its see-through mode, ask SteamVR to
+	 * pause the game and render less while the camera picture is all there is to see. Controllers stay SteamVR's to
+	 * draw (Sony's driver draws them itself and sets Prop_DriverIsDrawingControllers_Bool; here SteamVR draws).
+	 */
+	void
+	setSeeThrough(bool on)
+	{
+		if (!active()) {
+			return;
+		}
+		vr::VRProperties()->SetBoolProperty(m_container, vr::Prop_DriverRequestsApplicationPause_Bool, on);
+		vr::VRProperties()->SetBoolProperty(m_container, vr::Prop_DriverRequestsReducedRendering_Bool, on);
+	}
+
+	/*!
 	 * The headset's button to SteamVR as the headset's system button (RunFrame thread). Our compositor binding
 	 * (resources/input/vrcompositor_binding_playstation_vr2_hmd.json, the headset profile's default_bindings) makes
 	 * a press SteamVR's "Toggle Room View", as the button shows the cameras on a PS5. A double-click sent before
