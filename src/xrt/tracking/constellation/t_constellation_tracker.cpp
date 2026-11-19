@@ -49,6 +49,23 @@ DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_gyro_gate_deg, "T_CONSTELLATIO
 DEBUG_GET_ONCE_NUM_OPTION(constellation_tracker_slow_skip_ms, "T_CONSTELLATION_SLOW_SKIP_MS", 50)
 //! How long shallow searches must have failed before a deep search (ms), see processSampleSlow.
 DEBUG_GET_ONCE_NUM_OPTION(constellation_tracker_deep_delay_ms, "T_CONSTELLATION_DEEP_DELAY_MS", 1000)
+/*
+ * Searching for a lost device (no solve for T_CONSTELLATION_LOST_MS): each camera searches for it only every Nth sample,
+ * the cameras and devices offset so they take turns. 1 = every sample (the old behaviour). The sunny PS VR2 replay
+ * (2026-11-17 15:22) spent 82% of the tracker's time in samples where no device was solved by any camera.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(constellation_tracker_lost_search_every, "T_CONSTELLATION_LOST_SEARCH_EVERY", 1)
+DEBUG_GET_ONCE_NUM_OPTION(constellation_tracker_lost_ms, "T_CONSTELLATION_LOST_MS", 300)
+/*
+ * Blobs larger than this (pixels, the larger side) are left out of matching; 0 = all. In that replay the LED-matched
+ * blobs were at most 30 px (p99) while sun patches reached 98-240 px: 48 px dropped 15% of the other blobs and 0.05% of
+ * the LED ones. On by default (48): sunny replay right controller fixes 73% -> 78%, 16 -> 11 gaps, -16% tracker time;
+ * the 10:58 normal-light replay unchanged (deterministic and real time). T_CONSTELLATION_MAX_BLOB_PX=0 turns it off.
+ * T_CONSTELLATION_LOST_SEARCH_EVERY=2 alone halved the sunny replay's tracker time with no fixes lost and changed nothing
+ * in normal light, but together with the size limit it lost fixes in the normal-light real-time replay (left 91-92% ->
+ * 86-88%, three runs each), cause not yet found: off by default.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(constellation_tracker_max_blob_px, "T_CONSTELLATION_MAX_BLOB_PX", 48)
 //! Above this rotation rate (deg/s), the fast path skips blob recovery and wipes the blob associations.
 DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_blob_recovery_max_dps, "T_CONSTELLATION_BLOB_RECOVERY_MAX_DPS", 360.0f)
 /*!
@@ -950,6 +967,8 @@ Camera::processSampleSlow(CameraSample &sample)
 	const uint32_t device_count = collect_devices_nearest_first(tracker, sample, devices);
 
 	bool any_shallow_failed = false;
+	const uint64_t slow_n = this->slow_samples++;
+	const int64_t lost_every = debug_get_num_option_constellation_tracker_lost_search_every();
 
 	for (int pass = 0; pass < 2; pass++) {
 		for (uint32_t device_iter = 0; device_iter < device_count; device_iter++) {
@@ -1026,6 +1045,25 @@ Camera::processSampleSlow(CameraSample &sample)
 				}
 			}
 
+
+			// A lost device: this camera searches for it only every lost_every-th sample, in turn with the others.
+			if (lost_every > 1) {
+				bool lost = true;
+				{
+					std::lock_guard<os::Mutex> lock(device->data_lock);
+					if (device->locked_data.last_known_pose.has_value()) {
+						const time_duration_ns since =
+						    sample.timestamp_ns - device->locked_data.last_known_pose->timestamp_ns;
+						lost = since >
+						       (time_duration_ns)(U_TIME_1MS_IN_NS *
+						                          debug_get_num_option_constellation_tracker_lost_ms());
+					}
+				}
+				if (lost && ((slow_n + this->index + (uint64_t)device->id) % (uint64_t)lost_every) != 0) {
+					device_state.solve_type = CONSTELLATION_SOLVE_TYPE_NO_SOLVE_DELAYED_DEEP;
+					continue;
+				}
+			}
 
 			xrt_pose Tcv_cam_device = XRT_POSE_IDENTITY;
 			if (device_state.Txr_world_device_prior.has_value() && Txr_world_cam.has_value()) {
@@ -2364,6 +2402,25 @@ constellation_tracker_camera_push_blobs(t_blob_sink *tbs, t_blob_observation *tb
 
 	// We own the frame reference, and don't need it past this point.
 	xrt_frame_reference(&tbo->frame, nullptr);
+
+	std::vector<t_blob> kept_blobs;
+	t_blob_observation filtered_tbo;
+	const int64_t max_blob_px = debug_get_num_option_constellation_tracker_max_blob_px();
+	if (max_blob_px > 0 && tbo->num_blobs > 0) {
+		kept_blobs.reserve(tbo->num_blobs);
+		for (uint32_t i = 0; i < tbo->num_blobs; i++) {
+			const t_blob &b = tbo->blobs[i];
+			if (std::max(b.size.x, b.size.y) <= (float)max_blob_px) {
+				kept_blobs.push_back(b);
+			}
+		}
+		if (kept_blobs.size() != tbo->num_blobs) {
+			filtered_tbo = *tbo;
+			filtered_tbo.blobs = kept_blobs.data();
+			filtered_tbo.num_blobs = (uint32_t)kept_blobs.size();
+			tbo = &filtered_tbo;
+		}
+	}
 
 	if (tbo->num_blobs == 0) {
 		CT_TRACE(tracker, "No blobs in observation, skipping processing");
