@@ -133,8 +133,8 @@ fn default_settings() -> Vec<Setting> {
                "Off (default): the plugin switches the layer off for SteamVR's compositor (on SteamVR 2.19.3 it patches the compositor with offsets from an older build: more judder). On: keep it.", false).steamvr(),
         value("XRT_COMPOSITOR_SCALE_PERCENTAGE", "Render size per eye (%)",
               "Of the panel's 2000x2040 per eye (140 = 2800x2856, the default, as Monado renders for OpenXR; 100 = the panel's size; 170 = 3400x3468 as Sony's driver, heavier).", "140", true).steamvr(),
-        value("PLAY_AREA", "Play area (m)",
-              "Side of the square play area the plugin gives SteamVR (no Room Setup needed).", "2", true).steamvr(),
+        value("PLAY_AREA", "Default play area (m)",
+              "Side of the square play area SteamVR gets until you draw your own room (Launcher tab: Set Custom Play Area opens Room Setup; Set Default Play Area goes back to this size).", "2", true).steamvr(),
         value("OVRN_DISTORTION_MESH_RES", "Distortion mesh",
               "Grid SteamVR samples the lens distortion on (80, as Sony's driver).", "80", true).steamvr(),
         toggle_values("OVRN_POSE_MODEL", "Driver-predicted head pose (ALVR model)",
@@ -426,6 +426,73 @@ fn bt_controllers() -> (Option<bool>, Option<bool>) {
     (left, right)
 }
 
+/// The driver's chaperone file without a room drawn in Room Setup in the saved-room universe (5022): Some(new text),
+/// or None if there is none (the driver's default square, marked monado_rectangle, and other universes are kept).
+fn without_drawn_room(text: &str) -> Result<Option<String>, String> {
+    let mut doc: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let universes = doc.get_mut("universes").and_then(|u| u.as_array_mut()).ok_or("no universes")?;
+    let before = universes.len();
+    universes.retain(|u| {
+        let id = match &u["universeID"] {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        !(id == "5022" && u.get("monado_rectangle").is_none() && has_drawn_room(u))
+    });
+    if universes.len() == before {
+        return Ok(None);
+    }
+    serde_json::to_string_pretty(&doc).map(Some).map_err(|e| e.to_string())
+}
+
+/// As the driver's has_drawn_room (ovrn_room.cpp): walls, or a play area with a size.
+fn has_drawn_room(u: &serde_json::Value) -> bool {
+    if u["collision_bounds"].as_array().is_some_and(|b| !b.is_empty()) {
+        return true;
+    }
+    match u["play_area"].as_array() {
+        Some(a) if a.len() == 2 => a.iter().all(|x| x.as_f64().is_some_and(|v| v > 0.0)),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_drawn_room;
+
+    #[test]
+    fn removes_a_drawn_room_only() {
+        let t = r#"{"jsonid":"chaperone_info","version":5,"universes":[
+            {"universeID":"5022","collision_bounds":[[[0,0,0]]],"play_area":[3,2]},
+            {"universeID":"5023","monado_rectangle":true,"play_area":[2,2]},
+            {"universeID":"9999","play_area":[1,1]}]}"#;
+        let out = without_drawn_room(t).unwrap().expect("a drawn room is taken out");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ids: Vec<&str> = v["universes"].as_array().unwrap().iter().map(|u| u["universeID"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["5023", "9999"]);
+        assert_eq!(v["jsonid"], "chaperone_info");
+    }
+
+    #[test]
+    fn keeps_the_default_square() {
+        let t = r#"{"jsonid":"chaperone_info","version":5,"universes":[
+            {"universeID":"5022","monado_rectangle":true,"play_area":[2,2]},
+            {"universeID":"5023","monado_rectangle":true,"play_area":[2,2]}]}"#;
+        assert_eq!(without_drawn_room(t).unwrap(), None);
+    }
+
+    #[test]
+    fn numeric_ids_and_bad_files() {
+        // An undrawn, seeded entry (no walls, no play area) isn't a drawn room.
+        let seeded = r#"{"universes":[{"universeID":"5022","seated":{},"standing":{},"time":"x"}]}"#;
+        assert_eq!(without_drawn_room(seeded).unwrap(), None);
+        let t = r#"{"universes":[{"universeID":5022,"play_area":[3,3]}]}"#;
+        assert!(without_drawn_room(t).unwrap().is_some());
+        assert!(without_drawn_room("not json").is_err());
+        assert!(without_drawn_room(r#"{"x":1}"#).is_err());
+    }
+}
+
 fn process_running(name: &str) -> bool {
     Command::new("pgrep").args(["-x", name]).output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -508,6 +575,10 @@ impl Launcher {
     }
 
     fn start_steamvr(&mut self) {
+        self.start_steamvr_with(&[]);
+    }
+
+    fn start_steamvr_with(&mut self, extra_env: &[(&str, &str)]) {
         let status = self.status.lock().unwrap().clone();
         if status.service {
             self.message = "Stop monado-service first: it holds the headset.".into();
@@ -522,6 +593,7 @@ impl Launcher {
         let f2 = f.try_clone().ok();
         let mut cmd = Command::new("bash");
         cmd.arg(&script).envs(self.cfg.env(Target::SteamVR)).stdin(Stdio::null()).stdout(f);
+        cmd.envs(extra_env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         if !self.cfg.steam_root.is_empty() {
             cmd.env("STEAM_ROOT", &self.cfg.steam_root);
         }
@@ -537,6 +609,94 @@ impl Launcher {
                 self.message = format!("SteamVR starting (log {})", log.display());
             }
             Err(e) => self.message = format!("Couldn't start {}: {e}", script.display()),
+        }
+    }
+
+    /// The driver's own chaperone file (driver_monado_psvr2: <SteamVR config>/monado_psvr2/chaperone_info.vrchap),
+    /// SteamVR's config folder from ~/.config/openvr/openvrpaths.vrpath as the driver finds it.
+    fn chaperone_file(&self) -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let vrpath = Path::new(&home).join(".config/openvr/openvrpaths.vrpath");
+        let from_vrpath = fs::read_to_string(&vrpath)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v["config"].get(0).and_then(|c| c.as_str()).map(PathBuf::from));
+        let config = from_vrpath.unwrap_or_else(|| {
+            let root = if self.cfg.steam_root.is_empty() {
+                Path::new(&home).join(".local/share/Steam")
+            } else {
+                PathBuf::from(&self.cfg.steam_root)
+            };
+            root.join("config")
+        });
+        config.join("monado_psvr2/chaperone_info.vrchap")
+    }
+
+    /// Set Default Play Area: take a room drawn in Room Setup out of the driver's saved-room universe (5022,
+    /// kRoomUniverse in ovrn_backend_monado.cpp), so the next start gives SteamVR the default square from the Settings
+    /// tab again (the driver writes it into an undrawn room). The file is backed up into logs/ first; the floor anchor
+    /// (~/.config/monado/ovrd_room.json) is kept. Only while SteamVR is closed: it owns the file while running.
+    fn set_default_play_area(&mut self) {
+        let size = self
+            .cfg
+            .settings
+            .iter()
+            .find(|s| s.key == "PLAY_AREA")
+            .and_then(|s| match &s.kind {
+                Kind::Value { value } if s.enabled => Some(value.trim().to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "2".into());
+        let path = self.chaperone_file();
+        let Ok(text) = fs::read_to_string(&path) else {
+            self.message = format!("No room drawn yet: SteamVR gets the default {size} m play area ({} not there).", path.display());
+            return;
+        };
+        let new_text = match without_drawn_room(&text) {
+            Err(e) => {
+                self.message = format!("Can't read {}: {e}", path.display());
+                return;
+            }
+            Ok(None) => {
+                self.message = format!("Already the default play area ({size} m): no room drawn in Room Setup.");
+                return;
+            }
+            Ok(Some(t)) => t,
+        };
+        let backup = self.logs_dir().join(format!("chaperone-before-default-{}.vrchap", stamp()));
+        if fs::write(&backup, &text).is_err() {
+            self.message = format!("Can't back up {} (nothing changed)", path.display());
+            return;
+        }
+        match fs::write(&path, new_text) {
+            Ok(()) => {
+                self.message = format!(
+                    "Default play area set: the next SteamVR start uses the {size} m square from Settings (your drawn room is backed up in {}).",
+                    backup.display()
+                )
+            }
+            Err(_) => self.message = format!("Couldn't write {}", path.display()),
+        }
+    }
+
+    /// Set Custom Play Area: SteamVR's Room Setup, to draw your own room. SteamVR running: asked to open it
+    /// (tools/vrlaunch, a background client); not running: started with Room Setup opening (ROOM_SETUP=1).
+    fn set_custom_play_area(&mut self, steamvr_running: bool) {
+        if !steamvr_running {
+            self.start_steamvr_with(&[("ROOM_SETUP", "1")]);
+            if self.steamvr.is_some() {
+                self.message = "SteamVR starting; Room Setup opens once it is up.".into();
+            }
+            return;
+        }
+        let tool = Path::new(&self.cfg.test_kit).join("tools/vrlaunch");
+        if !tool.exists() {
+            self.message = format!("{} isn't built (see its Build: line); open Room Setup from SteamVR", tool.display());
+            return;
+        }
+        match Command::new(&tool).arg("openvr.tool.steamvr_room_setup").stdin(Stdio::null()).spawn() {
+            Ok(_) => self.message = "Opening Room Setup in SteamVR...".into(),
+            Err(e) => self.message = format!("Couldn't run {}: {e}", tool.display()),
         }
     }
 
@@ -761,6 +921,25 @@ impl Launcher {
         dot(ui, Some(st.headset), "PS VR2 headset (USB)");
         dot(ui, st.left, "Left Sense controller");
         dot(ui, st.right, "Right Sense controller");
+        ui.horizontal(|ui| {
+            let steamvr = st.steamvr || self.steamvr.is_some();
+            if ui
+                .add_enabled(!steamvr, egui::Button::new("Set Default Play Area"))
+                .on_hover_text("SteamVR gets the square play area from Settings again (your drawn room is backed up). SteamVR must be closed.")
+                .on_disabled_hover_text("Close SteamVR first: it owns the play area file while running.")
+                .clicked()
+            {
+                self.set_default_play_area();
+            }
+            if ui
+                .add_enabled(!st.service, egui::Button::new("Set Custom Play Area"))
+                .on_hover_text("Opens SteamVR's Room Setup to draw your own room (starts SteamVR if needed). Kept until you set the default again.")
+                .on_disabled_hover_text("Stop monado-service first: SteamVR needs the headset.")
+                .clicked()
+            {
+                self.set_custom_play_area(steamvr);
+            }
+        });
         self.refresh_picker(ui);
         ui.separator();
 

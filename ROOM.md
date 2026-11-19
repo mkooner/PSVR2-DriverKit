@@ -29,6 +29,17 @@ What the driver does with SteamVR's room (chaperone), why, and what has been che
 - **When Room Setup starts before the room is anchored**, the left controller buzzes three times and the log says
   how to anchor first (a room drawn in the session universe is gone at the next start).
 
+### Default and custom play area (2026-11-19)
+
+SteamVR gets the DriverKit's default play area (Settings > SteamVR > "Default play area", `PLAY_AREA`, a square, 2 m
+by default) until you draw your own room in Room Setup: in this session's universe and in the saved room (the driver
+writes its square, marked `monado_rectangle`, into an undrawn room). A room drawn in Room Setup replaces it and is kept.
+On the Launcher tab, under the controllers:
+- **Set Default Play Area** (SteamVR closed): takes the drawn room out of the driver's file (backed up in `logs/`), so
+  the next start uses the default again. The floor anchor stays.
+- **Set Custom Play Area**: opens Room Setup (SteamVR running: asked through `tools/vrlaunch`; not running: started
+  with `ROOM_SETUP=1`).
+
 ### Passthrough (seeing the room through the headset)
 
 The driver gives SteamVR the headset's bottom camera pair, the same cameras and images Sony's driver shows, so
@@ -41,6 +52,20 @@ SteamVR's own **Room View** works, in Room Setup or any time.
   SteamVR's internal camera frame queue has a reader (Room View in SteamVR 2.19 never sent StartVideoStream,
   2026-11-18), then goes back to its default mode 2 s after the last reader left. Log: "ovrn: passthrough wanted
   (...)" / "passthrough on" / "passthrough not wanted any more" / "passthrough off (N frames)".
+- **See-through, as on Sony's driver (2026-11-19):** the headset's function button shows the whole camera picture and
+  pressing it again goes back to the game. Sony's driver draws the camera itself (direct mode) and asks SteamVR to
+  pause the game and render less; here SteamVR draws it (it owns the display): for the session the driver sets
+  SteamVR's camera on with the opaque view (camera/enableCamera, roomViewStyle 4 "Opaque Pass-Through", roomView 1),
+  and puts your own camera settings back at shutdown (also after a crash, at the next start). While the view is shown
+  (SteamVR's VREvent_RoomViewShown / Hidden) it sets Prop_DriverRequestsApplicationPause_Bool and
+  Prop_DriverRequestsReducedRendering_Bool, as Sony's driver does. `OVRN_SEE_THROUGH=0` leaves the camera settings
+  alone. Checked offline: `tests/ovrn_driver_harness --see-through`.
+- **Camera placement for the picture (2026-11-19):** SteamVR is given the cameras' true directions and positions
+  (`psvr2_bottom_cameras_in_head`, from the calibration block: camera 0 28.9 deg down 17.4 left, camera 1 29.3 down
+  17.2 right, 78.9 mm apart; measured from motion 28.2 down 16.1 left). Before, it got the controller tracker's legacy
+  camera chain (camera 0 "0.5 up, 14.7 right", ~40 deg off), which put the picture at the wrong angle (warped and
+  swimming). The controller tracker keeps its own chain. Test: `OVRN_CAMERA_TEST_BLOCK=analysis/harness/block.bin
+  tests/tests_ovrn_camera "*placement*"`.
 - **The headset's own button** (under the visor, the PS5's passthrough button) toggles Room View: the driver reports
   it as the headset's system button, and its compositor binding
   (`resources/input/vrcompositor_binding_playstation_vr2_hmd.json`, the headset profile's `default_bindings`) maps a

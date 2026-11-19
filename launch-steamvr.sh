@@ -205,9 +205,11 @@ fi
 # Room calibration (see ROOM.md): the driver keeps SteamVR's universe 3 for an unanchored session (a 2 m square around
 # where you started) and switches to universe 2, your saved room, after a floor capture (left controller on the floor,
 # crouch next to it, hold Create 2.5 s). Draw the room in SteamVR's Room Setup once you're in universe 2.
-#   ROOM_SETUP=1   open SteamVR's Room Setup for you once the room is anchored: start SteamVR, do the floor capture
-#                  (left controller on its floor mark, crouch, hold Create until the short buzz), and Room Setup opens
-#                  (tools/vrlaunch, through SteamVR). No temporary square in the session universe meanwhile.
+#   ROOM_SETUP=1   open SteamVR's Room Setup as soon as SteamVR is up (tools/vrlaunch, through SteamVR). Before you
+#                  accept the traced room, do our floor capture if the room isn't anchored yet (left controller on its
+#                  floor mark, crouch, hold Create until the short buzz): it ties the room to that spot so it comes
+#                  back in place after a restart (SteamVR's own floor step only sets the floor height). No temporary
+#                  square in the session universe meanwhile.
 #   ROOM_FORGET=1  delete the saved room anchor before starting (to set the room up again)
 #   OVRD_ROOM=0    the previous behaviour: a fixed 2 m play area handed to SteamVR, nothing saved
 #   PLAY_AREA=<m>  side of the square play area the driver gives SteamVR (default 2). The saved room gets
@@ -220,7 +222,7 @@ fi
 [ -n "${SONY_PROPS:-}" ] && export OVRN_SONY_PROPS="$SONY_PROPS" && echo "  SONY_PROPS=$SONY_PROPS: Sony's display properties reported"
 if [ "${ROOM_SETUP:-0}" = 1 ]; then
 	export OVRD_PLAY_AREA_SIZE=0
-	echo "  ROOM_SETUP=1: Room Setup opens after the floor capture (left controller on its mark, hold Create)"
+	echo "  ROOM_SETUP=1: Room Setup opens once SteamVR is up"
 fi
 if [ "${ROOM_FORGET:-0}" = 1 ]; then
 	rm -f "$HOME/.config/monado/ovrd_room.json" && echo "  ROOM_FORGET=1: deleted the saved room anchor"
@@ -396,32 +398,21 @@ else
 		fi
 		GAME_PID=$!
 	fi
-	# ROOM_SETUP=1: wait for the driver to anchor the room (its "Room: SteamVR universe ... (the saved room)" line in
-	# vrserver.txt, after the floor capture), then ask SteamVR to open Room Setup. Room Setup first would draw the room
-	# in the session universe, which is gone at the next start.
+	# ROOM_SETUP=1: open Room Setup once the compositor is up and the devices have settled (2026-11-19: it waited for
+	# the floor capture first, but the capture can be done inside Room Setup, before accepting).
 	ROOM_SETUP_PID=""
 	if [ "${ROOM_SETUP:-0}" = 1 ]; then
 		if [ -x "$HERE/tools/vrlaunch" ]; then
 			(
-				for _ in $(seq 1 60); do pgrep -x vrcompositor >/dev/null && break; sleep 1; done
-				echo "  ROOM_SETUP=1: waiting for the floor capture (left controller on its mark, crouch, hold Create)"
-				# Poll the log's new part once a second (a tail -F pipeline kept running after the match, 2026-11-18).
 				from=$(stat -c %s "$STEAM_LOGS/vrserver.txt" 2>/dev/null || echo 0)
-				found=0
-				for _ in $(seq 1 1200); do
-					if tail -c +$((from + 1)) "$STEAM_LOGS/vrserver.txt" 2>/dev/null | grep -q "(the saved room)"; then
-						found=1
-						break
-					fi
-					pgrep -x vrserver >/dev/null || break
-					sleep 1
-				done
-				if [ "$found" = 1 ]; then
-					sleep 2
-					echo "  ROOM_SETUP=1: room anchored, opening Room Setup"
-					"$HERE/tools/vrlaunch" openvr.tool.steamvr_room_setup 2>&1 | grep -v -i breakpad | sed 's/^/  /'
-				else
-					echo "  ROOM_SETUP=1: no floor capture within 20 min; open Room Setup later with tools/vrlaunch"
+				for _ in $(seq 1 60); do pgrep -x vrcompositor >/dev/null && break; sleep 1; done
+				sleep 5
+				pgrep -x vrserver >/dev/null || exit 0
+				echo "  ROOM_SETUP=1: opening Room Setup"
+				"$HERE/tools/vrlaunch" openvr.tool.steamvr_room_setup 2>&1 | grep -v -i breakpad | sed 's/^/  /'
+				if ! tail -c +$((from + 1)) "$STEAM_LOGS/vrserver.txt" 2>/dev/null | grep -q "(the saved room)"; then
+					echo "  ROOM_SETUP=1: the room isn't anchored yet: before accepting, put the left controller on its"
+					echo "               floor mark, crouch next to it and hold Create until the short buzz"
 				fi
 			) &
 			ROOM_SETUP_PID=$!
