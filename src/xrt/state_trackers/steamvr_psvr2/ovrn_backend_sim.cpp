@@ -6,6 +6,7 @@
  * @ingroup st_ovrn
  */
 
+#include <cstdlib>
 #include "ovrn_backend.hpp"
 
 #include <cmath>
@@ -92,10 +93,13 @@ public:
 		return false;
 	}
 
+	//! OVRN_SIM_LATE_LEFT=1 (tests): the left controller appears only after 5 runFrame calls, as a Sense
+	//! controller that connects after SteamVR started.
 	bool
-	hasController(Hand) override
+	hasController(Hand hand) override
 	{
-		return true;
+		static const bool late = getenv("OVRN_SIM_LATE_LEFT") != nullptr;
+		return !(late && hand == Hand::Left && m_frames < 5);
 	}
 
 	DeviceInfo
@@ -162,6 +166,7 @@ public:
 	void
 	runFrame(int64_t) override
 	{
+		m_frames++;
 		frames++;
 	}
 
@@ -180,6 +185,7 @@ public:
 		out->position_valid = out->position_tracked = true;
 		return true;
 	}
+	int m_frames = 0; //!< RunFrame thread
 };
 
 } // namespace

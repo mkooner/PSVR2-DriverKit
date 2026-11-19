@@ -107,6 +107,17 @@ void
 psvr2_hmd_controllers_attached(struct xrt_device *hmd_xdev);
 
 /*!
+ * A Sense controller that connected after the system was opened (the SteamVR plugin finds it while running): set
+ * as the headset's left or right controller and added to the LED tracker if that already runs, or the tracker is
+ * created now from an already received calibration block (which adds it), or later when the block comes. False if
+ * that side already has a controller.
+ *
+ * @ingroup drv_psvr2
+ */
+bool
+psvr2_hmd_add_late_controller(struct xrt_device *hmd_xdev, struct xrt_device *pssense_xdev, bool left);
+
+/*!
  * Whether optical hand tracking was asked for (PSVR2_HAND_TRACKING): the headset then streams the bottom camera
  * pair (camera mode 0x10) and the builder creates the hand tracking device.
  *

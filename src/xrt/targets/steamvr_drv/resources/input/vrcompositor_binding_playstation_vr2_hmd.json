@@ -1,0 +1,26 @@
+{
+  "action_manifest_version": 0,
+  "alias_info": {},
+  "app_key": "openvr.component.vrcompositor",
+  "category": "steamvr_input",
+  "controller_type": "playstation_vr2_hmd",
+  "description": "The headset's function button (its passthrough button on a PS5) toggles SteamVR's Room View.",
+  "name": "SteamVR dashboard bindings for the PlayStation VR2 headset",
+  "options": {},
+  "simulated_actions": [],
+  "bindings": {
+    "/actions/system": {
+      "sources": [
+        {
+          "inputs": {
+            "click": {
+              "output": "/actions/system/in/toggleroomview"
+            }
+          },
+          "mode": "button",
+          "path": "/user/head/input/system"
+        }
+      ]
+    }
+  }
+}

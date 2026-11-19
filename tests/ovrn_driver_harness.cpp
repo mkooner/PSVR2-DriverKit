@@ -402,6 +402,9 @@ main(int argc, char **argv)
 	} else {
 		setenv("OVRN_BACKEND", "sim", 1);
 	}
+	if (argc > 1 && !strcmp(argv[1], "--late")) {
+		setenv("OVRN_SIM_LATE_LEFT", "1", 1);
+	}
 	const char *path = OVRN_DRIVER_PATH;
 	void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
 	if (lib == nullptr) {
@@ -424,6 +427,64 @@ main(int argc, char **argv)
 		return 1;
 	}
 	FakeContext context;
+
+	// --late: the simulated left controller appears only after the start (a Sense controller connecting late):
+	// the driver adds it to SteamVR from RunFrame, and its poses flow once SteamVR activates it.
+	if (argc > 1 && !strcmp(argv[1], "--late")) {
+		check(provider->Init(&context) == VRInitError_None, "Init succeeds");
+		std::vector<Added> added;
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			added = g_added;
+		}
+		check(added.size() == 2 && added[0].cls == TrackedDeviceClass_HMD && added[1].cls == TrackedDeviceClass_Controller,
+		      "late left: the headset and the right controller only at the start");
+		for (uint32_t i = 0; i < added.size(); i++) {
+			check(added[i].driver->Activate(i) == VRInitError_None, "Activate succeeds");
+		}
+		for (int i = 0; i < 4; i++) {
+			provider->RunFrame();
+		}
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_added.size() == 2, "late left: nothing added before it connects");
+		}
+		for (int i = 0; i < 3; i++) {
+			provider->RunFrame();
+		}
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			added = g_added;
+		}
+		check(added.size() == 3 && added[2].cls == TrackedDeviceClass_Controller && added[2].serial != added[1].serial,
+		      "late left: added to SteamVR once it connects (RunFrame), with its own serial");
+		for (int i = 0; i < 3; i++) {
+			provider->RunFrame();
+		}
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_added.size() == 3, "late left: added once only");
+		}
+		if (added.size() == 3) {
+			sleep_ms(30);
+			check(pose_count(2) == 0, "late left: no pose before SteamVR activates it");
+			check(added[2].driver->Activate(2) == VRInitError_None, "late left: Activate succeeds");
+			int32_t role = 0;
+			check(prop(2, Prop_ControllerRoleHint_Int32, &role) && role == TrackedControllerRole_LeftHand,
+			      "late left: it is the left hand");
+			sleep_ms(100);
+			bool valid = false;
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				valid = g_poses[2].last.poseIsValid;
+			}
+			check(pose_count(2) > 50 && valid, "late left: its poses flow after activation");
+		}
+		provider->Cleanup();
+		check(dlclose(lib) == 0, "the driver unloads");
+		printf("%s\n", g_fails ? "FAILED" : "all checks passed");
+		return g_fails ? 1 : 0;
+	}
 
 	// Real hardware: one round (Monado's PS VR2 driver can't re-claim the USB interfaces within one process; under
 	// SteamVR every start is a new vrserver process).

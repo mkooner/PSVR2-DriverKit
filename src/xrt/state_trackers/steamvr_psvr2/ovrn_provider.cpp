@@ -56,8 +56,7 @@ public:
 		}
 		for (Hand hand : {Hand::Left, Hand::Right}) {
 			if (m_backend->hasController(hand)) {
-				m_controllers.emplace_back(new Controller(m_backend.get(), hand));
-				m_controllers.back()->registerDevice();
+				addController(hand);
 			}
 		}
 		m_universe = m_backend->universe();
@@ -73,6 +72,7 @@ public:
 		if (m_running.exchange(false) && m_poseThread.joinable()) {
 			m_poseThread.join();
 		}
+		m_live[0] = m_live[1] = nullptr;
 		m_controllers.clear();
 		m_hmd.reset();
 		if (m_backend) {
@@ -98,6 +98,13 @@ public:
 		// The backend first (it reads the controllers), then their inputs and the room's universe to SteamVR.
 		const int64_t now = now_ns();
 		m_backend->runFrame(now);
+		// A controller that connected after the start (the backend picks it up in runFrame).
+		for (Hand hand : {Hand::Left, Hand::Right}) {
+			if (m_live[(int)hand] == nullptr && m_backend->hasController(hand)) {
+				addController(hand); // its activation sets the current universe
+				log("ovrn: %s controller added to SteamVR after the start\n", hand == Hand::Left ? "left" : "right");
+			}
+		}
 		for (auto &c : m_controllers) {
 			c->updateInputs();
 		}
@@ -228,8 +235,9 @@ private:
 			if (m_hmd && m_hmd->active()) {
 				m_hmd->updatePose(now);
 			}
-			for (auto &c : m_controllers) {
-				if (c->active()) {
+			for (auto &live : m_live) {
+				Controller *c = live.load();
+				if (c != nullptr && c->active()) {
 					c->updatePose(now);
 				}
 			}
@@ -243,7 +251,17 @@ private:
 
 	std::unique_ptr<Backend> m_backend;
 	std::unique_ptr<Hmd> m_hmd;
-	std::vector<std::unique_ptr<Controller>> m_controllers;
+	std::vector<std::unique_ptr<Controller>> m_controllers; //!< owned; added on the Init / RunFrame thread
+	std::atomic<Controller *> m_live[2] = {{nullptr}, {nullptr}}; //!< by hand, for the pose thread
+
+	void
+	addController(Hand hand)
+	{
+		m_controllers.emplace_back(new Controller(m_backend.get(), hand));
+		Controller *c = m_controllers.back().get();
+		c->registerDevice();
+		m_live[(int)hand] = c;
+	}
 	uint64_t m_universe = 0; //!< RunFrame thread
 	std::atomic<bool> m_running{false};
 	std::thread m_poseThread;

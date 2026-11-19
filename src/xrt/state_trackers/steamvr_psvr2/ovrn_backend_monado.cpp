@@ -28,9 +28,22 @@
 
 #ifdef XRT_BUILD_DRIVER_PSVR2
 #include "ovrn_camera_fit.hpp"
+#include "psvr2/psvr2_interface.h"
+#endif
+
+#if defined(XRT_BUILD_DRIVER_PSVR2) && defined(XRT_BUILD_DRIVER_PSSENSE)
+#define OVRN_CONTROLLER_HOTPLUG 1
+#include "tracking/t_time_sync.h"
+#include "xrt/xrt_frame.h"
+#include "util/u_builder_search.h"
+#include "xrt/xrt_prober.h"
+#include <chrono>
+#include <condition_variable>
+#include <thread>
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -174,19 +187,26 @@ public:
 		u_builder_setup_tracking_origins(m_head, NULL, m_hand[0], m_hand[1], NULL, &offset);
 		m_room.set_hmd(m_head);
 		for (int i = 0; i < 2; i++) {
-			if (m_hand[i] != NULL && m_hand[i]->name != XRT_DEVICE_PSSENSE) {
+			struct xrt_device *h = m_hand[i];
+			if (h != NULL && h->name != XRT_DEVICE_PSSENSE) {
 				ovrd_log("ovrn: %s controller '%s' is not a PS VR2 Sense controller, not exposed\n",
-				         i == 0 ? "left" : "right", m_hand[i]->str);
+				         i == 0 ? "left" : "right", h->str);
 				m_hand[i] = NULL;
 			}
 		}
 		readEyes(m_eyes);
+#ifdef OVRN_CONTROLLER_HOTPLUG
+		startHotplug();
+#endif
 		return true;
 	}
 
 	void
 	stop() override
 	{
+#ifdef OVRN_CONTROLLER_HOTPLUG
+		stopHotplug();
+#endif
 		m_head = NULL;
 		m_hand[0] = m_hand[1] = NULL;
 		if (m_xso != NULL) {
@@ -195,6 +215,11 @@ public:
 		if (m_xsysd != NULL) {
 			xrt_system_devices_destroy(&m_xsysd);
 		}
+#ifdef OVRN_CONTROLLER_HOTPLUG
+		// Late controllers: their devices went with the system's (appended to it, after the headset, as the
+		// builder's), then their frame nodes, as the system frees its own after its devices.
+		xrt_frame_context_destroy_nodes(&m_lateFctx);
+#endif
 		if (m_xsys != NULL) {
 			xrt_system_destroy(&m_xsys);
 		}
@@ -413,7 +438,7 @@ public:
 		d.manufacturer = "Sony Interactive Entertainment";
 		d.model = left ? "PlayStation VR2 Sense Left" : "PlayStation VR2 Sense Right";
 		d.serial = xdev->serial[0] != '\0' ? xdev->serial : xdev->str;
-		if (d.serial == headInfo().serial || d.serial == std::string(m_hand[left ? 1 : 0] ? m_hand[left ? 1 : 0]->serial : "")) {
+		if (d.serial == headInfo().serial || d.serial == std::string(m_hand[left ? 1 : 0] ? m_hand[left ? 1 : 0].load()->serial : "")) {
 			d.serial += left ? "-left" : "-right";
 		}
 		d.controller_type = "playstation_vr2_sense";
@@ -567,11 +592,19 @@ public:
 	void
 	runFrame(int64_t now) override
 	{
+#ifdef OVRN_CONTROLLER_HOTPLUG
+		for (int i = 0; i < 2; i++) {
+			if (m_hand[i] == NULL && m_late[i] != NULL) {
+				m_hand[i] = m_late[i].load(); // the provider adds it to SteamVR after this runFrame
+			}
+		}
+#endif
 		for (int i = 0; i < 2; i++) {
 			if (m_hand[i] != NULL) {
 				xrt_device_update_inputs(m_hand[i]);
 			}
 		}
+		const bool was_down = m_headButton;
 		m_headButton = false;
 		if (m_head != NULL && m_head->name == XRT_DEVICE_PSVR2 && xrt_device_update_inputs(m_head) == XRT_SUCCESS) {
 			for (uint32_t k = 0; k < m_head->input_count; k++) {
@@ -580,6 +613,7 @@ public:
 				}
 			}
 		}
+		m_headPresses += (m_headButton && !was_down) ? 1 : 0;
 		roomCaptureFrame(now);
 		m_room.run_frame(now);
 		promptFrame(now);
@@ -688,6 +722,102 @@ private:
 	}
 
 	//! Every 30 s: the headset and both controllers in SteamVR's world (the room transform applied), one frame.
+#ifdef OVRN_CONTROLLER_HOTPLUG
+	/*
+	 * Sense controllers that connect after the start (2026-11-18 20:37 and 20:38: the left one connected 7 s and
+	 * 0.9 s after the driver had looked once, and SteamVR got only the right one). Every 2 s while a side is
+	 * missing: probe, create it as the builder does, add it to the headset's LED tracking, and hand it to runFrame.
+	 * OVRN_CONTROLLER_HOTPLUG=0 turns it off.
+	 */
+	void
+	startHotplug()
+	{
+		const char *e = getenv("OVRN_CONTROLLER_HOTPLUG");
+		if ((e != nullptr && strcmp(e, "0") == 0) || m_head == NULL || m_head->name != XRT_DEVICE_PSVR2) {
+			return;
+		}
+		m_hpQuit = false;
+		m_hotplug = std::thread(&MonadoBackend::hotplugLoop, this);
+	}
+
+	void
+	stopHotplug()
+	{
+		{
+			std::lock_guard<std::mutex> l(m_hpMutex);
+			m_hpQuit = true;
+			m_hpCv.notify_all();
+		}
+		if (m_hotplug.joinable()) {
+			m_hotplug.join();
+		}
+	}
+
+	void
+	hotplugLoop()
+	{
+		std::unique_lock<std::mutex> l(m_hpMutex);
+		while (!m_hpQuit) {
+			m_hpCv.wait_for(l, std::chrono::seconds(2), [&] { return m_hpQuit; });
+			if (m_hpQuit) {
+				break;
+			}
+			const bool missing = (m_hand[0] == NULL && m_late[0] == NULL) || (m_hand[1] == NULL && m_late[1] == NULL);
+			if (!missing) {
+				continue;
+			}
+			l.unlock();
+			hotplugScan();
+			l.lock();
+		}
+	}
+
+	void
+	hotplugScan()
+	{
+		struct xrt_prober *xp = NULL;
+		if (xrt_instance_get_prober(m_xinst, &xp) != XRT_SUCCESS || xp == NULL || xrt_prober_probe(xp) != XRT_SUCCESS) {
+			return;
+		}
+		struct xrt_prober_device **devs = NULL;
+		size_t count = 0;
+		if (xrt_prober_lock_list(xp, &devs, &count) != XRT_SUCCESS) {
+			return;
+		}
+		struct xrt_device *made[2] = {NULL, NULL};
+		struct t_timing_event_sink *sinks[2] = {NULL, NULL};
+		for (int i = 0; i < 2; i++) {
+			if (m_hand[i] != NULL || m_late[i] != NULL) {
+				continue;
+			}
+			struct xrt_prober_device *xpdev = u_builder_find_prober_device(
+			    devs, count, PSSENSE_VID, i == 0 ? PSSENSE_PID_LEFT : PSSENSE_PID_RIGHT, XRT_BUS_TYPE_ANY);
+			if (xpdev != NULL) {
+				made[i] = pssense_create(xp, xpdev, &m_lateFctx, &sinks[i]);
+			}
+		}
+		xrt_prober_unlock_list(xp, &devs);
+
+		for (int i = 0; i < 2; i++) {
+			if (made[i] == NULL) {
+				continue;
+			}
+			struct t_timing_event_source *source = psvr2_hmd_get_timing_event_source((struct psvr2_hmd *)m_head);
+			if (source != NULL && sinks[i] != NULL) {
+				t_timing_event_source_add_sink(source, sinks[i]);
+			}
+			psvr2_hmd_add_late_controller(m_head, made[i], i == 0);
+			// Destroyed with the system's devices, after the headset (as the builder's controllers are).
+			if (m_xsysd->static_xdev_count < XRT_SYSTEM_MAX_DEVICES) {
+				m_xsysd->static_xdevs[m_xsysd->static_xdev_count++] = made[i];
+			}
+			ovrd_log("ovrn: %s controller connected after the start: %s (%s), added\n", i == 0 ? "left" : "right",
+			         made[i]->str, made[i]->serial);
+			m_late[i] = made[i];
+		}
+	}
+#endif
+
 	void
 	logDevices(int64_t now)
 	{
@@ -714,7 +844,7 @@ private:
 			n += snprintf(line + n, sizeof(line) - n, " %s %.3f %.3f %.3f%s", d.name, p.x, p.y, p.z,
 			              t.position_tracked ? "" : " (not tracked)");
 		}
-		ovrd_log("%s\n", line);
+		ovrd_log("%s; headset button presses %u\n", line, m_headPresses);
 	}
 
 	static Pose
@@ -747,6 +877,7 @@ private:
 	int m_promptPulses = 0;
 	int64_t m_promptNextNs = 0;
 	bool m_headButton = false; //!< RunFrame thread
+	uint32_t m_headPresses = 0; //!< headset button presses (in the 30 s device line)
 	int64_t m_lastDeviceLogNs = 0;
 
 	/*!
@@ -843,7 +974,16 @@ private:
 	struct xrt_system_devices *m_xsysd = NULL;
 	struct xrt_space_overseer *m_xso = NULL;
 	struct xrt_device *m_head = NULL;
-	struct xrt_device *m_hand[2] = {NULL, NULL};
+	//! RunFrame and pose threads read them; set at start, or by runFrame when a late controller is ready.
+	std::atomic<struct xrt_device *> m_hand[2] = {{NULL}, {NULL}};
+#ifdef OVRN_CONTROLLER_HOTPLUG
+	std::atomic<struct xrt_device *> m_late[2] = {{NULL}, {NULL}}; //!< made by the hotplug thread
+	struct xrt_frame_context m_lateFctx = {};
+	std::thread m_hotplug;
+	std::mutex m_hpMutex;
+	std::condition_variable m_hpCv;
+	bool m_hpQuit = false;
+#endif
 	std::mutex m_eyeMutex;
 	Pose m_eyes[2];
 	OvrdRoom m_room;

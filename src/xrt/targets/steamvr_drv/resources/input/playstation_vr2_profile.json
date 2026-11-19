@@ -2,6 +2,12 @@
   "jsonid": "input_profile",
   "controller_type": "playstation_vr2_hmd",
   "input_bindingui_mode": "hmd",
+  "default_bindings": [
+    {
+      "app_key": "openvr.component.vrcompositor",
+      "binding_url": "vrcompositor_binding_playstation_vr2_hmd.json"
+    }
+  ],
   "input_bindingui_right": {
     "image": "{monado}/icons/playstation_vr2/playstation_vr2_headset.svg"
   },

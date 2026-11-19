@@ -27,45 +27,25 @@ class Hmd final : public TrackedDevice, public vr::IVRDisplayComponent
 {
 public:
 	/*!
-	 * The headset's button to SteamVR (RunFrame thread). OVRN_HEAD_BUTTON:
-	 *  - roomview (default): each press is a double-click of the headset's system button, the gesture SteamVR's
-	 *    Room View setting ("double-click system button") toggles the camera view with, so the button toggles
-	 *    passthrough as it does on a PS5;
-	 *  - system: the headset's system button as it is;
-	 *  - off: not reported.
+	 * The headset's button to SteamVR as the headset's system button (RunFrame thread). Our compositor binding
+	 * (resources/input/vrcompositor_binding_playstation_vr2_hmd.json, the headset profile's default_bindings) makes
+	 * a press SteamVR's "Toggle Room View", as the button shows the cameras on a PS5. A double-click sent before
+	 * (2026-11-18) did nothing: without a compositor binding for the headset, SteamVR binds its button to nothing.
+	 * OVRN_HEAD_BUTTON=off: not reported.
 	 */
 	void
-	updateInputs(int64_t now)
+	updateInputs(int64_t)
 	{
 		if (m_buttonHandle == vr::k_ulInvalidInputComponentHandle) {
 			return;
 		}
 		const bool down = m_backend->headButton();
-		if (!m_buttonDoubleClick) {
-			if (down != m_buttonSent) {
-				m_buttonSent = down;
-				vr::VRDriverInput()->UpdateBooleanComponent(m_buttonHandle, down, 0.0);
-			}
-			return;
-		}
-		if (down && !m_buttonWasDown && m_clickStartNs == 0) {
-			m_clickStartNs = now;
-		}
-		m_buttonWasDown = down;
-		if (m_clickStartNs == 0) {
-			return;
-		}
-		// down 0-60 ms, up 60-120, down 120-180, up after: two clicks well inside a double-click window.
-		const int64_t t = now - m_clickStartNs;
-		const bool want = (t < 60000000) || (t >= 120000000 && t < 180000000);
-		if (want != m_buttonSent) {
-			m_buttonSent = want;
-			vr::VRDriverInput()->UpdateBooleanComponent(m_buttonHandle, want, 0.0);
-		}
-		if (t >= 240000000) {
-			m_clickStartNs = 0;
+		if (down != m_buttonSent) {
+			m_buttonSent = down;
+			vr::VRDriverInput()->UpdateBooleanComponent(m_buttonHandle, down, 0.0);
 		}
 	}
+
 
 	explicit Hmd(Backend *backend)
 	    : TrackedDevice(vr::TrackedDeviceClass_HMD, backend->headInfo().serial), m_backend(backend),
@@ -300,18 +280,15 @@ private:
 	setupHeadButton()
 	{
 		const char *mode = getenv("OVRN_HEAD_BUTTON");
-		const std::string m = mode != nullptr ? mode : "roomview";
-		if (m == "off" || vr::VRDriverInput() == nullptr) {
+		if ((mode != nullptr && strcmp(mode, "off") == 0) || vr::VRDriverInput() == nullptr) {
 			return;
 		}
-		m_buttonDoubleClick = m != "system";
 		if (vr::VRDriverInput()->CreateBooleanComponent(m_container, "/input/system/click", &m_buttonHandle) !=
 		    vr::VRInputError_None) {
 			m_buttonHandle = vr::k_ulInvalidInputComponentHandle;
 			return;
 		}
-		log("ovrn: headset button: %s\n", m_buttonDoubleClick ? "toggles Room View (a system button double-click)"
-		                                                        : "the headset's system button");
+		log("ovrn: headset button: SteamVR's Toggle Room View (our compositor binding)\n");
 	}
 
 	void
@@ -340,10 +317,7 @@ private:
 	}
 
 	vr::VRInputComponentHandle_t m_buttonHandle = vr::k_ulInvalidInputComponentHandle;
-	bool m_buttonDoubleClick = true;
-	bool m_buttonWasDown = false;
 	bool m_buttonSent = false;
-	int64_t m_clickStartNs = 0;
 	std::unique_ptr<Camera> m_camera;
 
 	//! The hidden-area mask from the backend's file, handed to SteamVR as it is (render target UV).

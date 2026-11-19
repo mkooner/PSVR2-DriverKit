@@ -400,3 +400,28 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 		pssense_add_to_constellation_tracker(hmd->pssense_right, hmd->led_tracker);
 	}
 }
+
+bool
+psvr2_hmd_add_late_controller(struct xrt_device *hmd_xdev, struct xrt_device *pssense_xdev, bool left)
+{
+	struct psvr2_hmd *hmd = (struct psvr2_hmd *)hmd_xdev;
+	// Under calib_lock, as the USB thread creates the LED tracker (and adds pssense_left/right) under it.
+	os_mutex_lock(&hmd->calib_lock);
+	struct xrt_device **slot = left ? &hmd->pssense_left : &hmd->pssense_right;
+	if (*slot != NULL) {
+		os_mutex_unlock(&hmd->calib_lock);
+		return false;
+	}
+	*slot = pssense_xdev;
+	if (hmd->led_tracker != NULL) {
+		// The tracker takes devices while running (its device lock).
+		pssense_add_to_constellation_tracker(pssense_xdev, hmd->led_tracker);
+		PSVR2_INFO(hmd, "Late %s Sense controller added to the running LED tracker", left ? "left" : "right");
+	} else if (hmd->calib_block != NULL) {
+		PSVR2_INFO(hmd, "Late %s Sense controller: creating the LED tracker from the calibration block",
+		           left ? "left" : "right");
+		psvr2_parse_gen_calibration_block(hmd, hmd->calib_block, hmd->calib_block_size);
+	}
+	os_mutex_unlock(&hmd->calib_lock);
+	return true;
+}
