@@ -304,9 +304,9 @@ psvr2_slam_carry_init(struct psvr2_slam_carry *c, bool enabled);
 
 /*!
  * One SLAM position (headset clock @p ts). A reset is a step of at least 5 cm landing within 1 cm of where this
- * session's tracking started (the headset re-originates there; orientation carries on). After the first 20 s it is
- * carried over: the output continues from where the position was heading (last two outputs, speed clamped to 2 m/s).
- * Resets during the first 20 s, and loops (under 1 s after the previous reset, carried anyway), count as world changes.
+ * session's tracking started (the headset re-originates there; orientation carries on). It is carried over, from the
+ * session's start: the output continues from where the position was heading (last two outputs, speed clamped to
+ * 2 m/s). Loops (under 1 s after the previous reset, carried anyway) count as world changes.
  * Returns the position to use, @p out_event says what happened.
  */
 struct xrt_vec3

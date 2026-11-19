@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <ctime>
 #include <memory>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -97,6 +98,24 @@ struct DeviceInfo
 	std::string hidden_area_file;
 };
 
+/*!
+ * The headset's passthrough cameras (the PS VR2's bottom pair), as SteamVR's camera component needs them: per camera
+ * the pixel intrinsics, an Extended_FTheta lens model fitted to the camera's own (r_d = t + k0 t^3 + k1 t^5 + k2 t^7 +
+ * k3 t^9, t the angle off axis, r_d the distorted radius over the focal length), and its pose in the head (OpenVR
+ * camera axes: x right, y up, looking along -z).
+ */
+struct CameraInfo
+{
+	uint32_t width = 0, height = 0; //!< one camera's image, pixels
+	double fx[2] = {}, fy[2] = {}, cx[2] = {}, cy[2] = {};
+	double ftheta[2][8] = {};
+	Pose cam_in_head[2];
+	float fit_rms_px[2] = {}; //!< how well the fitted lens model matches the camera's own, pixels
+};
+
+//! One image pair (two BC4 images, 1024 stride x 1016 rows, back to back) and its exposure time (now_ns() clock).
+using CameraImageFn = std::function<void(const uint8_t *bc4_pair, size_t size, int64_t exposure_ns)>;
+
 //! Where the backend's tracking space lies in SteamVR's world (the room calibration): p_world = rotation * p + t.
 struct WorldTransform
 {
@@ -179,6 +198,49 @@ public:
 	//! A chaperone for SteamVR when the backend has no room of its own (empty: none).
 	virtual std::string
 	chaperoneJson() = 0;
+	//! The driver-owned chaperone file SteamVR keeps the rooms in (Prop_DriverProvidedChaperonePath_String; empty:
+	//! SteamVR's own file).
+	virtual std::string
+	chaperonePath()
+	{
+		return {};
+	}
+	//! The headset's own button (PS VR2: the function button under the visor, its passthrough button on a PS5);
+	//! read in runFrame.
+	virtual bool
+	headButton()
+	{
+		return false;
+	}
+	//! Whether the headset has passthrough cameras at all (their calibration may still be on its way).
+	virtual bool
+	hasCameras()
+	{
+		return false;
+	}
+	//! The passthrough cameras (false: none, or their calibration hasn't arrived yet).
+	virtual bool
+	cameraInfo(CameraInfo *out)
+	{
+		(void)out;
+		return false;
+	}
+	//! Start the camera images (called on the USB thread; copy and return), or stop them.
+	virtual bool
+	cameraStart(CameraImageFn fn)
+	{
+		(void)fn;
+		return false;
+	}
+	virtual void
+	cameraStop()
+	{}
+	//! SteamVR's Room Setup events (VREvent_ChaperoneRoomSetupStarting / ...Committed), RunFrame thread.
+	virtual void
+	roomSetupEvent(uint32_t event_type)
+	{
+		(void)event_type;
+	}
 	//! Once per SteamVR frame (RunFrame thread): read the controllers' inputs, room housekeeping.
 	virtual void
 	runFrame(int64_t now_ns) = 0;

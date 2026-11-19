@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
+#include <sys/stat.h>
 #include <map>
 #include <mutex>
 #include <string>
@@ -148,20 +149,30 @@ struct FakeProperties : IVRProperties
 	}
 };
 
+//! Boolean settings the driver wrote ("section/key"), as SteamVR's settings file would hold them.
+std::map<std::string, bool> g_bools;
+
 struct FakeSettings : IVRSettings
 {
 	const char *GetSettingsErrorNameFromEnum(EVRSettingsError) override { return "error"; }
-	void SetBool(const char *, const char *, bool, EVRSettingsError *) override {}
+	void
+	SetBool(const char *section, const char *key, bool value, EVRSettingsError *) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_bools[std::string(section) + "/" + key] = value;
+	}
 	void SetInt32(const char *, const char *, int32_t, EVRSettingsError *) override {}
 	void SetFloat(const char *, const char *, float, EVRSettingsError *) override {}
 	void SetString(const char *, const char *, const char *, EVRSettingsError *) override {}
 	bool
-	GetBool(const char *, const char *, EVRSettingsError *e) override
+	GetBool(const char *section, const char *key, EVRSettingsError *e) override
 	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		auto it = g_bools.find(std::string(section) + "/" + key);
 		if (e != nullptr) {
-			*e = VRSettingsError_UnsetSettingHasNoDefault;
+			*e = it != g_bools.end() ? VRSettingsError_None : VRSettingsError_UnsetSettingHasNoDefault;
 		}
-		return false;
+		return it != g_bools.end() && it->second;
 	}
 	int32_t
 	GetInt32(const char *, const char *, EVRSettingsError *e) override
@@ -190,7 +201,12 @@ struct FakeSettings : IVRSettings
 		}
 	}
 	void RemoveSection(const char *, EVRSettingsError *) override {}
-	void RemoveKeyInSection(const char *, const char *, EVRSettingsError *) override {}
+	void
+	RemoveKeyInSection(const char *section, const char *key, EVRSettingsError *) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_bools.erase(std::string(section) + "/" + key);
+	}
 };
 
 struct FakeDriverManager : IVRDriverManager
@@ -349,14 +365,36 @@ main(int argc, char **argv)
 	if (real && argc > 3 && !strcmp(argv[2], "--dump")) {
 		g_dumpPath = argv[3];
 	}
-	const bool monado = real || (argc > 1 && !strcmp(argv[1], "--monado"));
+	// --room: Monado's simulated headset with the room calibration on, against a temporary SteamVR config folder
+	// (XDG_CONFIG_HOME points at a scratch folder, so the user's SteamVR files are never touched).
+	const bool room = argc > 1 && !strcmp(argv[1], "--room");
+	const bool monado = real || room || (argc > 1 && !strcmp(argv[1], "--monado"));
 	// --predicted: the driver-predicted, zero-velocity pose model (OVRN_POSE_MODEL=predicted).
 	const bool predicted = argc > 1 && !strcmp(argv[1], "--predicted");
 	if (predicted) {
 		setenv("OVRN_POSE_MODEL", "predicted", 1);
 	}
-	// The room calibration prepares SteamVR's own chaperone file: not from a test (a fixed play area instead).
-	setenv("OVRD_ROOM", "0", 1);
+	// The room calibration prepares a chaperone file: not the user's from a test (a fixed play area instead, or with
+	// --room a scratch config folder).
+	std::string room_dir, room_steam_config;
+	if (room) {
+		char tmpl[] = "/tmp/ovrn_room_XXXXXX";
+		if (mkdtemp(tmpl) == nullptr) {
+			printf("FAIL: no scratch folder\n");
+			return 1;
+		}
+		room_dir = tmpl;
+		room_steam_config = room_dir + "/steamconfig";
+		mkdir((room_dir + "/openvr").c_str(), 0755);
+		mkdir(room_steam_config.c_str(), 0755);
+		FILE *f = fopen((room_dir + "/openvr/openvrpaths.vrpath").c_str(), "w");
+		fprintf(f, "{\"config\":[\"%s\"],\"version\":1}\n", room_steam_config.c_str());
+		fclose(f);
+		setenv("XDG_CONFIG_HOME", room_dir.c_str(), 1);
+		unsetenv("OVRD_ROOM");
+	} else {
+		setenv("OVRD_ROOM", "0", 1);
+	}
 	if (real) {
 		// nothing more: Monado probes the hardware
 	} else if (monado) {
@@ -400,7 +438,16 @@ main(int argc, char **argv)
 			g_components.clear();
 			g_events.clear();
 		}
+		unsetenv("DISABLE_STEAMVR_LINUX_FIXES");
 		check(provider->Init(&context) == VRInitError_None, "Init succeeds");
+		{
+			const char *off = getenv("DISABLE_STEAMVR_LINUX_FIXES");
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(off != nullptr && strcmp(off, "1") == 0,
+			      "the SteamVRLinuxFixes layer is switched off for the compositor (environment it inherits)");
+			check(g_bools.count("steamvr/enableLinuxVulkanAsync") && g_bools["steamvr/enableLinuxVulkanAsync"],
+			      "SteamVR's async reprojection is switched on before the compositor starts");
+		}
 		check(provider->GetInterfaceVersions() != nullptr, "interface versions are reported");
 		std::vector<Added> added;
 		{
@@ -438,10 +485,47 @@ main(int argc, char **argv)
 		      "display frequency is set");
 		check(prop(0, Prop_UserIpdMeters_Float, &ipd) && ipd > 0.05f && ipd < 0.08f, "a plausible IPD is set");
 		check(prop(0, Prop_SecondsFromVsyncToPhotons_Float, &v2p) && v2p >= 0.0f, "vsync-to-photons is set");
-		if (monado) {
+		{
+			int32_t style = -1;
+			check(prop(0, Prop_HmdTrackingStyle_Int32, &style) && style == HmdTrackingStyle_InsideOutCameras,
+			      "the headset reports inside-out tracking (Prop_HmdTrackingStyle_Int32 = InsideOutCameras)");
+		}
+		if (monado && !room) {
 			std::lock_guard<std::mutex> l(g_mutex);
 			check(g_props[1000].count(Prop_DriverProvidedChaperoneJson_String) == 1,
 			      "with the room calibration off a play area is given to SteamVR");
+		}
+		if (room) {
+			std::string published;
+			uint64_t universe = 0;
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				const auto &b = g_props[1000][Prop_DriverProvidedChaperonePath_String];
+				published.assign(b.begin(), b.end());
+				published = published.c_str(); // up to the terminating NUL
+			}
+			const std::string expected = room_steam_config + "/monado_psvr2/chaperone_info.vrchap";
+			check(published == expected, "the driver publishes its own chaperone file (Prop_DriverProvidedChaperonePath_String)");
+			check(prop(0, Prop_CurrentUniverseId_Uint64, &universe) && universe == 5023,
+			      "the session universe (5023) is active until a floor capture anchors the room");
+			FILE *own = fopen(expected.c_str(), "r");
+			std::string text;
+			if (own != nullptr) {
+				char buf[4096];
+				size_t n;
+				while ((n = fread(buf, 1, sizeof(buf), own)) > 0) {
+					text.append(buf, n);
+				}
+				fclose(own);
+			}
+			check(text.find("\"universeID\":\t\"5022\"") != std::string::npos &&
+			          text.find("\"universeID\":\t\"5023\"") != std::string::npos,
+			      "the driver's file holds the room universe (5022) and the session universe (5023)");
+			FILE *global = fopen((room_steam_config + "/chaperone_info.vrchap").c_str(), "r");
+			check(global == nullptr, "SteamVR's own chaperone file is not touched");
+			if (global != nullptr) {
+				fclose(global);
+			}
 		}
 				check(prop(0, Prop_HasDisplayComponent_Bool, &has_display) && has_display &&
 		          prop(0, Prop_IsOnDesktop_Bool, &on_desktop) && !on_desktop,
@@ -698,6 +782,11 @@ main(int argc, char **argv)
 		      "a deactivated device stops sending poses, the others keep going");
 
 		provider->Cleanup();
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(!g_bools.count("steamvr/enableLinuxVulkanAsync") && !g_bools.count("driver_monado_psvr2/asyncReprojectionSetByDriver"),
+			      "Cleanup takes the async reprojection setting out again (other drivers keep SteamVR's default)");
+		}
 		const size_t total = pose_count(0) + pose_count(1) + pose_count(2);
 		sleep_ms(100);
 		check(pose_count(0) + pose_count(1) + pose_count(2) == total, "no pose is sent after Cleanup (threads stopped)");

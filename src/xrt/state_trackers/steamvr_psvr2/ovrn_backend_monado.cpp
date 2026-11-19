@@ -26,10 +26,16 @@
 #include "pssense/pssense_interface.h"
 #endif
 
+#ifdef XRT_BUILD_DRIVER_PSVR2
+#include "ovrn_camera_fit.hpp"
+#endif
+
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 // Per-eye render target as a percentage of the eye's display size (0: 100 for the PS VR2, the panel's own 2000x2040
 // per eye, the user's choice 2026-11-18; 170 = Sony's 3400x3468 was tried at 16:43 with Sony's display properties
@@ -126,10 +132,23 @@ public:
 		 */
 		setenv("PSVR2_ACCEL_FUSION", "1", 0);
 		ovrd_log_init(vr::VRDriverLog());
-		// The room: SteamVR's chaperone file and the saved room, before any device is added.
-		// The play area is the driver's own square, in the session universe and in the saved room, as ALVR hands
-		// SteamVR a rectangle instead of relying on Room Setup (a room drawn there is kept).
-		m_room.init(debug_get_float_option_ovrn_play_area_size(), debug_get_float_option_ovrn_play_area_size());
+		/*
+		 * The room, before any device is added: the driver's own chaperone file (as Sony's driver keeps
+		 * playstation_vr2/chaperone_info.vrchap), published to SteamVR as Prop_DriverProvidedChaperonePath_String;
+		 * SteamVR's Room Setup writes the rooms drawn there. Universe kSessionUniverse is this session's frame (the
+		 * headset starts a new tracking world at every start: all 26 recordings of 2026-11-18 began at 0 0 0), with
+		 * a temporary square play area around the start (PLAY_AREA, 0: none); kRoomUniverse is the saved room,
+		 * active once a floor capture anchors it, and only ever holds a room drawn in Room Setup (no made-up bounds).
+		 */
+		const std::string global = ovrd_room_chaperone_path();
+		if (!global.empty()) {
+			m_chaperonePath = global.substr(0, global.rfind('/')) + "/monado_psvr2/chaperone_info.vrchap";
+		}
+		m_room.init(debug_get_float_option_ovrn_play_area_size(), 0.0f, m_chaperonePath, kRoomUniverse,
+		            kSessionUniverse);
+		if (m_room.chaperone_path().empty()) {
+			m_chaperonePath.clear(); // the room code is off or couldn't prepare the file: SteamVR's own file
+		}
 		if (xrt_instance_create(NULL, &m_xinst) != XRT_SUCCESS) {
 			*why = "xrt_instance_create failed";
 			return false;
@@ -255,7 +274,6 @@ public:
 			if (want("display")) {
 				d.bool_props.push_back({vr::Prop_DisplayAllowNightMode_Bool, true});
 				d.bool_props.push_back({vr::Prop_DisplaySupportsAnalogGain_Bool, true});
-				d.int_props.push_back({vr::Prop_HmdTrackingStyle_Int32, 3});
 				d.float_props = {
 				    {vr::Prop_DisplayMinAnalogGain_Float, 0.0f},  {vr::Prop_DisplayMaxAnalogGain_Float, 1.0f},
 				    {vr::Prop_DashboardScale_Float, 0.9f},        {vr::Prop_IpdUIRangeMinMeters_Float, 0.059f},
@@ -515,6 +533,12 @@ public:
 	}
 
 	//! With the room calibration off: a square play area in universe 2, so SteamVR skips its room setup.
+	bool
+	headButton() override
+	{
+		return m_headButton;
+	}
+
 	std::string
 	chaperoneJson() override
 	{
@@ -548,11 +572,183 @@ public:
 				xrt_device_update_inputs(m_hand[i]);
 			}
 		}
+		m_headButton = false;
+		if (m_head != NULL && m_head->name == XRT_DEVICE_PSVR2 && xrt_device_update_inputs(m_head) == XRT_SUCCESS) {
+			for (uint32_t k = 0; k < m_head->input_count; k++) {
+				if (m_head->inputs[k].name == XRT_INPUT_PSVR2_SYSTEM_CLICK) {
+					m_headButton = m_head->inputs[k].value.boolean;
+				}
+			}
+		}
 		roomCaptureFrame(now);
 		m_room.run_frame(now);
+		promptFrame(now);
+		if (now - m_lastDeviceLogNs > 30 * U_TIME_1S_IN_NS) {
+			m_lastDeviceLogNs = now;
+			logDevices(now);
+		}
+	}
+
+	std::string
+	chaperonePath() override
+	{
+		return m_chaperonePath;
+	}
+
+#ifdef XRT_BUILD_DRIVER_PSVR2
+	bool
+	hasCameras() override
+	{
+		return m_head != NULL && m_head->name == XRT_DEVICE_PSVR2;
+	}
+
+	bool
+	cameraInfo(CameraInfo *out) override
+	{
+		if (m_head == NULL || m_head->name != XRT_DEVICE_PSVR2) {
+			return false;
+		}
+		struct t_camera_calibration cams[2];
+		struct xrt_pose poses[2];
+		if (!psvr2_get_bottom_cameras(m_head, cams, poses)) {
+			return false;
+		}
+		CameraInfo info;
+		info.width = cams[0].image_size_pixels.w;
+		info.height = cams[0].image_size_pixels.h;
+		for (int c = 0; c < 2; c++) {
+			info.fx[c] = cams[c].intrinsics[0][0];
+			info.fy[c] = cams[c].intrinsics[1][1];
+			info.cx[c] = cams[c].intrinsics[0][2];
+			info.cy[c] = cams[c].intrinsics[1][2];
+			info.cam_in_head[c] = toPose(poses[c]);
+			info.fit_rms_px[c] = fit_ftheta(cams[c], info.ftheta[c]);
+		}
+		*out = info;
+		return info.width > 0 && info.height > 0;
+	}
+
+	bool
+	cameraStart(CameraImageFn fn) override
+	{
+		if (m_head == NULL || m_head->name != XRT_DEVICE_PSVR2) {
+			return false;
+		}
+		{
+			std::lock_guard<std::mutex> lock(m_cameraMutex);
+			m_cameraFn = std::move(fn);
+		}
+		psvr2_set_camera_image_callback(m_head, &MonadoBackend::cameraImage, this);
+		psvr2_request_bottom_camera_images(m_head, true);
+		return true;
+	}
+
+	void
+	cameraStop() override
+	{
+		if (m_head == NULL || m_head->name != XRT_DEVICE_PSVR2) {
+			return;
+		}
+		psvr2_request_bottom_camera_images(m_head, false);
+		psvr2_set_camera_image_callback(m_head, NULL, NULL);
+		std::lock_guard<std::mutex> lock(m_cameraMutex);
+		m_cameraFn = nullptr;
+	}
+#endif
+
+	void
+	roomSetupEvent(uint32_t event_type) override
+	{
+		if (event_type == vr::VREvent_ChaperoneRoomSetupStarting) {
+			if (m_room.room_setup_started()) {
+				m_promptPulses = 3; // three short buzzes on the left controller: anchor the room first
+				m_promptNextNs = 0;
+			}
+		} else if (event_type == vr::VREvent_ChaperoneRoomSetupCommitted) {
+			m_room.room_setup_committed();
+		}
 	}
 
 private:
+	// The universes in the driver's own chaperone file (any id but 0 and 1, DOC "Driver_API_Documentation": 1 is
+	// reserved for Oculus). Distinct from the old plugin's 2 and 3 in SteamVR's own file.
+	static constexpr uint64_t kRoomUniverse = 5022;
+	static constexpr uint64_t kSessionUniverse = 5023;
+
+	//! The "anchor the room first" prompt: short buzzes 0.35 s apart on the left controller.
+	void
+	promptFrame(int64_t now)
+	{
+		if (m_promptPulses <= 0 || now < m_promptNextNs) {
+			return;
+		}
+		haptic(Hand::Left, 0.12f, 160.0f, 1.0f);
+		m_promptPulses--;
+		m_promptNextNs = now + 350 * U_TIME_1MS_IN_NS;
+	}
+
+	//! Every 30 s: the headset and both controllers in SteamVR's world (the room transform applied), one frame.
+	void
+	logDevices(int64_t now)
+	{
+		const ovrd_room_transform T = m_room.transform();
+		char line[512];
+		int n = snprintf(line, sizeof(line), "Room: devices in the world frame (universe %llu):",
+		                 (unsigned long long)m_room.universe());
+		struct
+		{
+			const char *name;
+			struct xrt_device *xdev;
+			enum xrt_input_name input;
+		} devs[3] = {{"head", m_head, XRT_INPUT_GENERIC_HEAD_POSE},
+		             {"left", m_hand[0], XRT_INPUT_PSSENSE_GRIP_POSE},
+		             {"right", m_hand[1], XRT_INPUT_PSSENSE_GRIP_POSE}};
+		for (const auto &d : devs) {
+			TrackedPose t;
+			if (d.xdev == NULL || n >= (int)sizeof(line) || !devicePose(d.xdev, d.input, now, &t) || !t.position_valid) {
+				n += snprintf(line + n, sizeof(line) - n, " %s -", d.name);
+				continue;
+			}
+			const struct xrt_vec3 p = ovrd_room_apply(
+			    T, xrt_vec3{(float)t.pose.position.x, (float)t.pose.position.y, (float)t.pose.position.z});
+			n += snprintf(line + n, sizeof(line) - n, " %s %.3f %.3f %.3f%s", d.name, p.x, p.y, p.z,
+			              t.position_tracked ? "" : " (not tracked)");
+		}
+		ovrd_log("%s\n", line);
+	}
+
+	static Pose
+	toPose(const struct xrt_pose &p)
+	{
+		Pose out;
+		out.orientation = {p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w};
+		out.position = {p.position.x, p.position.y, p.position.z};
+		return out;
+	}
+
+#ifdef XRT_BUILD_DRIVER_PSVR2
+	//! The headset driver's camera callback (USB thread): hand the image pair on, exposure on now_ns()'s clock.
+	static void
+	cameraImage(void *user, const uint8_t *bc4_pair, size_t size, int64_t exposure_mono_ns)
+	{
+		MonadoBackend *self = static_cast<MonadoBackend *>(user);
+		std::lock_guard<std::mutex> lock(self->m_cameraMutex);
+		if (self->m_cameraFn) {
+			self->m_cameraFn(bc4_pair, size, exposure_mono_ns);
+		}
+	}
+
+#endif
+
+	std::mutex m_cameraMutex;
+	CameraImageFn m_cameraFn;
+
+	std::string m_chaperonePath;
+	int m_promptPulses = 0;
+	int64_t m_promptNextNs = 0;
+	bool m_headButton = false; //!< RunFrame thread
+	int64_t m_lastDeviceLogNs = 0;
+
 	/*!
 	 * Room capture (left Sense controller): Create held with the controller lying still on the floor. A short buzz
 	 * (0.25 s) says it worked, a long one (0.9 s) that it didn't (the reason is in the log).

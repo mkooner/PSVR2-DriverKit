@@ -22,6 +22,7 @@
 #include <ctime>
 #include <fstream>
 #include <memory>
+#include <vector>
 
 #ifdef __linux__
 #include <sys/stat.h>
@@ -504,8 +505,13 @@ is_driver_rectangle(cJSON *entry)
 }
 
 bool
-ovrd_room_prepare_chaperone(
-    const std::string &path, float session_size, bool *out_has_room, std::string *out_error, float room_size)
+ovrd_room_prepare_chaperone(const std::string &path,
+                            float session_size,
+                            bool *out_has_room,
+                            std::string *out_error,
+                            float room_size,
+                            const char *room_universe,
+                            const char *session_universe)
 {
 	auto fail = [&](const char *why) {
 		if (out_error != nullptr) {
@@ -517,6 +523,17 @@ ovrd_room_prepare_chaperone(
 		*out_has_room = false;
 	}
 
+#ifdef __linux__
+	// A driver-owned file lives in a folder of its own (SteamVR's config folder/<driver>): create it once.
+	const size_t slash = path.rfind('/');
+	if (slash != std::string::npos && slash > 0) {
+		const std::string dir = path.substr(0, slash);
+		struct stat st;
+		if (stat(dir.c_str(), &st) != 0 && mkdir(dir.c_str(), 0755) != 0) {
+			return fail("could not create the chaperone file's folder");
+		}
+	}
+#endif
 	bool exists = false;
 	std::string original = read_file(path, 4 * 1024 * 1024, &exists);
 	Json document(nullptr, cJSON_Delete);
@@ -542,16 +559,16 @@ ovrd_room_prepare_chaperone(
 		if (uid == nullptr) {
 			continue;
 		}
-		if (strcmp(uid, "3") == 0) {
+		if (strcmp(uid, session_universe) == 0) {
 			session = entry;
-		} else if (strcmp(uid, "2") == 0) {
+		} else if (strcmp(uid, room_universe) == 0) {
 			room = entry;
 		}
 	}
 
 	bool changed = false;
 
-	Json origin = plain_universe("3", session_size);
+	Json origin = plain_universe(session_universe, session_size);
 	if (!origin) {
 		return fail("internal: session universe JSON");
 	}
@@ -571,7 +588,7 @@ ovrd_room_prepare_chaperone(
 	}
 	if (room_size > 0.0f && !drawn) {
 		// The driver's rectangle, unless the same one is already there.
-		Json rect = plain_universe("2", room_size);
+		Json rect = plain_universe(room_universe, room_size);
 		if (!rect || cJSON_AddTrueToObject(rect.get(), "monado_rectangle") == nullptr) {
 			return fail("internal: room rectangle JSON");
 		}
@@ -585,7 +602,7 @@ ovrd_room_prepare_chaperone(
 			changed = true;
 		}
 	} else if (room == nullptr) {
-		Json seed = plain_universe("2", 0.0f);
+		Json seed = plain_universe(room_universe, 0.0f);
 		if (!seed || !cJSON_AddItemToArray(universes, seed.get())) {
 			return fail("internal: seeding universe 2");
 		}
@@ -684,4 +701,243 @@ ovrd_room_save(const std::string &path, const ovrd_room_anchor &room)
 	         ROOM_FILE_VERSION, room.anchor.position.x, 0.0, room.anchor.position.z, room.anchor.yaw,
 	         (int)room.axis, (long long)room.created_unix_s, (long long)room.updated_unix_s, room.captures);
 	return write_file_atomic(path, text, nullptr, false);
+}
+
+
+/*
+ *
+ * Checking a universe (diagnostics and tests).
+ *
+ */
+
+namespace {
+
+struct P2
+{
+	double x, z;
+};
+
+double
+cross2(const P2 &o, const P2 &a, const P2 &b)
+{
+	return (a.x - o.x) * (b.z - o.z) - (a.z - o.z) * (b.x - o.x);
+}
+
+//! Proper or touching intersection of segments ab and cd.
+bool
+segments_cross(const P2 &a, const P2 &b, const P2 &c, const P2 &d)
+{
+	const double d1 = cross2(c, d, a), d2 = cross2(c, d, b), d3 = cross2(a, b, c), d4 = cross2(a, b, d);
+	return ((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0)) && d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0;
+}
+
+bool
+inside_polygon(const std::vector<P2> &poly, const P2 &p)
+{
+	bool in = false;
+	for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+		if (((poly[i].z > p.z) != (poly[j].z > p.z)) &&
+		    (p.x < (poly[j].x - poly[i].x) * (p.z - poly[i].z) / (poly[j].z - poly[i].z) + poly[i].x)) {
+			in = !in;
+		}
+	}
+	return in;
+}
+
+bool
+read_origin(cJSON *entry, const char *name, ovrd_room_yaw_pose *out)
+{
+	cJSON *o = cJSON_GetObjectItemCaseSensitive(entry, name);
+	cJSON *yaw = cJSON_GetObjectItemCaseSensitive(o, "yaw");
+	xrt_vec3 t;
+	if (!cJSON_IsObject(o) || !read_vec3(cJSON_GetObjectItemCaseSensitive(o, "translation"), &t) ||
+	    !cJSON_IsNumber(yaw)) {
+		return false;
+	}
+	*out = ovrd_room_yaw_pose{t, (float)yaw->valuedouble};
+	return finite3(t) && std::isfinite(out->yaw);
+}
+
+void
+check_entry(cJSON *entry, ovrd_room_universe_info *out)
+{
+	constexpr double TOL = 0.01; // 1 cm
+	auto issue = [&](const std::string &s) { out->issues.push_back(s); };
+	char buf[160];
+
+	out->found = true;
+	cJSON *time_item = cJSON_GetObjectItemCaseSensitive(entry, "time");
+	if (cJSON_IsString(time_item)) {
+		out->time = time_item->valuestring;
+	}
+	out->has_standing = read_origin(entry, "standing", &out->standing);
+	if (!out->has_standing) {
+		issue("no valid standing origin");
+	}
+	ovrd_room_yaw_pose seated;
+	if (!read_origin(entry, "seated", &seated)) {
+		issue("no valid seated origin");
+	}
+	ovrd_room_yaw_pose setup;
+	out->has_setup_standing = read_origin(entry, "setup_standing2", &setup);
+
+	cJSON *area = cJSON_GetObjectItemCaseSensitive(entry, "play_area");
+	if (area != nullptr) {
+		if (!cJSON_IsArray(area) || cJSON_GetArraySize(area) != 2 || !cJSON_IsNumber(cJSON_GetArrayItem(area, 0)) ||
+		    !cJSON_IsNumber(cJSON_GetArrayItem(area, 1))) {
+			issue("play_area is not [width, depth]");
+		} else {
+			out->play_width = (float)cJSON_GetArrayItem(area, 0)->valuedouble;
+			out->play_depth = (float)cJSON_GetArrayItem(area, 1)->valuedouble;
+			if (!(out->play_width > 0) || !(out->play_depth > 0) || !std::isfinite(out->play_width) ||
+			    !std::isfinite(out->play_depth)) {
+				issue("play_area width/depth not positive");
+			}
+		}
+	}
+
+	cJSON *bounds = cJSON_GetObjectItemCaseSensitive(entry, "collision_bounds");
+	if (bounds == nullptr) {
+		return;
+	}
+	if (!cJSON_IsArray(bounds)) {
+		issue("collision_bounds is not an array");
+		return;
+	}
+	std::vector<P2> start, end; // each wall's bottom edge on the floor
+	int index = 0;
+	cJSON *quad = nullptr;
+	cJSON_ArrayForEach(quad, bounds)
+	{
+		xrt_vec3 v[4];
+		bool ok = cJSON_IsArray(quad) && cJSON_GetArraySize(quad) == 4;
+		for (int k = 0; ok && k < 4; k++) {
+			ok = read_vec3(cJSON_GetArrayItem(quad, k), &v[k]) && finite3(v[k]);
+		}
+		if (!ok) {
+			snprintf(buf, sizeof(buf), "wall %d: not 4 finite points", index);
+			issue(buf);
+			index++;
+			continue;
+		}
+		// SteamVR's order: bottom, top above it, top above the other end, bottom.
+		const bool vertical = std::fabs(v[0].x - v[1].x) < TOL && std::fabs(v[0].z - v[1].z) < TOL &&
+		                      std::fabs(v[3].x - v[2].x) < TOL && std::fabs(v[3].z - v[2].z) < TOL;
+		if (!vertical) {
+			snprintf(buf, sizeof(buf), "wall %d: not a vertical quad (bottom, top, top, bottom)", index);
+			issue(buf);
+		}
+		if (std::fabs(v[0].y) > TOL || std::fabs(v[3].y) > TOL) {
+			snprintf(buf, sizeof(buf), "wall %d: bottom not on the floor (y %.3f, %.3f)", index, v[0].y, v[3].y);
+			issue(buf);
+		}
+		if (!(v[1].y > v[0].y + 0.1f) || !(v[2].y > v[3].y + 0.1f)) {
+			snprintf(buf, sizeof(buf), "wall %d: top not above the bottom", index);
+			issue(buf);
+		}
+		const P2 a{v[0].x, v[0].z}, b{v[3].x, v[3].z};
+		const double len = std::hypot(b.x - a.x, b.z - a.z);
+		if (len < TOL) {
+			snprintf(buf, sizeof(buf), "wall %d: zero length", index);
+			issue(buf);
+		}
+		out->perimeter_m += (float)len;
+		start.push_back(a);
+		end.push_back(b);
+		index++;
+	}
+	out->walls = start.size();
+	if (start.size() < 3) {
+		if (!start.empty()) {
+			issue("fewer than 3 walls");
+		}
+		return;
+	}
+	bool closed = true;
+	for (size_t i = 0; i < start.size(); i++) {
+		const P2 &e = end[i], &s = start[(i + 1) % start.size()];
+		if (std::hypot(e.x - s.x, e.z - s.z) > TOL) {
+			snprintf(buf, sizeof(buf), "wall %zu doesn't end where wall %zu starts (%.3f m apart)", i,
+			         (i + 1) % start.size(), std::hypot(e.x - s.x, e.z - s.z));
+			issue(buf);
+			closed = false;
+		}
+	}
+	for (size_t i = 0; i < start.size(); i++) {
+		for (size_t j = i + 1; j < start.size(); j++) {
+			if (std::hypot(start[i].x - start[j].x, start[i].z - start[j].z) < TOL) {
+				snprintf(buf, sizeof(buf), "corners %zu and %zu are the same point", i, j);
+				issue(buf);
+			}
+		}
+	}
+	const size_t n = start.size();
+	for (size_t i = 0; i < n; i++) {
+		for (size_t j = i + 2; j < n; j++) {
+			if (i == 0 && j == n - 1) {
+				continue; // neighbours through the closing corner
+			}
+			if (segments_cross(start[i], end[i], start[j], end[j])) {
+				snprintf(buf, sizeof(buf), "walls %zu and %zu cross", i, j);
+				issue(buf);
+			}
+		}
+	}
+	if (!closed) {
+		return;
+	}
+	double twice_area = 0;
+	for (size_t i = 0; i < n; i++) {
+		twice_area += start[i].x * start[(i + 1) % n].z - start[(i + 1) % n].x * start[i].z;
+	}
+	// Seen from above (+Y down onto the x-z plane, -Z forward): positive shoelace in (x, z) is clockwise.
+	out->winding = twice_area > 0 ? -1 : twice_area < 0 ? 1 : 0;
+	out->area_m2 = (float)std::fabs(twice_area / 2);
+	if (out->play_width > 0 && out->play_depth > 0) {
+		const double hw = out->play_width / 2 - TOL, hd = out->play_depth / 2 - TOL;
+		const P2 corners[4] = {{-hw, -hd}, {hw, -hd}, {hw, hd}, {-hw, hd}};
+		for (const P2 &c : corners) {
+			if (!inside_polygon(start, c)) {
+				issue("the play area reaches outside the boundary");
+				break;
+			}
+		}
+	}
+}
+
+} // namespace
+
+bool
+ovrd_room_check_universe(const std::string &universe_json, ovrd_room_universe_info *out)
+{
+	*out = ovrd_room_universe_info{};
+	Json entry(cJSON_Parse(universe_json.c_str()), cJSON_Delete);
+	if (!entry || !cJSON_IsObject(entry.get())) {
+		return false;
+	}
+	check_entry(entry.get(), out);
+	return true;
+}
+
+bool
+ovrd_room_read_universe(const std::string &path, const char *id, ovrd_room_universe_info *out)
+{
+	*out = ovrd_room_universe_info{};
+	bool exists = false;
+	std::string bytes = read_file(path, 4 * 1024 * 1024, &exists);
+	Json document(cJSON_Parse(bytes.c_str()), cJSON_Delete);
+	cJSON *universes = cJSON_GetObjectItemCaseSensitive(document.get(), "universes");
+	if (!exists || !cJSON_IsArray(universes)) {
+		return false;
+	}
+	cJSON *entry = nullptr;
+	cJSON_ArrayForEach(entry, universes)
+	{
+		const char *uid = universe_id(entry);
+		if (uid != nullptr && strcmp(uid, id) == 0) {
+			check_entry(entry, out);
+			return true;
+		}
+	}
+	return true;
 }

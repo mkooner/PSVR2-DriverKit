@@ -6,6 +6,15 @@
     "image": "{monado}/icons/playstation_vr2/playstation_vr2_headset.svg"
   },
   "input_source": {
+    "/input/system": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        0,
+        0
+      ],
+      "order": 1
+    },
     "/pose/raw": {
       "type": "pose",
       "binding_image_point": [

@@ -658,6 +658,29 @@ img_xfer_cb(struct libusb_transfer *xfer)
 		PSVR2_TRACE(hmd, "Camera frame - %d bytes", xfer->actual_length);
 		PSVR2_TRACE_HEX(hmd, xfer->buffer, MIN(256, xfer->actual_length));
 
+		if (xfer->actual_length == USB_CAM_MODE10_XFER_SIZE) {
+			// A client of the bottom camera images (the SteamVR plugin's passthrough): exposure time on the host
+			// clock (VTS as below, plus the VTS -> host offset).
+			os_mutex_lock(&hmd->data_lock);
+			psvr2_camera_image_cb cb = hmd->camera_image_cb;
+			void *user = hmd->camera_image_user;
+			const time_duration_ns hw2mono = hmd->hw2mono_vts;
+			const int64_t imu_us_now = hmd->last_imu_vts_ns / 1000;
+			os_mutex_unlock(&hmd->data_lock);
+			if (cb != NULL) {
+				uint32_t vts32;
+				memcpy(&vts32, xfer->buffer + 8, sizeof(vts32));
+				vts32 = __le32_to_cpu(vts32);
+				int64_t us = (imu_us_now & ~(int64_t)0xffffffff) | (int64_t)vts32;
+				if (us - imu_us_now > ((int64_t)1 << 31)) {
+					us -= (int64_t)1 << 32;
+				} else if (imu_us_now - us > ((int64_t)1 << 31)) {
+					us += (int64_t)1 << 32;
+				}
+				cb(user, xfer->buffer + 256, (size_t)xfer->actual_length - 256, us * 1000 + hw2mono);
+			}
+		}
+
 		if (xfer->actual_length == USB_CAM_MODE10_XFER_SIZE && hmd->basalt != NULL) {
 			// Header u32 at 8: exposure VTS in us; extended to 64 bits next to the IMU's VTS (wraps every 71 min).
 			uint32_t vts_us;
@@ -843,9 +866,9 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 		    psvr2_slam_carry_push(&hmd->slam_carry, vts_ns, &hmd->last_slam_pose.position, &event, &jump_m);
 		if (event != PSVR2_SLAM_CARRY_NONE) {
 			static const char *what[] = {
-			    "", "position carried over", "position carried over (reset loop, the room is dropped)",
+			    "", "position carried over", "position carried over (reset loop, counted as a world change)",
 			    "not carried (PSVR2_SLAM_CARRY=0), tracking world replaced",
-			    "not carried (SLAM still settling), tracking world replaced"};
+			    "not carried (SLAM still settling), tracking world replaced"}; // (no longer happens: carried)
 			PSVR2_INFO(hmd, "SLAM reset (%.3f m jump, %.1f s in): %s", jump_m,
 			           time_ns_to_s(vts_ns - hmd->slam_carry.first_ts), what[event]);
 		}
@@ -1823,6 +1846,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 	                           debug_get_bool_option_psvr2_basalt()
 	                       ? PSVR2_CAMERA_MODE_BOTTOM_SBS_BC4
 	                       : PSVR2_CAMERA_MODE_10;
+	hmd->camera_mode_default = hmd->camera_mode;
 	PSVR2_INFO(hmd, "Camera mode 0x%x", (unsigned)hmd->camera_mode);
 	if (debug_get_bool_option_psvr2_sony_ld_config()) {
 		// Byte for byte as Sony's driver sends them, in its order, before the camera mode.
@@ -2490,6 +2514,58 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 cleanup:
 	psvr2_hmd_destroy(&hmd->base);
 	return NULL;
+}
+
+void
+psvr2_set_camera_image_callback(struct xrt_device *xdev, psvr2_camera_image_cb cb, void *user)
+{
+	struct psvr2_hmd *hmd = psvr2_hmd(xdev);
+	os_mutex_lock(&hmd->data_lock);
+	hmd->camera_image_cb = cb;
+	hmd->camera_image_user = user;
+	os_mutex_unlock(&hmd->data_lock);
+}
+
+void
+psvr2_request_bottom_camera_images(struct xrt_device *xdev, bool on)
+{
+	struct psvr2_hmd *hmd = psvr2_hmd(xdev);
+	os_mutex_lock(&hmd->data_lock);
+	const uint32_t before = hmd->camera_image_requests;
+	if (on) {
+		hmd->camera_image_requests++;
+	} else if (hmd->camera_image_requests > 0) {
+		hmd->camera_image_requests--;
+	}
+	const uint32_t after = hmd->camera_image_requests;
+	os_mutex_unlock(&hmd->data_lock);
+	if ((before == 0) == (after == 0)) {
+		return;
+	}
+	const enum psvr2_camera_mode mode = after > 0 ? PSVR2_CAMERA_MODE_BOTTOM_SBS_BC4 : hmd->camera_mode_default;
+	if (mode == hmd->camera_mode) {
+		return;
+	}
+	hmd->camera_mode = mode;
+	PSVR2_INFO(hmd, "Camera mode 0x%x (%s)", (unsigned)mode,
+	           after > 0 ? "the bottom camera pair, asked for by a client" : "back to the default");
+	if (hmd->camera_enable) {
+		psvr2_set_camera_mode(hmd, mode);
+	}
+}
+
+bool
+psvr2_get_bottom_cameras(struct xrt_device *xdev, struct t_camera_calibration *out_cams, struct xrt_pose *out_poses)
+{
+	struct psvr2_hmd *hmd = psvr2_hmd(xdev);
+	os_mutex_lock(&hmd->data_lock);
+	const bool valid = hmd->ht_cams_valid;
+	if (valid) {
+		memcpy(out_cams, hmd->ht_cams, sizeof(hmd->ht_cams));
+		memcpy(out_poses, hmd->ht_cam_poses, sizeof(hmd->ht_cam_poses));
+	}
+	os_mutex_unlock(&hmd->data_lock);
+	return valid;
 }
 
 uint32_t

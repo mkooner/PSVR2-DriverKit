@@ -10,11 +10,15 @@
 
 #pragma once
 
+#include "ovrn_camera.hpp"
 #include "ovrn_device.hpp"
 
 #include <cmath>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
+#include <memory>
+#include <thread>
 #include <vector>
 
 namespace ovrn {
@@ -22,6 +26,47 @@ namespace ovrn {
 class Hmd final : public TrackedDevice, public vr::IVRDisplayComponent
 {
 public:
+	/*!
+	 * The headset's button to SteamVR (RunFrame thread). OVRN_HEAD_BUTTON:
+	 *  - roomview (default): each press is a double-click of the headset's system button, the gesture SteamVR's
+	 *    Room View setting ("double-click system button") toggles the camera view with, so the button toggles
+	 *    passthrough as it does on a PS5;
+	 *  - system: the headset's system button as it is;
+	 *  - off: not reported.
+	 */
+	void
+	updateInputs(int64_t now)
+	{
+		if (m_buttonHandle == vr::k_ulInvalidInputComponentHandle) {
+			return;
+		}
+		const bool down = m_backend->headButton();
+		if (!m_buttonDoubleClick) {
+			if (down != m_buttonSent) {
+				m_buttonSent = down;
+				vr::VRDriverInput()->UpdateBooleanComponent(m_buttonHandle, down, 0.0);
+			}
+			return;
+		}
+		if (down && !m_buttonWasDown && m_clickStartNs == 0) {
+			m_clickStartNs = now;
+		}
+		m_buttonWasDown = down;
+		if (m_clickStartNs == 0) {
+			return;
+		}
+		// down 0-60 ms, up 60-120, down 120-180, up after: two clicks well inside a double-click window.
+		const int64_t t = now - m_clickStartNs;
+		const bool want = (t < 60000000) || (t >= 120000000 && t < 180000000);
+		if (want != m_buttonSent) {
+			m_buttonSent = want;
+			vr::VRDriverInput()->UpdateBooleanComponent(m_buttonHandle, want, 0.0);
+		}
+		if (t >= 240000000) {
+			m_clickStartNs = 0;
+		}
+	}
+
 	explicit Hmd(Backend *backend)
 	    : TrackedDevice(vr::TrackedDeviceClass_HMD, backend->headInfo().serial), m_backend(backend),
 	      m_info(backend->headInfo()), m_display(backend->display())
@@ -112,6 +157,9 @@ public:
 		if (name != nullptr && std::string(name) == vr::IVRDisplayComponent_Version) {
 			return static_cast<vr::IVRDisplayComponent *>(this);
 		}
+		if (name != nullptr && m_camera && std::string(name) == vr::IVRCameraComponent_Version) {
+			return static_cast<vr::IVRCameraComponent *>(m_camera.get());
+		}
 		return nullptr;
 	}
 
@@ -195,6 +243,11 @@ protected:
 	{
 		vr::CVRPropertyHelpers *props = vr::VRProperties();
 		setIdentity(m_info, m_backend->universe());
+		// The driver's own chaperone file (rooms drawn in Room Setup are kept there), as Sony's driver does.
+		const std::string chaperone_path = m_backend->chaperonePath();
+		if (!chaperone_path.empty()) {
+			props->SetStringProperty(m_container, vr::Prop_DriverProvidedChaperonePath_String, chaperone_path.c_str());
+		}
 		const std::string chaperone = m_backend->chaperoneJson();
 		if (!chaperone.empty()) {
 			props->SetStringProperty(m_container, vr::Prop_DriverProvidedChaperoneJson_String, chaperone.c_str());
@@ -216,6 +269,9 @@ protected:
 		props->SetFloatProperty(m_container, vr::Prop_UserHeadToEyeDepthMeters_Float, 0.0f);
 		props->SetBoolProperty(m_container, vr::Prop_IsOnDesktop_Bool, false);
 		props->SetBoolProperty(m_container, vr::Prop_HasDisplayComponent_Bool, true);
+		// Inside-out tracking: cameras on the headset looking at the world (as Sony's driver reports it; documented
+		// effect: SteamVR's wording in its UI, e.g. Room Setup).
+		props->SetInt32Property(m_container, vr::Prop_HmdTrackingStyle_Int32, vr::HmdTrackingStyle_InsideOutCameras);
 
 		vr::HmdMatrix34_t eye[2];
 		for (int e = 0; e < 2; e++) {
@@ -223,6 +279,8 @@ protected:
 		}
 		vr::VRServerDriverHost()->SetDisplayEyeToHead(object_id, eye[0], eye[1]);
 		loadHiddenArea();
+		setupCamera();
+		setupHeadButton();
 		log("ovrn: headset %s (%s), %ux%u at %.2f Hz, render %ux%u per eye, IPD %.1f mm, vsync-to-photons %.5f s, "
 		    "head pose: %s, backend %s\n",
 		    m_info.model.c_str(), m_info.serial.c_str(), m_display.width, m_display.height, m_display.refresh_hz,
@@ -234,6 +292,60 @@ protected:
 	}
 
 private:
+	/*!
+	 * The passthrough cameras (SteamVR's Room View and the camera in Room Setup), when the backend has them. Their
+	 * calibration comes with the headset's calibration block; waits up to 3 s for it. OVRN_CAMERA=0: no camera.
+	 */
+	void
+	setupHeadButton()
+	{
+		const char *mode = getenv("OVRN_HEAD_BUTTON");
+		const std::string m = mode != nullptr ? mode : "roomview";
+		if (m == "off" || vr::VRDriverInput() == nullptr) {
+			return;
+		}
+		m_buttonDoubleClick = m != "system";
+		if (vr::VRDriverInput()->CreateBooleanComponent(m_container, "/input/system/click", &m_buttonHandle) !=
+		    vr::VRInputError_None) {
+			m_buttonHandle = vr::k_ulInvalidInputComponentHandle;
+			return;
+		}
+		log("ovrn: headset button: %s\n", m_buttonDoubleClick ? "toggles Room View (a system button double-click)"
+		                                                        : "the headset's system button");
+	}
+
+	void
+	setupCamera()
+	{
+		const char *env = getenv("OVRN_CAMERA");
+		if (env != nullptr && strcmp(env, "0") == 0) {
+			log("ovrn: passthrough cameras off (OVRN_CAMERA=0)\n");
+			return;
+		}
+		if (!m_backend->hasCameras()) {
+			return;
+		}
+		CameraInfo info;
+		bool have = m_backend->cameraInfo(&info);
+		for (int i = 0; !have && i < 30; i++) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			have = m_backend->cameraInfo(&info);
+		}
+		if (!have) {
+			log("ovrn: no passthrough cameras (the backend has none, or their calibration didn't arrive)\n");
+			return;
+		}
+		m_camera.reset(new Camera(m_backend, info));
+		m_camera->setProperties(m_container);
+	}
+
+	vr::VRInputComponentHandle_t m_buttonHandle = vr::k_ulInvalidInputComponentHandle;
+	bool m_buttonDoubleClick = true;
+	bool m_buttonWasDown = false;
+	bool m_buttonSent = false;
+	int64_t m_clickStartNs = 0;
+	std::unique_ptr<Camera> m_camera;
+
 	//! The hidden-area mask from the backend's file, handed to SteamVR as it is (render target UV).
 	void
 	loadHiddenArea()

@@ -13,6 +13,10 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -47,6 +51,47 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev);
  */
 uint32_t
 psvr2_get_slam_reset_count(struct xrt_device *xdev);
+
+/*!
+ * A camera image pair from the headset's bottom cameras (camera mode 0x10, the pair Sony's driver shows as its
+ * passthrough): @p bc4_pair is two BC4 images of 1024 (stride) x 1016 rows back to back (the transfer after its 256
+ * byte header), @p size their bytes, @p exposure_mono_ns the exposure time on the host's monotonic clock. Called on
+ * the USB thread: copy the data and return.
+ *
+ * @ingroup drv_psvr2
+ */
+typedef void (*psvr2_camera_image_cb)(void *user, const uint8_t *bc4_pair, size_t size, int64_t exposure_mono_ns);
+
+/*!
+ * Receive the bottom camera images (NULL @p cb: stop). @p xdev must be a PS VR2 headset.
+ *
+ * @ingroup drv_psvr2
+ */
+void
+psvr2_set_camera_image_callback(struct xrt_device *xdev, psvr2_camera_image_cb cb, void *user);
+
+/*!
+ * Ask for (or release) the camera mode that streams the bottom camera pair (0x10). The headset goes back to its
+ * default mode when the last request is released. @p xdev must be a PS VR2 headset.
+ *
+ * @ingroup drv_psvr2
+ */
+void
+psvr2_request_bottom_camera_images(struct xrt_device *xdev, bool on);
+
+struct t_camera_calibration;
+struct xrt_pose;
+
+/*!
+ * The bottom cameras' calibration (2 entries: left, right of the headset's own lens model) and their poses in the
+ * head frame (OpenXR axes: x right, y up, looking along -z; hand tracking converts them to OpenCV axes itself), from
+ * the headset's calibration. False until it has
+ * been received.
+ *
+ * @ingroup drv_psvr2
+ */
+bool
+psvr2_get_bottom_cameras(struct xrt_device *xdev, struct t_camera_calibration *out_cams, struct xrt_pose *out_poses);
 
 
 struct t_timing_event_source *

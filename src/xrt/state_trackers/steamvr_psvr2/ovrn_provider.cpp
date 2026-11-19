@@ -38,6 +38,7 @@ public:
 	Init(vr::IVRDriverContext *context) override
 	{
 		VR_INIT_SERVER_DRIVER_CONTEXT(context);
+		applyCompositorDefaults();
 		// OVRN_BACKEND=sim: the simulated headset (tests); otherwise Monado's devices.
 		const char *which = getenv("OVRN_BACKEND");
 		m_backend = (which != nullptr && strcmp(which, "sim") == 0) ? make_sim_backend() : make_monado_backend();
@@ -78,6 +79,7 @@ public:
 			m_backend->stop();
 			m_backend.reset();
 		}
+		restoreCompositorDefaults();
 		VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 	}
 
@@ -94,9 +96,13 @@ public:
 			return;
 		}
 		// The backend first (it reads the controllers), then their inputs and the room's universe to SteamVR.
-		m_backend->runFrame(now_ns());
+		const int64_t now = now_ns();
+		m_backend->runFrame(now);
 		for (auto &c : m_controllers) {
 			c->updateInputs();
+		}
+		if (m_hmd) {
+			m_hmd->updateInputs(now);
 		}
 		const uint64_t universe = m_backend->universe();
 		if (universe != m_universe) {
@@ -110,6 +116,11 @@ public:
 		}
 		vr::VREvent_t event;
 		while (vr::VRServerDriverHost()->PollNextEvent(&event, sizeof(event))) {
+			if (event.eventType == vr::VREvent_ChaperoneRoomSetupStarting ||
+			    event.eventType == vr::VREvent_ChaperoneRoomSetupCommitted) {
+				m_backend->roomSetupEvent(event.eventType);
+				continue;
+			}
 			if (event.eventType != vr::VREvent_Input_HapticVibration) {
 				continue;
 			}
@@ -135,6 +146,72 @@ public:
 	{}
 
 private:
+	static constexpr const char *kAsyncSection = "steamvr";
+	static constexpr const char *kAsyncKey = "enableLinuxVulkanAsync";
+	//! Our own note in SteamVR's settings that we set kAsyncKey, so a session that ended without Cleanup (a crash)
+	//! still gets it taken out again by the next one.
+	static constexpr const char *kOwnSection = "driver_monado_psvr2";
+	static constexpr const char *kAsyncNoteKey = "asyncReprojectionSetByDriver";
+
+	/*!
+	 * SteamVR session defaults for this driver, however SteamVR was started (Steam, the DriverKit launcher,
+	 * launch-steamvr.sh), set before vrserver starts the compositor (it does so ~20 ms after Init, and the compositor
+	 * inherits vrserver's environment and reads its settings at start): the user's best run (2026-11-18 17:44).
+	 *
+	 * - The SteamVRLinuxFixes Vulkan layer off for the compositor (DISABLE_STEAMVR_LINUX_FIXES, the layer's own switch):
+	 *   on SteamVR 2.19.3 its WaitForPendingPresent patch finds nothing, but it still replaces vrcompositor's GPU event
+	 *   queries using struct offsets from an older build; with it the user saw clearly more judder (17:46 vs 17:44).
+	 *   OVRN_LINUX_FIXES=1 keeps it.
+	 * - SteamVR's async reprojection on (off by default on NVIDIA under Linux): late frames are moved to the new head
+	 *   pose instead of shown again (17:44: 6 frames dropped, 304 reprojected, no "Timed out" fallback; without it 50
+	 *   dropped, 60 timed out). For this session only: Cleanup takes the setting out again, so other drivers (Sony's)
+	 *   keep SteamVR's default. OVRN_ASYNC=0 leaves SteamVR's setting alone.
+	 */
+	void
+	applyCompositorDefaults()
+	{
+		const char *fixes = getenv("OVRN_LINUX_FIXES");
+		if (fixes == nullptr || strcmp(fixes, "1") != 0) {
+			setenv("DISABLE_STEAMVR_LINUX_FIXES", "1", 1);
+			log("ovrn: SteamVRLinuxFixes layer off for the compositor (OVRN_LINUX_FIXES=1 keeps it)\n");
+		}
+		const char *async = getenv("OVRN_ASYNC");
+		if (async != nullptr && strcmp(async, "0") == 0) {
+			return;
+		}
+		vr::IVRSettings *settings = vr::VRSettings();
+		if (settings == nullptr) {
+			return;
+		}
+		vr::EVRSettingsError err = vr::VRSettingsError_None;
+		const bool noted = settings->GetBool(kOwnSection, kAsyncNoteKey, &err) && err == vr::VRSettingsError_None;
+		err = vr::VRSettingsError_None;
+		const bool on = settings->GetBool(kAsyncSection, kAsyncKey, &err);
+		const bool present = err == vr::VRSettingsError_None;
+		if (present && on && !noted) {
+			log("ovrn: async reprojection already on in SteamVR's settings (left as it is)\n");
+			return; // the user's own setting
+		}
+		settings->SetBool(kAsyncSection, kAsyncKey, true);
+		settings->SetBool(kOwnSection, kAsyncNoteKey, true);
+		m_asyncSet = true;
+		log("ovrn: SteamVR async reprojection on for this session (OVRN_ASYNC=0 leaves SteamVR's default)\n");
+	}
+
+	void
+	restoreCompositorDefaults()
+	{
+		if (!m_asyncSet || vr::VRSettings() == nullptr) {
+			return;
+		}
+		vr::VRSettings()->RemoveKeyInSection(kAsyncSection, kAsyncKey);
+		vr::VRSettings()->RemoveKeyInSection(kOwnSection, kAsyncNoteKey);
+		m_asyncSet = false;
+		log("ovrn: SteamVR async reprojection setting taken out again (SteamVR's default)\n");
+	}
+
+	bool m_asyncSet = false;
+
 	/*!
 	 * One thread hands every device's pose to SteamVR on a steady 1 ms grid of absolute deadlines (no drift from the
 	 * work done per step, unlike sleep_for(1 ms) loops). A step that overran skips to the next grid point.

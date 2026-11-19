@@ -58,6 +58,9 @@ if(XRT_BUILD_DRIVER_HANDTRACKING)
 endif()
 if(XRT_FEATURE_STEAMVR_PLUGIN)
 	list(APPEND tests tests_ovrd_room)
+	if(XRT_BUILD_DRIVER_PSVR2)
+		list(APPEND tests tests_ovrn_camera)
+	endif()
 endif()
 if(XRT_BUILD_DRIVER_PSVR2)
 	list(APPEND tests tests_psvr2_slam_carry)
@@ -104,6 +107,15 @@ if(XRT_FEATURE_STEAMVR_PLUGIN)
 	target_sources(tests_ovrd_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_drv/ovrd_room.cpp)
 	target_include_directories(tests_ovrd_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_drv)
 	target_link_libraries(tests_ovrd_room PRIVATE aux_math xrt-interfaces)
+	if(XRT_BUILD_DRIVER_PSVR2)
+		target_include_directories(
+			tests_ovrn_camera PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2
+			)
+		target_link_libraries(
+			tests_ovrn_camera PRIVATE xrt-external-openvr xrt-external-bcdec aux_tracking aux_util aux_math
+						  xrt-interfaces
+			)
+	endif()
 
 	# Offline check of the native PS VR2 SteamVR driver: loads the built driver as vrserver does, with a fake SteamVR.
 	add_executable(ovrn_driver_harness ovrn_driver_harness.cpp)

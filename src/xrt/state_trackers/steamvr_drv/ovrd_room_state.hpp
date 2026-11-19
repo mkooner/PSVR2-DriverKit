@@ -33,6 +33,7 @@
 #include <ctime>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /*!
@@ -57,6 +58,7 @@ DEBUG_GET_ONCE_BOOL_OPTION(ovrd_room, "OVRD_ROOM", true)
 class OvrdRoom
 {
 public:
+	//! The old plugin's universes, in SteamVR's own chaperone file (the PS VR2 driver passes its own to init()).
 	static constexpr uint64_t UNIVERSE_SESSION = 3;
 	static constexpr uint64_t UNIVERSE_ROOM = 2;
 	//! A head step this large within WORLD_JUMP_WINDOW_NS means the headset's tracking world was replaced.
@@ -80,24 +82,41 @@ public:
 	uint64_t
 	universe() const
 	{
-		return m_enabled ? m_published_universe : UNIVERSE_ROOM;
+		return m_enabled ? m_published_universe : m_room_universe;
 	}
 
-	//! Prepare SteamVR's chaperone file and load the saved room. Call before any device is added.
+	/*!
+	 * Prepare the chaperone file and load the saved room. Call before any device is added.
+	 *
+	 * @p chaperone_path: a driver-owned chaperone file (published as Prop_DriverProvidedChaperonePath_String by the
+	 * caller); empty: SteamVR's own file (the old plugin). @p room_universe / @p session_universe: the universe ids
+	 * (the saved room, and this session's frame until a capture anchors the room). @p room_size > 0 gives the saved
+	 * room a driver-made square when none was drawn (the old plugin's ALVR-style option; 0: never, a room comes only
+	 * from Room Setup).
+	 */
 	void
-	init(float session_size, float room_size = 0.0f)
+	init(float session_size,
+	     float room_size = 0.0f,
+	     const std::string &chaperone_path = std::string(),
+	     uint64_t room_universe = UNIVERSE_ROOM,
+	     uint64_t session_universe = UNIVERSE_SESSION)
 	{
+		m_room_universe = room_universe;
+		m_session_universe = session_universe;
+		m_published_universe = session_universe;
 		m_enabled = debug_get_bool_option_ovrd_room();
 		if (!m_enabled) {
 			ovrd_log("Room: disabled (OVRD_ROOM=0), providing a fixed play area instead\n");
 			return;
 		}
 
-		std::string chaperone = ovrd_room_chaperone_path();
+		std::string chaperone = chaperone_path.empty() ? ovrd_room_chaperone_path() : chaperone_path;
+		m_chaperone_path = chaperone;
 		bool has_drawn_room = false;
 		std::string error;
-		if (chaperone.empty() ||
-		    !ovrd_room_prepare_chaperone(chaperone, session_size, &has_drawn_room, &error, room_size)) {
+		const std::string room_id = std::to_string(room_universe), session_id = std::to_string(session_universe);
+		if (chaperone.empty() || !ovrd_room_prepare_chaperone(chaperone, session_size, &has_drawn_room, &error,
+		                                                      room_size, room_id.c_str(), session_id.c_str())) {
 			ovrd_log("Room: can't prepare SteamVR's chaperone file '%s' (%s), providing a fixed play area instead\n",
 			         chaperone.c_str(), chaperone.empty() ? "openvrpaths.vrpath has no config path" : error.c_str());
 			m_enabled = false;
@@ -118,14 +137,17 @@ public:
 		if (room_size > 0.0f) {
 			snprintf(rect, sizeof(rect), "gets a %.1f m square play area from the driver", room_size);
 		}
-		ovrd_log("Room: chaperone file %s prepared (universe 3 for this session, universe 2 %s)\n", chaperone.c_str(),
+		ovrd_log("Room: chaperone file %s prepared (universe %llu for this session, universe %llu %s)\n",
+		         chaperone.c_str(), (unsigned long long)session_universe, (unsigned long long)room_universe,
 		         has_drawn_room ? "holds a room drawn in Room Setup" : rect);
+		m_chaperone_mtime = file_mtime(chaperone);
+		log_universe("at start", m_room_universe);
 		if (m_have_room) {
 			ovrd_log("Room: saved room %s (anchor %.3f %.3f yaw %.1f deg, %u captures). Put the left controller "
 			         "back in its spot, the same way round, crouch next to it and hold Create to put the room "
-			         "back; until then this session uses universe 3\n",
+			         "back; until then this session uses universe %llu\n",
 			         m_room_path.c_str(), m_room.anchor.position.x, m_room.anchor.position.z,
-			         m_room.anchor.yaw * 57.29578f, m_room.captures);
+			         m_room.anchor.yaw * 57.29578f, m_room.captures, (unsigned long long)session_universe);
 		} else {
 			ovrd_log("Room: no saved room (%s). Put the left controller on the floor, crouch next to it so the "
 			         "headset sees it (within ~0.6 m), and hold Create for %.1f s to measure the floor and anchor "
@@ -217,19 +239,31 @@ public:
 		if (resets != m_slam_resets) {
 			m_slam_resets = resets;
 			m_last_reset_ns = now;
-			if (m_anchored) {
-				ovrd_log("Room: the headset's tracking re-originated (SLAM reset %u), so the room can't be "
-				         "trusted; back to universe 3 until the next capture\n",
-				         resets);
-				unanchor();
-			}
+			// The room is kept: the headset driver carries the head position across the reset, so the room stays
+			// where it was give or take the carry's error (a few cm). Dropping it would make the boundary jump or
+			// vanish, which is worse; a new capture on the mark refines it.
+			ovrd_log("Room: the headset's tracking world was replaced (count %u); %s\n", resets,
+			         m_anchored ? "the room is kept, but may be off by a few cm until the next capture"
+			                    : "no room anchored yet");
 		}
 
-		if (jumped && m_anchored) {
-			ovrd_log("Room: the head moved %.2f m in one step: the headset's tracking was reset, so the room can't "
-			         "be trusted; back to universe 3 until the next capture\n",
-			         jump_m);
-			unanchor();
+		if (jumped) {
+			ovrd_log("Room: the head moved %.2f m in one step (tracking jump)%s\n", jump_m,
+			         m_anchored ? "; the room is kept: capture again on the mark if the boundary looks shifted" : "");
+		}
+
+		// SteamVR wrote the chaperone file (Room Setup's commit, a floor calibration, a recentre): what it holds now.
+		if (now - m_last_file_check_ns > U_TIME_1S_IN_NS) {
+			m_last_file_check_ns = now;
+			const int64_t mtime = file_mtime(m_chaperone_path);
+			if (mtime != m_chaperone_mtime) {
+				m_chaperone_mtime = mtime;
+				log_universe("SteamVR changed the chaperone file", m_published_universe);
+			}
+		}
+		if (now - m_last_state_log_ns > 30 * U_TIME_1S_IN_NS) {
+			m_last_state_log_ns = now;
+			log_state();
 		}
 
 		if (!m_command_path.empty() && now - m_last_command_poll_ns > 500 * U_TIME_1MS_IN_NS) {
@@ -237,14 +271,15 @@ public:
 			poll_command();
 		}
 
-		uint64_t wanted = m_anchored ? UNIVERSE_ROOM : UNIVERSE_SESSION;
+		uint64_t wanted = m_anchored ? m_room_universe : m_session_universe;
 		if (wanted != m_published_universe) {
 			m_published_universe = wanted;
 			for (size_t i = 0; i < m_container_count; i++) {
 				vr::VRProperties()->SetUint64Property(m_containers[i], vr::Prop_CurrentUniverseId_Uint64, wanted);
 			}
 			ovrd_log("Room: SteamVR universe %llu (%s)\n", (unsigned long long)wanted,
-			         wanted == UNIVERSE_ROOM ? "the saved room" : "this session only, no saved room");
+			         wanted == m_room_universe ? "the saved room" : "this session only, no saved room");
+			log_universe("now active", wanted);
 		}
 	}
 
@@ -289,7 +324,105 @@ public:
 		return finish_capture();
 	}
 
+	/*!
+	 * SteamVR's Room Setup started (VREvent_ChaperoneRoomSetupStarting, RunFrame thread). True when the room isn't
+	 * anchored yet: a room drawn now would be in this session's frame only (gone at the next start), so the caller
+	 * prompts for the floor capture (a haptic pattern on the left controller) and this logs how.
+	 */
+	bool
+	room_setup_started()
+	{
+		if (!m_enabled) {
+			return false;
+		}
+		if (m_anchored) {
+			ovrd_log("Room: Room Setup started; it draws in the saved room (universe %llu), kept across sessions\n",
+			         (unsigned long long)m_room_universe);
+			return false;
+		}
+		ovrd_log("Room: Room Setup started before the room was anchored: a room drawn now is for this session only. "
+		         "To keep it, first put the left controller on its floor mark, crouch next to it and hold Create "
+		         "for %.1f s (short buzz), then draw the room\n",
+		         OvrdRoomCapture::HOLD_NS / 1e9);
+		return true;
+	}
+
+	//! SteamVR's Room Setup committed a room (VREvent_ChaperoneRoomSetupCommitted, RunFrame thread).
+	void
+	room_setup_committed()
+	{
+		if (m_enabled) {
+			log_universe("Room Setup committed", m_published_universe);
+		}
+	}
+
+	//! The chaperone file in use ("" when the room code is off).
+	const std::string &
+	chaperone_path() const
+	{
+		return m_chaperone_path;
+	}
+
+	bool
+	anchored() const
+	{
+		return m_anchored;
+	}
+
 private:
+	static int64_t
+	file_mtime(const std::string &path)
+	{
+		struct stat st;
+		if (path.empty() || stat(path.c_str(), &st) != 0) {
+			return 0;
+		}
+		return (int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+	}
+
+	//! What universe @p id of the chaperone file holds, and anything wrong with it.
+	void
+	log_universe(const char *why, uint64_t id)
+	{
+		ovrd_room_universe_info info;
+		const std::string sid = std::to_string(id);
+		if (!ovrd_room_read_universe(m_chaperone_path, sid.c_str(), &info) || !info.found) {
+			ovrd_log("Room: %s: universe %llu not in %s\n", why, (unsigned long long)id, m_chaperone_path.c_str());
+			return;
+		}
+		ovrd_log("Room: %s: universe %llu: play area %.2f x %.2f m, %zu walls (perimeter %.2f m, floor area %.2f m2, "
+		         "%s), standing at %.3f %.3f %.3f yaw %.1f deg%s, written %s%s\n",
+		         why, (unsigned long long)id, info.play_width, info.play_depth, info.walls, info.perimeter_m,
+		         info.area_m2, info.winding > 0 ? "counter-clockwise" : info.winding < 0 ? "clockwise" : "open",
+		         info.standing.position.x, info.standing.position.y, info.standing.position.z,
+		         info.standing.yaw * 57.29578f, info.has_setup_standing ? ", own setup-standing origin" : "",
+		         info.time.empty() ? "?" : info.time.c_str(), info.issues.empty() ? ", geometry valid" : "");
+		for (const std::string &issue : info.issues) {
+			ovrd_log("Room:   problem: %s\n", issue.c_str());
+		}
+	}
+
+	//! The room's state (every 30 s): universe, anchor, transform, the head in SteamVR's world.
+	void
+	log_state()
+	{
+		ovrd_room_transform T;
+		struct xrt_vec3 head;
+		bool head_valid;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			T = m_transform;
+			head = m_head;
+			head_valid = m_head_valid;
+		}
+		const struct xrt_vec3 world = ovrd_room_apply(T, head);
+		ovrd_log("Room: state: universe %llu (%s), room transform turn %.1f deg shift %.3f %.3f %.3f, head raw %.3f "
+		         "%.3f %.3f -> world %.3f %.3f %.3f%s\n",
+		         (unsigned long long)m_published_universe, m_anchored ? "anchored room" : "session only",
+		         2.0f * atan2f(T.rotation.y, T.rotation.w) * 57.29578f, T.translation.x, T.translation.y,
+		         T.translation.z, head.x, head.y, head.z, world.x, world.y, world.z, head_valid ? "" : " (no head pose)");
+	}
+
 	CaptureResult
 	finish_capture()
 	{
@@ -384,6 +517,12 @@ private:
 	}
 
 	bool m_enabled = false;
+	uint64_t m_room_universe = UNIVERSE_ROOM;
+	uint64_t m_session_universe = UNIVERSE_SESSION;
+	std::string m_chaperone_path;
+	int64_t m_chaperone_mtime = 0;
+	timepoint_ns m_last_file_check_ns = 0;
+	timepoint_ns m_last_state_log_ns = 0;
 	struct xrt_device *m_xhmd = nullptr;
 	uint32_t m_slam_resets = 0;
 	timepoint_ns m_last_reset_ns = 0;

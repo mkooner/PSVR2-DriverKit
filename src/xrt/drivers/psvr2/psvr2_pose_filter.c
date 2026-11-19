@@ -798,9 +798,14 @@ psvr2_slam_carry_push(struct psvr2_slam_carry *c,
 	}
 
 	if (reset) {
-		bool settled = ts - c->first_ts >= 20 * U_TIME_1S_IN_NS;
+		/*
+		 * Carried from the start too (2026-11-18, the user's choice): resets in the first 20 s used to replace the
+		 * world, which moved the view 5-49 cm in one frame at startup (17:24 run: 4 resets in the first 8 s, up to
+		 * 0.487 m) and dropped the SteamVR room. Carried, the view stays continuous; the price is the carry's error
+		 * (cm) accumulating while the headset settles, which a later room capture absorbs.
+		 */
 		bool spaced = c->last_reset_ts == 0 || ts - c->last_reset_ts >= U_TIME_1S_IN_NS;
-		if (c->enabled && settled && c->count >= 2) {
+		if (c->enabled && c->count >= 2) {
 			float dt_prev = (float)time_ns_to_s(c->ts[0] - c->ts[1]);
 			struct xrt_vec3 v = {0, 0, 0};
 			if (dt_prev > 0.0f) {
