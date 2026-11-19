@@ -4,6 +4,8 @@
 //! SteamVR with our Monado plugin, monado-service, and any OpenXR app on monado-service, shows the environment an app
 //! needs to use Monado, and keeps the driver settings we use (with their defaults) switchable.
 
+mod theme;
+
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -141,7 +143,7 @@ fn default_settings() -> Vec<Setting> {
                       "Off (default): the pose for now with velocities, SteamVR predicts. On: the plugin predicts and sends no velocity (worse with games that ask for the pose more than once a frame).",
                       "predicted", "", false).steamvr(),
         value("OVRN_SONY_PROPS", "Sony's extra display properties",
-              "Report Sony's display properties too: all, or a list of throttle, framerate, syslayer, texindex, supersample, dsc, edid, display, mask. Off by default (no help measured).", "all", false).steamvr(),
+              "Which of Sony's headset properties to report: all (the plugin's default, as Sony's driver and PSVR2Toolkit), none, or a list of throttle, framerate, syslayer, texindex, supersample, dsc, edid, display, mask.", "all", false).steamvr(),
         toggle("RECORD_DATASET", "Record controller dataset", "Record LED tracking data (logs/).", false).steamvr(),
         toggle("RECORD_SLAM", "Record headset SLAM", "Record the headset's raw SLAM stream (logs/).", false).steamvr(),
         toggle("RECORD_CAMERA", "Record camera images", "Record camera transfers (~2 GB/min, logs/).", false).steamvr(),
@@ -164,6 +166,9 @@ struct Config {
     steam_root: String,
     #[serde(default)]
     steamvr_dir: String,
+    /// Compile Driver tab: where the driver is compiled and installed to (the source is always our GitHub repository).
+    #[serde(default = "default_install_dir")]
+    install_dir: String,
     /// Settings format: 2 = async reprojection off by default (SteamVR's own choice); 3 = SteamVR render scale 170;
 /// 4 = smooth SLAM corrections on.
     #[serde(default)]
@@ -188,9 +193,29 @@ impl Default for Config {
             settings,
             steam_root: String::new(),
             steamvr_dir: String::new(),
+            install_dir: default_install_dir(),
             version: CONFIG_VERSION,
         }
     }
+}
+
+fn default_install_dir() -> String {
+    format!("{}/.local/share/PSVR2-DriverKit", std::env::var("HOME").unwrap_or_default())
+}
+
+fn config_dir() -> PathBuf {
+    config_path().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// What build-driver.sh recorded about the last compile (~/.config/PSVR2-DriverKit/driver.env): KEY="value" lines.
+fn driver_env() -> Vec<(String, String)> {
+    fs::read_to_string(config_dir().join("driver.env"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().trim_matches('"').to_string()))
+        .collect()
 }
 
 fn config_path() -> PathBuf {
@@ -291,6 +316,12 @@ fn load_config() -> Config {
         }
     }
     cfg.version = CONFIG_VERSION;
+    // The Compile Driver tab's build, if there is one: every launch from here uses it.
+    if let Some((_, b)) = driver_env().into_iter().find(|(k, _)| k == "MONADO_BUILD") {
+        if Path::new(&b).join("steamvr-monado-psvr2").exists() {
+            cfg.monado_build = b;
+        }
+    }
     cfg
 }
 
@@ -457,6 +488,51 @@ fn has_drawn_room(u: &serde_json::Value) -> bool {
 }
 
 #[cfg(test)]
+mod compile_tests {
+    use super::*;
+
+    #[test]
+    fn ninja_progress_lines() {
+        assert_eq!(ninja_progress("[12/345] Building CXX object foo.o"), Some((12, 345)));
+        assert_eq!(ninja_progress("STEP 2/4 compile"), None);
+        assert_eq!(ninja_progress("[x/y] nope"), None);
+        let mut b = BuildState { step: 3, done: 50, total: 100, ..Default::default() };
+        assert!((b.fraction() - 0.48).abs() < 1e-3);
+        b.result = Some(Ok("/x".into()));
+        assert_eq!(b.fraction(), 1.0);
+    }
+
+    /// Register replaces Sony's PS VR2 driver with ours and keeps the others; Unregister puts Sony's back. Run in a
+    /// temporary HOME so the real SteamVR config isn't touched.
+    #[test]
+    fn register_and_unregister() {
+        let home = std::env::temp_dir().join(format!("dk-test-{}", std::process::id()));
+        let sony = home.join("Steam/steamapps/common/PlayStation VR2 App/SteamVR_Plug-In");
+        let other = home.join("other_driver");
+        let plugin = home.join("install/build/steamvr-monado-psvr2");
+        for d in [&sony, &other, &plugin] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(plugin.join("driver.vrdrivermanifest"), "{}").unwrap();
+        fs::create_dir_all(home.join(".config/openvr")).unwrap();
+        let start = serde_json::json!({"config": ["/c"], "external_drivers": [sony.display().to_string(), other.display().to_string()], "runtime": ["/r"], "version": 1});
+        fs::write(home.join(".config/openvr/openvrpaths.vrpath"), start.to_string()).unwrap();
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("XDG_CONFIG_HOME");
+
+        register_driver(&plugin).unwrap();
+        let (v, list) = external_drivers().unwrap();
+        assert_eq!(list, vec![other.display().to_string(), plugin.display().to_string()]);
+        assert_eq!(v["runtime"][0], "/r", "the rest of the file is kept");
+
+        unregister_driver().unwrap();
+        let (_, list) = external_drivers().unwrap();
+        assert_eq!(list, vec![other.display().to_string(), sony.display().to_string()]);
+        let _ = fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::without_drawn_room;
 
@@ -512,10 +588,11 @@ fn poll_status() -> Status {
  * The app.
  */
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Launcher,
     Settings,
+    Compile,
 }
 
 struct Launcher {
@@ -529,6 +606,11 @@ struct Launcher {
     app_args: String,
     message: String,
     saved_at: Option<Instant>,
+    build: Arc<Mutex<BuildState>>,
+    /// --screenshot <file.png> [launcher|settings|compile]: render one tab, save it, quit (for checking the design).
+    screenshot: Option<(PathBuf, Instant, bool)>,
+    /// The device pictures (assets/): headset, left and right Sense controller.
+    pictures: [Option<egui::TextureHandle>; 3],
 }
 
 fn stamp() -> String {
@@ -545,6 +627,7 @@ fn signal(child: &Child, sig: &str) {
 
 impl Launcher {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        theme::install(&cc.egui_ctx);
         let status = Arc::new(Mutex::new(Status::default()));
         let s2 = status.clone();
         let ctx = cc.egui_ctx.clone();
@@ -565,6 +648,13 @@ impl Launcher {
             app_args: String::new(),
             message: String::new(),
             saved_at: None,
+            build: Arc::new(Mutex::new(BuildState::default())),
+            screenshot: None,
+            pictures: [
+                theme::texture(&cc.egui_ctx, "headset", include_bytes!("../assets/headset.png")),
+                theme::texture(&cc.egui_ctx, "controller_left", include_bytes!("../assets/controller_left.png")),
+                theme::texture(&cc.egui_ctx, "controller_right", include_bytes!("../assets/controller_right.png")),
+            ],
         }
     }
 
@@ -593,6 +683,8 @@ impl Launcher {
         let f2 = f.try_clone().ok();
         let mut cmd = Command::new("bash");
         cmd.arg(&script).envs(self.cfg.env(Target::SteamVR)).stdin(Stdio::null()).stdout(f);
+        // The driver this app uses (the Compile Driver tab's build, or the Monado build in Settings).
+        cmd.env("MONADO_BUILD", &self.cfg.monado_build);
         cmd.envs(extra_env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         if !self.cfg.steam_root.is_empty() {
             cmd.env("STEAM_ROOT", &self.cfg.steam_root);
@@ -832,46 +924,200 @@ impl Launcher {
     }
 }
 
-fn dot(ui: &mut egui::Ui, state: Option<bool>, label: &str) {
-    let (color, text) = match state {
-        Some(true) => (egui::Color32::from_rgb(60, 180, 90), "connected"),
-        Some(false) => (egui::Color32::from_rgb(200, 70, 60), "not connected"),
-        None => (egui::Color32::GRAY, "not paired"),
-    };
-    ui.horizontal(|ui| {
-        ui.colored_label(color, "●");
-        ui.label(format!("{label}: {text}"));
-    });
+/*
+ * Compile Driver tab: build-driver.sh, registration with SteamVR, package lists.
+ */
+
+/// A running or finished compile (build-driver.sh's output, read on a thread).
+#[derive(Default)]
+struct BuildState {
+    running: bool,
+    /// build-driver.sh's "STEP n/4"
+    step: u32,
+    /// ninja's [done/total]
+    done: u32,
+    total: u32,
+    lines: Vec<String>,
+    /// Ok(install folder) or Err(why)
+    result: Option<Result<String, String>>,
 }
 
-fn copy_row(ui: &mut egui::Ui, text: &str) {
-    ui.horizontal(|ui| {
-        if ui.button("Copy").clicked() {
-            ui.ctx().copy_text(text.to_string());
+impl BuildState {
+    /// 0..1 over the four steps, the compile step by ninja's count.
+    fn fraction(&self) -> f32 {
+        let within = if self.step == 3 && self.total > 0 { self.done as f32 / self.total as f32 } else { 0.0 };
+        if self.result.as_ref().is_some_and(|r| r.is_ok()) {
+            return 1.0;
         }
-        ui.add(egui::Label::new(egui::RichText::new(text).monospace()).wrap());
-    });
+        // download, configure, DriverKit and record are short next to the compile, which gets most of the bar
+        match self.step {
+            0 => 0.0,
+            1 => 0.03,
+            2 => 0.06,
+            3 => 0.08 + 0.80 * within,
+            4 => 0.92,
+            _ => 0.98,
+        }
+    }
+}
+
+/// "[123/456] ..." -> (123, 456)
+fn ninja_progress(line: &str) -> Option<(u32, u32)> {
+    let rest = line.strip_prefix('[')?;
+    let (nums, _) = rest.split_once(']')?;
+    let (a, b) = nums.split_once('/')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+fn openvrpaths_file() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/openvr/openvrpaths.vrpath")
+}
+
+/// SteamVR's external drivers (openvrpaths.vrpath "external_drivers").
+fn external_drivers() -> Result<(serde_json::Value, Vec<String>), String> {
+    let text = fs::read_to_string(openvrpaths_file()).map_err(|e| format!("{}: {e}", openvrpaths_file().display()))?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let list = v["external_drivers"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    Ok((v, list))
+}
+
+fn write_external_drivers(mut v: serde_json::Value, list: &[String]) -> Result<(), String> {
+    v["external_drivers"] = serde_json::Value::from(list.to_vec());
+    let text = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    fs::write(openvrpaths_file(), text).map_err(|e| e.to_string())
+}
+
+/// Sony's PS VR2 plugin, or another copy of ours: two PS VR2 headset drivers can't both be registered.
+fn is_psvr2_driver(path: &str) -> bool {
+    path.contains("PlayStation VR2 App") || path.ends_with("steamvr-monado-psvr2") || path.ends_with("steamvr-monado-psvr2/")
+}
+
+/// Registered: our plugin in SteamVR's driver list (Steam starts SteamVR with it, as with Sony's). The PS VR2
+/// entries it replaces are kept in ~/.config/PSVR2-DriverKit/replaced-drivers.json for Unregister.
+fn register_driver(plugin: &Path) -> Result<String, String> {
+    if !plugin.join("driver.vrdrivermanifest").exists() {
+        return Err(format!("no plugin at {} (compile first)", plugin.display()));
+    }
+    let (v, list) = external_drivers()?;
+    let ours = plugin.display().to_string();
+    let replaced: Vec<String> = list.iter().filter(|p| is_psvr2_driver(p) && **p != ours).cloned().collect();
+    if !replaced.is_empty() {
+        let keep = config_dir().join("replaced-drivers.json");
+        let _ = fs::create_dir_all(config_dir());
+        fs::write(&keep, serde_json::to_string_pretty(&replaced).unwrap_or_default()).map_err(|e| e.to_string())?;
+    }
+    let mut new: Vec<String> = list.into_iter().filter(|p| !is_psvr2_driver(p)).collect();
+    new.push(ours.clone());
+    write_external_drivers(v, &new)?;
+    Ok(if replaced.is_empty() {
+        format!("Registered {ours} with SteamVR.")
+    } else {
+        format!("Registered {ours} with SteamVR (instead of {}; Unregister puts it back).", replaced.join(", "))
+    })
+}
+
+/// Unregister: our plugin out of SteamVR's list, the PS VR2 driver it replaced (Sony's) back.
+fn unregister_driver() -> Result<String, String> {
+    let (v, list) = external_drivers()?;
+    let mut new: Vec<String> = list.into_iter().filter(|p| !p.trim_end_matches('/').ends_with("steamvr-monado-psvr2")).collect();
+    let keep = config_dir().join("replaced-drivers.json");
+    let restored: Vec<String> = fs::read_to_string(&keep)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| Path::new(p).exists() && !new.contains(p))
+        .collect();
+    new.extend(restored.iter().cloned());
+    write_external_drivers(v, &new)?;
+    let _ = fs::remove_file(&keep);
+    Ok(if restored.is_empty() {
+        "Our driver unregistered from SteamVR.".to_string()
+    } else {
+        format!("Our driver unregistered; {} registered again.", restored.join(", "))
+    })
+}
+
+/// The packages build-driver.sh needs (compilers, CMake/Ninja, the Monado build's libraries, Rust for DriverKit).
+const PACKAGES: [(&str, &str); 3] = [
+    ("Arch / CachyOS / Manjaro",
+     "sudo pacman -S --needed base-devel git cmake ninja python pkgconf eigen vulkan-headers vulkan-icd-loader glslang shaderc libusb systemd-libs libjpeg-turbo ceres-solver suitesparse google-glog gflags jsoncpp libx11 libxcb libxrandr wayland wayland-protocols libdrm zlib rust"),
+    ("Debian / Ubuntu",
+     "sudo apt install build-essential git cmake ninja-build python3 pkg-config libeigen3-dev libvulkan-dev glslang-tools glslc libusb-1.0-0-dev libudev-dev libjpeg-dev libceres-dev libsuitesparse-dev libgoogle-glog-dev libgflags-dev libjsoncpp-dev libx11-dev libx11-xcb-dev libxcb-randr0-dev libxrandr-dev libwayland-dev wayland-protocols libdrm-dev zlib1g-dev cargo"),
+    ("Fedora",
+     "sudo dnf install gcc-c++ git cmake ninja-build python3 pkgconf-pkg-config eigen3-devel vulkan-loader-devel vulkan-headers glslang glslc libusb1-devel systemd-devel libjpeg-turbo-devel ceres-solver-devel suitesparse-devel glog-devel gflags-devel jsoncpp-devel libX11-devel libxcb-devel libXrandr-devel wayland-devel wayland-protocols-devel libdrm-devel zlib-devel cargo"),
+];
+
+/// A command or environment line to paste into a terminal, with its Copy button.
+fn copy_row(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::new()
+        .fill(theme::FIELD)
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                if ui.button("Copy").on_hover_text("Copy to the clipboard").clicked() {
+                    ui.ctx().copy_text(text.to_string());
+                }
+                ui.add(egui::Label::new(egui::RichText::new(text).monospace().color(theme::GRAPHITE)).wrap());
+            });
+        });
 }
 
 impl eframe::App for Launcher {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.reap();
+        self.take_screenshot(ui.ctx());
+        theme::paint_background(ui);
         let st = self.status.lock().unwrap().clone();
-        egui::Panel::top("tabs").show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Launcher, "Launcher");
-                ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
+        egui::Panel::top("header")
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(20, 16)))
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("PSVR2-DriverKit").font(theme::bold(24.0)).color(theme::GRAPHITE));
+                        ui.label(egui::RichText::new("PlayStation VR2 on Linux").color(theme::SLATE).size(13.0));
+                    });
+                    ui.add_space(24.0);
+                    theme::device(ui, self.pictures[0].as_ref(), Some(st.headset), "Headset");
+                    theme::device(ui, self.pictures[1].as_ref(), st.left, "Left controller");
+                    theme::device(ui, self.pictures[2].as_ref(), st.right, "Right controller");
+                });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    for (tab, label) in [(Tab::Launcher, "Launcher"), (Tab::Settings, "Settings"), (Tab::Compile, "Compile Driver")] {
+                        let on = self.tab == tab;
+                        let text = egui::RichText::new(label).font(theme::bold(14.0)).color(if on { theme::NAVY } else { theme::GRAPHITE });
+                        let b = egui::Button::new(text)
+                            .fill(if on { egui::Color32::WHITE } else { egui::Color32::TRANSPARENT })
+                            .stroke(egui::Stroke::new(1.0, if on { egui::Color32::WHITE } else { theme::VISOR }))
+                            .corner_radius(egui::CornerRadius::same(15));
+                        if ui.add(b).clicked() {
+                            self.tab = tab;
+                        }
+                    }
+                });
             });
-        });
-        egui::Panel::bottom("message").show_inside(ui, |ui| {
-            ui.label(&self.message);
-        });
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
-                Tab::Launcher => self.launcher_tab(ui, &st),
-                Tab::Settings => self.settings_tab(ui),
+        egui::Panel::bottom("message")
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgba_premultiplied(0x02, 0x05, 0x28, 0xC0)).inner_margin(egui::Margin::symmetric(20, 8)))
+            .show_inside(ui, |ui| {
+                let text = if self.message.is_empty() { "Ready." } else { self.message.as_str() };
+                ui.label(egui::RichText::new(text).color(theme::SLATE).size(13.0));
             });
-        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(20, 8)))
+            .show_inside(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
+                    Tab::Launcher => self.launcher_tab(ui, &st),
+                    Tab::Settings => self.settings_tab(ui),
+                    Tab::Compile => self.compile_tab(ui, &st),
+                });
+            });
     }
 }
 
@@ -917,162 +1163,371 @@ impl Launcher {
     }
 
     fn launcher_tab(&mut self, ui: &mut egui::Ui, st: &Status) {
-        ui.heading("Devices");
-        dot(ui, Some(st.headset), "PS VR2 headset (USB)");
-        dot(ui, st.left, "Left Sense controller");
-        dot(ui, st.right, "Right Sense controller");
-        ui.horizontal(|ui| {
-            let steamvr = st.steamvr || self.steamvr.is_some();
-            if ui
-                .add_enabled(!steamvr, egui::Button::new("Set Default Play Area"))
-                .on_hover_text("SteamVR gets the square play area from Settings again (your drawn room is backed up). SteamVR must be closed.")
-                .on_disabled_hover_text("Close SteamVR first: it owns the play area file while running.")
-                .clicked()
-            {
-                self.set_default_play_area();
-            }
-            if ui
-                .add_enabled(!st.service, egui::Button::new("Set Custom Play Area"))
-                .on_hover_text("Opens SteamVR's Room Setup to draw your own room (starts SteamVR if needed). Kept until you set the default again.")
-                .on_disabled_hover_text("Stop monado-service first: SteamVR needs the headset.")
-                .clicked()
-            {
-                self.set_custom_play_area(steamvr);
-            }
-        });
-        self.refresh_picker(ui);
-        ui.separator();
-
-        ui.heading("SteamVR with Monado");
-        ui.horizontal(|ui| {
-            let running = st.steamvr || self.steamvr.is_some();
-            ui.label(if st.steamvr { "running" } else if self.steamvr.is_some() { "starting" } else { "stopped" });
-            if ui.add_enabled(!running, egui::Button::new("Start SteamVR")).clicked() {
-                self.start_steamvr();
-            }
-            if ui.add_enabled(running, egui::Button::new("Stop SteamVR")).clicked() {
-                self.stop_steamvr();
-            }
-            if ui.button("Detect Steam").clicked() {
-                let (root, vr, note) = detect_steam();
-                if let Some(root) = root {
-                    self.cfg.steam_root = root.display().to_string();
+        let steamvr = st.steamvr || self.steamvr.is_some();
+        theme::section(ui, "SteamVR with our driver", |ui| {
+            theme::note(ui, "Starts SteamVR with the PS VR2 driver. Games you start from Steam then run in the headset.");
+            ui.horizontal(|ui| {
+                let state = if st.steamvr { "Running" } else if self.steamvr.is_some() { "Starting" } else { "Stopped" };
+                if ui.add_enabled(!steamvr, theme::primary("Start SteamVR")).clicked() {
+                    self.start_steamvr();
                 }
-                self.cfg.steamvr_dir = vr.map(|v| v.display().to_string()).unwrap_or_default();
-                let saved = save_config(&self.cfg).map(|_| " (saved)").unwrap_or(" (couldn't save the settings)");
-                self.message = format!("{note}{saved}");
-            }
+                if ui.add_enabled(steamvr, egui::Button::new("Stop SteamVR")).clicked() {
+                    self.stop_steamvr();
+                }
+                ui.label(egui::RichText::new(state).color(if st.steamvr { theme::LIT } else { theme::SLATE }).font(theme::bold(14.0)));
+            });
+            self.refresh_picker(ui);
+            ui.horizontal(|ui| {
+                if ui.button("Detect Steam").on_hover_text("Find Steam's and SteamVR's install folders.").clicked() {
+                    let (root, vr, note) = detect_steam();
+                    if let Some(root) = root {
+                        self.cfg.steam_root = root.display().to_string();
+                    }
+                    self.cfg.steamvr_dir = vr.map(|v| v.display().to_string()).unwrap_or_default();
+                    let saved = save_config(&self.cfg).map(|_| " (saved)").unwrap_or(" (couldn't save the settings)");
+                    self.message = format!("{note}{saved}");
+                }
+                theme::note(ui, &format!(
+                    "Steam: {}   SteamVR: {}",
+                    if self.cfg.steam_root.is_empty() { "default" } else { &self.cfg.steam_root },
+                    if self.cfg.steamvr_dir.is_empty() { "default" } else { &self.cfg.steamvr_dir }
+                ));
+            });
         });
-        ui.label(format!(
-            "Steam: {}   SteamVR: {}",
-            if self.cfg.steam_root.is_empty() { "default (not detected yet)" } else { &self.cfg.steam_root },
-            if self.cfg.steamvr_dir.is_empty() { "default" } else { &self.cfg.steamvr_dir }
-        ));
-        ui.separator();
 
-        ui.heading("Monado service (OpenXR runtime)");
-        ui.horizontal(|ui| {
-            let running = st.service || self.service.is_some();
-            ui.label(if st.service { "running" } else if self.service.is_some() { "starting" } else { "stopped" });
-            if ui.add_enabled(!running, egui::Button::new("Start monado-service")).clicked() {
-                self.start_service();
-            }
-            if ui.add_enabled(running, egui::Button::new("Stop monado-service")).clicked() {
-                self.stop_service();
-            }
+        theme::section(ui, "Play area", |ui| {
+            theme::note(ui, "Use the square from Settings, or draw your own room in SteamVR's Room Setup.");
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!steamvr, egui::Button::new("Set Default Play Area"))
+                    .on_hover_text("SteamVR gets the square play area from Settings again (your drawn room is backed up).")
+                    .on_disabled_hover_text("Close SteamVR first: it owns the play area file while running.")
+                    .clicked()
+                {
+                    self.set_default_play_area();
+                }
+                if ui
+                    .add_enabled(!st.service, egui::Button::new("Set Custom Play Area"))
+                    .on_hover_text("Opens SteamVR's Room Setup to draw your own room (starts SteamVR if needed).")
+                    .on_disabled_hover_text("Stop monado-service first: SteamVR needs the headset.")
+                    .clicked()
+                {
+                    self.set_custom_play_area(steamvr);
+                }
+            });
         });
-        ui.separator();
 
-        ui.heading("Launch an app with Monado");
-        ui.horizontal(|ui| {
-            ui.label("App:");
-            ui.text_edit_singleline(&mut self.app_path);
-            if ui.button("Browse...").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_file() {
-                    self.app_path = p.display().to_string();
+        theme::section(ui, "OpenXR with Monado", |ui| {
+            theme::note(ui, "Runs Monado's own OpenXR service instead of SteamVR, for native OpenXR apps.");
+            ui.horizontal(|ui| {
+                let running = st.service || self.service.is_some();
+                if ui.add_enabled(!running, theme::primary("Start monado-service")).clicked() {
+                    self.start_service();
+                }
+                if ui.add_enabled(running, egui::Button::new("Stop monado-service")).clicked() {
+                    self.stop_service();
+                }
+                let state = if st.service { "Running" } else if self.service.is_some() { "Starting" } else { "Stopped" };
+                ui.label(egui::RichText::new(state).color(if st.service { theme::LIT } else { theme::SLATE }).font(theme::bold(14.0)));
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("App");
+                let w = (ui.available_width() - 100.0).max(200.0);
+                ui.add(egui::TextEdit::singleline(&mut self.app_path).hint_text("Path to an OpenXR app").desired_width(w));
+                if ui.button("Browse...").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_file() {
+                        self.app_path = p.display().to_string();
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Arguments");
+                let w = (ui.available_width()).max(200.0);
+                ui.add(egui::TextEdit::singleline(&mut self.app_args).desired_width(w));
+            });
+            ui.horizontal(|ui| {
+                let running = self.app.is_some();
+                if ui.add_enabled(!running, egui::Button::new("Launch app")).clicked() {
+                    self.launch_app();
+                }
+                if ui.add_enabled(running, egui::Button::new("Stop app")).clicked() {
+                    self.stop_app();
+                }
+            });
+            ui.add_space(6.0);
+            theme::note(ui, "Native OpenXR apps started elsewhere (monado-service must be running):");
+            let manifest = self.cfg.manifest().display().to_string();
+            let xr = format!("XR_RUNTIME_JSON={manifest}");
+            copy_row(ui, &xr);
+            theme::note(ui, "Steam games on Monado (Properties > Launch Options):");
+            let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
+            let pv = format!("PRESSURE_VESSEL_FILESYSTEMS_RW={runtime}/monado_comp_ipc");
+            copy_row(ui, &format!("{xr} {pv} %command%"));
+        });
+    }
+
+    /// Compile and install on a thread: the compile script built into this app (build-driver.sh, so an AppImage of
+    /// DriverKit can install and update everything), source always our GitHub repository. Its output drives the
+    /// progress bar. When it's done, this app uses the new build and kit (saved), and driver.env tells the scripts.
+    fn start_compile(&mut self, steamvr_running: bool) {
+        if steamvr_running {
+            self.message = "Close SteamVR first: it has the driver loaded.".into();
+            return;
+        }
+        let dest = self.cfg.install_dir.trim().to_string();
+        if dest.is_empty() {
+            self.message = "Pick an install location first.".into();
+            return;
+        }
+        if let Err(e) = fs::create_dir_all(&dest) {
+            self.message = format!("Can't create {dest}: {e}");
+            return;
+        }
+        let script = Path::new(&dest).join("build-driver.sh");
+        if let Err(e) = fs::write(&script, BUILD_SCRIPT) {
+            self.message = format!("Can't write {}: {e}", script.display());
+            return;
+        }
+        let _ = save_config(&self.cfg);
+        *self.build.lock().unwrap() = BuildState { running: true, ..Default::default() };
+        let state = self.build.clone();
+        let log = Path::new(&dest).join("compile-output.log");
+        self.message = format!("Compiling into {dest} (log {})", log.display());
+        thread::spawn(move || {
+            let mut out = fs::File::create(&log).ok();
+            let child = Command::new("bash")
+                .arg(&script)
+                .args(["--dest", &dest])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => {
+                    let mut st = state.lock().unwrap();
+                    st.running = false;
+                    st.result = Some(Err(format!("couldn't run {}: {e}", script.display())));
+                    return;
+                }
+            };
+            let stderr = child.stderr.take();
+            let st2 = state.clone();
+            let err_thread = thread::spawn(move || {
+                use std::io::BufRead;
+                if let Some(e) = stderr {
+                    for line in std::io::BufReader::new(e).lines().map_while(Result::ok) {
+                        st2.lock().unwrap().lines.push(line);
+                    }
+                }
+            });
+            {
+                use std::io::BufRead;
+                let stdout = child.stdout.take().expect("piped stdout");
+                for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if let Some(f) = out.as_mut() {
+                        let _ = writeln!(f, "{line}");
+                    }
+                    let mut st = state.lock().unwrap();
+                    if let Some(n) = line.strip_prefix("STEP ").and_then(|r| r.split('/').next()).and_then(|n| n.parse().ok()) {
+                        st.step = n;
+                    }
+                    if let Some((d, t)) = ninja_progress(&line) {
+                        st.done = d;
+                        st.total = t;
+                    } else {
+                        st.lines.push(line);
+                        let n = st.lines.len();
+                        if n > 400 {
+                            st.lines.drain(0..n - 400);
+                        }
+                    }
                 }
             }
+            let _ = err_thread.join();
+            let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+            let mut st = state.lock().unwrap();
+            st.running = false;
+            st.result = Some(if ok {
+                Ok(dest)
+            } else {
+                Err(st.lines.iter().rev().find(|l| l.starts_with("ERROR")).cloned().unwrap_or_else(|| "The compile failed: see the log.".into()))
+            });
         });
-        ui.horizontal(|ui| {
-            ui.label("Arguments:");
-            ui.text_edit_singleline(&mut self.app_args);
-        });
-        ui.horizontal(|ui| {
-            let running = self.app.is_some();
-            ui.label(if running { "app running" } else { "no app running" });
-            if ui.add_enabled(!running, egui::Button::new("Launch")).clicked() {
-                self.launch_app();
-            }
-            if ui.add_enabled(running, egui::Button::new("Stop app")).clicked() {
-                self.stop_app();
-            }
-        });
-        ui.separator();
+    }
 
-        ui.heading("Environment for running apps on Monado");
-        ui.label("Native OpenXR apps (monado-service must be running):");
-        let manifest = self.cfg.manifest().display().to_string();
-        let xr = format!("XR_RUNTIME_JSON={manifest}");
-        copy_row(ui, &xr);
-        ui.label("Steam games (Proton / Steam Linux Runtime also need the service socket inside the container):");
-        let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
-        let pv = format!("PRESSURE_VESSEL_FILESYSTEMS_RW={runtime}/monado_comp_ipc");
-        copy_row(ui, &pv);
-        ui.label("Steam launch options (Properties > Launch Options):");
-        copy_row(ui, &format!("{xr} {pv} %command%"));
+    fn compile_tab(&mut self, ui: &mut egui::Ui, st: &Status) {
+        let steamvr = st.steamvr || self.steamvr.is_some();
+        let (running, frac, done, total, step, result, tail) = {
+            let b = self.build.lock().unwrap();
+            let tail: Vec<String> = b.lines.iter().rev().take(10).rev().cloned().collect();
+            (b.running, b.fraction(), b.done, b.total, b.step, b.result.clone(), tail)
+        };
+        theme::section(ui, "Compile the driver", |ui| {
+            theme::note(ui, "Downloads the latest PSVR2-DriverKit from GitHub and builds everything into one folder: the SteamVR driver, Monado's OpenXR service, the launch scripts and tools, and a new PSVR2-DriverKit app. This app then uses that folder.");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Install location");
+                let w = (ui.available_width() - 200.0).max(240.0);
+                ui.add(egui::TextEdit::singleline(&mut self.cfg.install_dir).desired_width(w));
+                if ui.button("Browse...").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().set_directory(&self.cfg.install_dir).pick_folder() {
+                        self.cfg.install_dir = p.display().to_string();
+                    }
+                }
+                if ui.button("Default").on_hover_text(default_install_dir()).clicked() {
+                    self.cfg.install_dir = default_install_dir();
+                }
+            });
+            theme::note(ui, &format!("Source: {REPO_WEB} (main branch)"));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!running && !steamvr, theme::primary("Compile Driver"))
+                    .on_disabled_hover_text(if steamvr { "Close SteamVR first: it has the driver loaded." } else { "Compiling..." })
+                    .clicked()
+                {
+                    self.start_compile(steamvr);
+                }
+                if running {
+                    ui.spinner();
+                }
+            });
+            if running || result.is_some() {
+                let text = match (running, &result) {
+                    (true, _) if step == 3 && total > 0 => format!("Compiling {done} of {total}"),
+                    (true, _) => ["Starting", "Downloading the source", "Configuring", "Compiling", "Building PSVR2-DriverKit and tools", "Saving the install location"][step.min(5) as usize].to_string(),
+                    (false, Some(Ok(_))) => "Done".to_string(),
+                    _ => "Failed".to_string(),
+                };
+                ui.add(egui::ProgressBar::new(frac).text(egui::RichText::new(text).color(theme::GRAPHITE)).fill(theme::PS_BLUE).corner_radius(egui::CornerRadius::same(6)));
+            }
+            if let Some(r) = &result {
+                match r {
+                    Ok(dest) => {
+                        let build = Path::new(dest).join("build");
+                        let kit = Path::new(dest).join("kit");
+                        if self.cfg.monado_build != build.display().to_string() {
+                            // Everything launched from here uses the new build and kit from now on.
+                            self.cfg.monado_build = build.display().to_string();
+                            if kit.join("launch-steamvr.sh").exists() {
+                                self.cfg.test_kit = kit.display().to_string();
+                            }
+                            let _ = save_config(&self.cfg);
+                            self.message = format!("Compiled into {dest}. SteamVR and monado-service now start from there.");
+                        }
+                        ui.colored_label(theme::LIT, format!("Installed in {dest}. The new app is {}/PSVR2-DriverKit.", kit.display()));
+                    }
+                    Err(e) => {
+                        ui.colored_label(theme::FAULT, e);
+                    }
+                }
+            }
+            if !tail.is_empty() {
+                egui::Frame::new().fill(theme::FIELD).corner_radius(egui::CornerRadius::same(8)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    for l in &tail {
+                        ui.label(egui::RichText::new(l).monospace().size(12.0).color(theme::SLATE));
+                    }
+                });
+            }
+        });
+
+        theme::section(ui, "Register with SteamVR", |ui| {
+            let plugin = Path::new(&self.cfg.monado_build).join("steamvr-monado-psvr2");
+            let list = external_drivers().map(|(_, l)| l).unwrap_or_default();
+            let ours = list.iter().any(|p| p.trim_end_matches('/').ends_with("steamvr-monado-psvr2"));
+            let sony = list.iter().any(|p| p.contains("PlayStation VR2 App"));
+            theme::note(ui, "When our driver is registered, Steam starts SteamVR with it, from the Library or from any game. Unregister brings Sony's driver back.");
+            ui.horizontal(|ui| {
+                let (color, text) = match (ours, sony) {
+                    (true, _) => (theme::LIT, "Our driver is registered"),
+                    (false, true) => (theme::SLATE, "Sony's PS VR2 driver is registered"),
+                    _ => (theme::SLATE, "No PS VR2 driver is registered"),
+                };
+                ui.label(egui::RichText::new(text).color(color).font(theme::bold(14.0)));
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!steamvr && !ours && plugin.join("driver.vrdrivermanifest").exists(), theme::primary("Register our driver"))
+                    .on_disabled_hover_text(if steamvr { "Close SteamVR first." } else if ours { "Already registered." } else { "Compile the driver first." })
+                    .clicked()
+                {
+                    self.message = register_driver(&plugin).unwrap_or_else(|e| format!("Couldn't register: {e}"));
+                }
+                if ui
+                    .add_enabled(!steamvr && ours, egui::Button::new("Unregister"))
+                    .on_disabled_hover_text(if steamvr { "Close SteamVR first." } else { "Our driver isn't registered." })
+                    .clicked()
+                {
+                    self.message = unregister_driver().unwrap_or_else(|e| format!("Couldn't unregister: {e}"));
+                }
+            });
+            ui.label(egui::RichText::new(format!("Driver: {}", plugin.display())).color(theme::SLATE).size(12.0));
+        });
+
+        theme::section(ui, "Packages needed to compile", |ui| {
+            theme::note(ui, "Install these first. Copy the line for your distribution into a terminal.");
+            for (distro, cmd) in PACKAGES {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(distro).font(theme::bold(14.0)));
+                copy_row(ui, cmd);
+            }
+        });
     }
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Paths");
-        egui::Grid::new("paths").num_columns(2).show(ui, |ui| {
-            ui.label("Test kit (launch-steamvr.sh, logs):");
-            ui.text_edit_singleline(&mut self.cfg.test_kit);
-            ui.end_row();
-            ui.label("Monado build:");
-            ui.text_edit_singleline(&mut self.cfg.monado_build);
-            ui.end_row();
-            ui.label("Steam install (Detect Steam on the Launcher tab):");
-            ui.text_edit_singleline(&mut self.cfg.steam_root);
-            ui.end_row();
-            ui.label("SteamVR install:");
-            ui.text_edit_singleline(&mut self.cfg.steamvr_dir);
-            ui.end_row();
+        theme::section(ui, "Folders", |ui| {
+            let w = (ui.available_width() - 200.0).max(240.0);
+            egui::Grid::new("paths").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label("Launch scripts and logs");
+                ui.add(egui::TextEdit::singleline(&mut self.cfg.test_kit).desired_width(w));
+                ui.end_row();
+                ui.label("Driver build");
+                ui.add(egui::TextEdit::singleline(&mut self.cfg.monado_build).desired_width(w));
+                ui.end_row();
+                ui.label("Steam");
+                ui.add(egui::TextEdit::singleline(&mut self.cfg.steam_root).hint_text("found by Detect Steam").desired_width(w));
+                ui.end_row();
+                ui.label("SteamVR");
+                ui.add(egui::TextEdit::singleline(&mut self.cfg.steamvr_dir).hint_text("default").desired_width(w));
+                ui.end_row();
+            });
         });
-        ui.separator();
-        ui.label("Saved with Save and used by every launch from here. Each section goes only to its own runtime.");
         let sections = [
-            (Target::SteamVR, "SteamVR plugin (driver_monado_psvr2)",
-             "SteamVR started from here (launch-steamvr.sh), and the games you then start from Steam."),
-            (Target::Monado, "OpenXR (monado-service)",
-             "monado-service started from here, and the OpenXR apps on it (from here or with the variables on the Launcher tab)."),
+            (Target::SteamVR, "SteamVR driver settings",
+             "Used when SteamVR starts from here, and by the games you then start from Steam."),
+            (Target::Monado, "OpenXR service settings",
+             "Used by monado-service started from here, and the OpenXR apps on it."),
         ];
         for (target, title, what) in sections {
-            ui.separator();
-            ui.heading(title);
-            ui.label(egui::RichText::new(what).small());
-            egui::Grid::new(title).num_columns(3).striped(true).show(ui, |ui| {
-                for s in self.cfg.settings.iter_mut().filter(|s| s.target == target) {
-                    ui.checkbox(&mut s.enabled, &s.label).on_hover_text(format!("{}\n\n{}", s.help, s.key));
-                    match &mut s.kind {
-                        Kind::Value { value } => {
-                            ui.add_enabled(s.enabled, egui::TextEdit::singleline(value).desired_width(260.0));
+            theme::section(ui, title, |ui| {
+                theme::note(ui, what);
+                egui::Grid::new(title).num_columns(3).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+                    for s in self.cfg.settings.iter_mut().filter(|s| s.target == target) {
+                        ui.checkbox(&mut s.enabled, &s.label).on_hover_text(format!("{}\n\n{}", s.help, s.key));
+                        match &mut s.kind {
+                            Kind::Value { value } => {
+                                ui.add_enabled(s.enabled, egui::TextEdit::singleline(value).desired_width(220.0));
+                            }
+                            Kind::Toggle { on, off } => {
+                                let v = if s.enabled { on.as_str() } else { off.as_str() };
+                                ui.label(egui::RichText::new(if v.is_empty() { format!("{} unset", s.key) } else { format!("{}={}", s.key, v) }).monospace().size(12.0).color(theme::SLATE));
+                            }
                         }
-                        Kind::Toggle { on, off } => {
-                            let v = if s.enabled { on.as_str() } else { off.as_str() };
-                            ui.label(if v.is_empty() { format!("{} unset", s.key) } else { format!("{}={}", s.key, v) });
-                        }
+                        ui.add(egui::Label::new(egui::RichText::new(&s.help).color(theme::SLATE).size(12.0)).wrap());
+                        ui.end_row();
                     }
-                    ui.label(egui::RichText::new(&s.help).small());
-                    ui.end_row();
-                }
+                });
+                ui.add_space(4.0);
+                theme::note(ui, "Environment these settings give:");
+                let env: Vec<String> = self.cfg.env(target).iter().map(|(k, v)| format!("{k}={v}")).collect();
+                copy_row(ui, &env.join(" "));
             });
-            ui.label("Environment this section gives:");
-            let env: Vec<String> = self.cfg.env(target).iter().map(|(k, v)| format!("{k}={v}")).collect();
-            copy_row(ui, &env.join(" "));
         }
-        ui.separator();
         ui.horizontal(|ui| {
-            if ui.button("Save").clicked() {
+            if ui.add(theme::primary("Save settings")).clicked() {
                 match save_config(&self.cfg) {
                     Ok(()) => {
                         self.saved_at = Some(Instant::now());
@@ -1084,11 +1539,46 @@ impl Launcher {
             if ui.button("Restore defaults").clicked() {
                 let d = Config::default();
                 self.cfg.settings = d.settings;
-                self.message = "Defaults restored (Save to keep them).".into();
+                self.message = "Defaults restored. Save settings to keep them.".into();
             }
         });
     }
 }
+
+impl Launcher {
+    fn take_screenshot(&mut self, ctx: &egui::Context) {
+        let Some((path, t0, asked)) = self.screenshot.clone() else {
+            return;
+        };
+        ctx.request_repaint();
+        if !asked && t0.elapsed() > Duration::from_millis(1500) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            self.screenshot = Some((path.clone(), t0, true));
+        }
+        let shot = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(img) = shot {
+            if let Ok(f) = fs::File::create(&path) {
+                let mut enc = png::Encoder::new(std::io::BufWriter::new(f), img.size[0] as u32, img.size[1] as u32);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                if let Ok(mut w) = enc.write_header() {
+                    let _ = w.write_image_data(img.as_raw());
+                }
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+}
+
+/// The compile script (psvr2-test/build-driver.sh), built into the app: DriverKit can compile and update everything
+/// on its own (e.g. as an AppImage), without a copy of the kit.
+const BUILD_SCRIPT: &str = include_str!("../../build-driver.sh");
+const REPO_WEB: &str = "github.com/mkooner/PSVR2-DriverKit";
 
 fn main() -> eframe::Result<()> {
     if std::env::args().any(|a| a == "--status") {
@@ -1113,8 +1603,28 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 720.0]).with_title("PSVR2-DriverKit"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 760.0]).with_min_inner_size([720.0, 520.0]).with_title("PSVR2-DriverKit"),
         ..Default::default()
     };
-    eframe::run_native("PSVR2-DriverKit", options, Box::new(|cc| Ok(Box::new(Launcher::new(cc)))))
+    let args: Vec<String> = std::env::args().collect();
+    let shot = args.iter().position(|a| a == "--screenshot").and_then(|i| {
+        let tab = match args.get(i + 2).map(String::as_str) {
+            Some("settings") => Tab::Settings,
+            Some("compile") => Tab::Compile,
+            _ => Tab::Launcher,
+        };
+        args.get(i + 1).map(|p| (PathBuf::from(p), tab))
+    });
+    eframe::run_native(
+        "PSVR2-DriverKit",
+        options,
+        Box::new(move |cc| {
+            let mut app = Launcher::new(cc);
+            if let Some((path, tab)) = shot {
+                app.tab = tab;
+                app.screenshot = Some((path, Instant::now(), false));
+            }
+            Ok(Box::new(app))
+        }),
+    )
 }
