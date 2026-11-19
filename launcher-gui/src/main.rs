@@ -524,7 +524,7 @@ mod compile_tests {
         assert_eq!(b.fraction(), 1.0);
     }
 
-    /// Register replaces Sony's PS VR2 driver with ours and keeps the others; Unregister puts Sony's back. Run in a
+    /// Register replaces Sony's PS VR2 driver with ours and keeps the others; Unregister removes only ours. Run in a
     /// temporary HOME so the real SteamVR config isn't touched.
     #[test]
     fn register_and_unregister() {
@@ -551,7 +551,7 @@ mod compile_tests {
 
         unregister_driver().unwrap();
         let (_, list) = external_drivers().unwrap();
-        assert_eq!(list, vec![other.display().to_string(), sony.display().to_string()]);
+        assert_eq!(list, vec![other.display().to_string()], "Unregister removes only our driver");
         let _ = fs::remove_dir_all(&home);
         std::env::set_var("HOME", real_home);
     }
@@ -1089,7 +1089,7 @@ fn container_problems(plugin: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Registered: our plugin in SteamVR's driver list (Steam starts SteamVR with it, as with Sony's). The PS VR2
-/// entries it replaces are kept in ~/.config/PSVR2-DriverKit/replaced-drivers.json for Unregister.
+/// entries it takes out (two drivers can't both run the headset) are named in the message, not saved.
 fn register_driver(plugin: &Path) -> Result<String, String> {
     if !plugin.join("driver.vrdrivermanifest").exists() {
         return Err(format!("no plugin at {} (compile first)", plugin.display()));
@@ -1097,41 +1097,22 @@ fn register_driver(plugin: &Path) -> Result<String, String> {
     let (v, list) = external_drivers()?;
     let ours = plugin.display().to_string();
     let replaced: Vec<String> = list.iter().filter(|p| is_psvr2_driver(p) && **p != ours).cloned().collect();
-    if !replaced.is_empty() {
-        let keep = config_dir().join("replaced-drivers.json");
-        let _ = fs::create_dir_all(config_dir());
-        fs::write(&keep, serde_json::to_string_pretty(&replaced).unwrap_or_default()).map_err(|e| e.to_string())?;
-    }
     let mut new: Vec<String> = list.into_iter().filter(|p| !is_psvr2_driver(p)).collect();
     new.push(ours.clone());
     write_external_drivers(v, &new)?;
     Ok(if replaced.is_empty() {
         format!("Registered {ours} with SteamVR.")
     } else {
-        format!("Registered {ours} with SteamVR (instead of {}; Unregister puts it back).", replaced.join(", "))
+        format!("Registered {ours} with SteamVR; taken off SteamVR's list: {} (two PS VR2 drivers can't both run the headset).", replaced.join(", "))
     })
 }
 
 /// Unregister: our plugin out of SteamVR's list, the PS VR2 driver it replaced (Sony's) back.
 fn unregister_driver() -> Result<String, String> {
     let (v, list) = external_drivers()?;
-    let mut new: Vec<String> = list.into_iter().filter(|p| !p.trim_end_matches('/').ends_with("steamvr-monado-psvr2")).collect();
-    let keep = config_dir().join("replaced-drivers.json");
-    let restored: Vec<String> = fs::read_to_string(&keep)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|p| Path::new(p).exists() && !new.contains(p))
-        .collect();
-    new.extend(restored.iter().cloned());
+    let new: Vec<String> = list.into_iter().filter(|p| !p.trim_end_matches('/').ends_with("steamvr-monado-psvr2")).collect();
     write_external_drivers(v, &new)?;
-    let _ = fs::remove_file(&keep);
-    Ok(if restored.is_empty() {
-        "Our driver unregistered from SteamVR.".to_string()
-    } else {
-        format!("Our driver unregistered; {} registered again.", restored.join(", "))
-    })
+    Ok("Our driver unregistered from SteamVR (the other drivers on the list are left as they are).".to_string())
 }
 
 /// The packages build-driver.sh needs (compilers, CMake/Ninja, the Monado build's libraries, Rust for DriverKit).
@@ -1561,7 +1542,7 @@ impl Launcher {
             // Registered, but not this (container-ready) copy: Register replaces it.
             let current = list.iter().any(|p| Path::new(p.trim_end_matches('/')) == plugin.as_path());
             let sony = list.iter().any(|p| p.contains("PlayStation VR2 App"));
-            theme::note(ui, "When our driver is registered, Steam starts SteamVR with it, from the Library or from any game. Unregister brings Sony's driver back.");
+            theme::note(ui, "When our driver is registered, Steam starts SteamVR with it, from the Library or from any game. Unregister only removes our driver; it doesn't register any other.");
             ui.horizontal(|ui| {
                 let (color, text) = match (ours, sony) {
                     (true, _) if !current => (theme::FAULT, "The registered copy of our driver can't load when Steam starts SteamVR: Register replaces it with this one"),
