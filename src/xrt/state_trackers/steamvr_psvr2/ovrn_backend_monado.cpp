@@ -344,7 +344,9 @@ public:
 		d.distortion_mesh_resolution = (int)debug_get_num_option_ovrn_distortion_mesh_res();
 		int scale = (int)debug_get_num_option_ovrn_scale_percentage();
 		if (scale <= 0) {
-			scale = psvr2 ? 100 : 140;
+			// 140%, as Monado's own compositor renders for OpenXR apps (comp_settings.c): 2800x2856 per eye on the
+			// PS VR2. OpenXR looked sharper at "the same" size until 2026-11-18 showed it wasn't (2800 vs 2000).
+			scale = 140;
 		}
 		Pose eyes[2];
 		{
