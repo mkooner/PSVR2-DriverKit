@@ -43,6 +43,8 @@
 #endif
 
 #include <algorithm>
+#include <dlfcn.h>
+#include <sys/stat.h>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
@@ -69,9 +71,65 @@ DEBUG_GET_ONCE_FLOAT_OPTION(ovrn_photons_to_vblank_s, "OVRN_PHOTONS_TO_VBLANK_S"
 DEBUG_GET_ONCE_NUM_OPTION(ovrn_distortion_mesh_res, "OVRN_DISTORTION_MESH_RES", 80)
 // Side of the square play area given to SteamVR, metres (psvr2-test/launch-steamvr.sh PLAY_AREA).
 DEBUG_GET_ONCE_FLOAT_OPTION(ovrn_play_area_size, "OVRD_PLAY_AREA_SIZE", 2.0f)
-// Sony's render models / icons are linked into the driver's resources (psvr2-test/launch-steamvr.sh sets these).
-DEBUG_GET_ONCE_BOOL_OPTION(ovrn_pssense_render_models, "OVRD_PSSENSE_RENDER_MODELS", false)
-DEBUG_GET_ONCE_BOOL_OPTION(ovrn_psvr2_sony_icons, "OVRD_PSVR2_SONY_ICONS", false)
+// Sony's Sense render models and PS VR2 icons in the driver's resources (copied there by build-driver.sh, linked by
+// launch-steamvr.sh): used when they're there. OVRD_PSSENSE_RENDER_MODELS / OVRD_PSVR2_SONY_ICONS = 0 or 1 override.
+DEBUG_GET_ONCE_TRISTATE_OPTION(ovrn_pssense_render_models, "OVRD_PSSENSE_RENDER_MODELS")
+DEBUG_GET_ONCE_TRISTATE_OPTION(ovrn_psvr2_sony_icons, "OVRD_PSVR2_SONY_ICONS")
+
+namespace {
+
+//! The driver's folder (<plugin>/bin/linux64/driver_monado_psvr2.so -> <plugin>), from where this library was loaded.
+std::string
+plugin_dir()
+{
+	Dl_info info = {};
+	if (dladdr(reinterpret_cast<void *>(&plugin_dir), &info) == 0 || info.dli_fname == nullptr) {
+		return {};
+	}
+	std::string p = info.dli_fname;
+	for (int i = 0; i < 3; i++) {
+		const size_t slash = p.rfind('/');
+		if (slash == std::string::npos) {
+			return {};
+		}
+		p.resize(slash);
+	}
+	return p;
+}
+
+bool
+plugin_has(const char *relative)
+{
+	static const std::string dir = plugin_dir();
+	struct stat st;
+	return !dir.empty() && stat((dir + "/resources/" + relative).c_str(), &st) == 0;
+}
+
+//! Sony's Sense render models (resources/rendermodels/playstation_vr2_sense_*), unless the option says otherwise.
+bool
+use_sense_render_models()
+{
+	switch (debug_get_tristate_option_ovrn_pssense_render_models()) {
+	case DEBUG_TRISTATE_ON: return true;
+	case DEBUG_TRISTATE_OFF: return false;
+	default:
+		return plugin_has("rendermodels/playstation_vr2_sense_left") &&
+		       plugin_has("rendermodels/playstation_vr2_sense_right");
+	}
+}
+
+//! Sony's PS VR2 status icons (resources/icons/playstation_vr2/), unless the option says otherwise.
+bool
+use_sony_icons()
+{
+	switch (debug_get_tristate_option_ovrn_psvr2_sony_icons()) {
+	case DEBUG_TRISTATE_ON: return true;
+	case DEBUG_TRISTATE_OFF: return false;
+	default: return plugin_has("icons/playstation_vr2/headset_status_off@2x.png");
+	}
+}
+
+} // namespace
 
 namespace ovrn {
 
@@ -255,7 +313,7 @@ public:
 			// As Sony's driver presents it, so SteamVR recognises the headset as a PS VR2.
 			d.controller_type = "playstation_vr2_hmd";
 			d.input_profile = "{monado_psvr2}/input/playstation_vr2_profile.json";
-			if (debug_get_bool_option_ovrn_psvr2_sony_icons()) {
+			if (use_sony_icons()) {
 				const char *dir = "{monado_psvr2}/icons/playstation_vr2/headset_status_";
 				d.string_props = {
 				    {vr::Prop_NamedIconPathDeviceOff_String, std::string(dir) + "off@2x.png"},
@@ -450,12 +508,12 @@ public:
 		}
 		d.controller_type = "playstation_vr2_sense";
 		d.input_profile = "{monado_psvr2}/input/playstation_vr2_sense_controller_profile.json";
-		if (debug_get_bool_option_ovrn_pssense_render_models()) {
+		if (use_sense_render_models()) {
 			d.render_model = left ? "{monado_psvr2}playstation_vr2_sense_left" : "{monado_psvr2}playstation_vr2_sense_right";
 		} else {
 			d.render_model = left ? "oculus_cv1_controller_left" : "oculus_cv1_controller_right";
 		}
-		if (debug_get_bool_option_ovrn_psvr2_sony_icons()) {
+		if (use_sony_icons()) {
 			const std::string dir =
 			    std::string("{monado_psvr2}/icons/playstation_vr2/") + (left ? "left" : "right") + "_controller_status_";
 			d.string_props = {
