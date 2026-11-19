@@ -491,6 +491,28 @@ fn has_drawn_room(u: &serde_json::Value) -> bool {
 mod compile_tests {
     use super::*;
 
+    /// Tests that read or change HOME take turns.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// The full development build links GStreamer and others Steam's runtime lacks; the container build bundles what
+    /// it needs (only where both builds exist, i.e. on the development machine).
+    #[test]
+    fn container_check_on_real_builds() {
+        let _turn = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::var("HOME").unwrap_or_default();
+        let full = Path::new(&home).join("Documents/Claude/Monado/trial/build/steamvr-monado-psvr2");
+        let slim = Path::new(&home).join("Documents/Claude/Monado/trial/build-steamvr/steamvr-monado-psvr2");
+        if !full.exists() || !slim.exists() || sniper_libs().is_empty() {
+            return;
+        }
+        let m = container_problems(&full).unwrap();
+        assert!(m.iter().any(|n| n.starts_with("libgstapp")), "full build: {m:?}");
+        assert_eq!(container_problems(&slim).unwrap(), Vec::<String>::new());
+        // The same build through a path with ".." in it.
+        let via_kit = Path::new(&home).join("Documents/Claude/Monado/psvr2-test/../trial/build-steamvr/steamvr-monado-psvr2");
+        assert_eq!(container_problems(&via_kit).unwrap(), Vec::<String>::new());
+    }
+
     #[test]
     fn ninja_progress_lines() {
         assert_eq!(ninja_progress("[12/345] Building CXX object foo.o"), Some((12, 345)));
@@ -506,6 +528,8 @@ mod compile_tests {
     /// temporary HOME so the real SteamVR config isn't touched.
     #[test]
     fn register_and_unregister() {
+        let _turn = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let real_home = std::env::var("HOME").unwrap_or_default();
         let home = std::env::temp_dir().join(format!("dk-test-{}", std::process::id()));
         let sony = home.join("Steam/steamapps/common/PlayStation VR2 App/SteamVR_Plug-In");
         let other = home.join("other_driver");
@@ -529,6 +553,7 @@ mod compile_tests {
         let (_, list) = external_drivers().unwrap();
         assert_eq!(list, vec![other.display().to_string(), sony.display().to_string()]);
         let _ = fs::remove_dir_all(&home);
+        std::env::set_var("HOME", real_home);
     }
 }
 
@@ -611,6 +636,8 @@ struct Launcher {
     screenshot: Option<(PathBuf, Instant, bool)>,
     /// The device pictures (assets/): headset, left and right Sense controller.
     pictures: [Option<egui::TextureHandle>; 3],
+    /// registrable_plugin's last answer and when (ldd isn't run on every redraw).
+    reg_cache: Option<(Instant, Option<PathBuf>)>,
 }
 
 fn stamp() -> String {
@@ -650,6 +677,7 @@ impl Launcher {
             saved_at: None,
             build: Arc::new(Mutex::new(BuildState::default())),
             screenshot: None,
+            reg_cache: None,
             pictures: [
                 theme::texture(&cc.egui_ctx, "headset", include_bytes!("../assets/headset.png")),
                 theme::texture(&cc.egui_ctx, "controller_left", include_bytes!("../assets/controller_left.png")),
@@ -995,6 +1023,71 @@ fn is_psvr2_driver(path: &str) -> bool {
     path.contains("PlayStation VR2 App") || path.ends_with("steamvr-monado-psvr2") || path.ends_with("steamvr-monado-psvr2/")
 }
 
+/// Libraries Steam's runtime container never takes from a driver's folder: the C runtime and the host's graphics and
+/// system libraries, which pressure-vessel brings in itself (bundle_libs.py's NEVER list).
+const HOST_LIBS: [&str; 22] = [
+    "linux-vdso.so", "ld-linux", "libc.so", "libm.so", "libmvec.so", "libdl.so", "libpthread.so", "librt.so",
+    "libresolv.so", "libutil.so", "libstdc++.so", "libgcc_s.so", "libvulkan.so", "libGL", "libEGL.so", "libGLX",
+    "libGLdispatch.so", "libdrm.so", "libgbm.so", "libnvidia", "libudev.so", "libsystemd.so",
+];
+
+/// Library names Steam's sniper runtime provides (its files/lib/x86_64-linux-gnu), from the newest sniper platform.
+fn sniper_libs() -> std::collections::HashSet<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let base = Path::new(&home).join(".local/share/Steam/steamapps/common/SteamLinuxRuntime_sniper");
+    let mut platforms: Vec<PathBuf> = fs::read_dir(&base)
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("sniper_platform_"))).collect())
+        .unwrap_or_default();
+    platforms.sort();
+    let mut names = std::collections::HashSet::new();
+    if let Some(p) = platforms.last() {
+        if let Ok(d) = fs::read_dir(p.join("files/lib/x86_64-linux-gnu")) {
+            names.extend(d.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string())));
+        }
+        // The runtime keeps its files by content hash; usr-mtree.txt.gz is its index ("./lib/x86_64-linux-gnu/<name>").
+        if let Ok(out) = Command::new("zcat").arg(p.join("usr-mtree.txt.gz")).output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let path = line.split(' ').next().unwrap_or("");
+                if path.contains("/x86_64-linux-gnu/") && path.contains(".so") {
+                    if let Some(n) = path.rsplit('/').next() {
+                        names.insert(n.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Why SteamVR started by Steam (inside its runtime container) couldn't load this driver: the libraries it needs that
+/// are neither next to it, nor in Steam's runtime, nor ones the container takes from the host. Empty: it can.
+fn container_problems(plugin: &Path) -> Result<Vec<String>, String> {
+    let so = plugin.join("bin/linux64/driver_monado_psvr2.so");
+    if !so.exists() {
+        return Err(format!("no driver at {}", so.display()));
+    }
+    let out = Command::new("ldd").arg(&so).output().map_err(|e| format!("ldd: {e}"))?;
+    let runtime = sniper_libs();
+    if runtime.is_empty() {
+        return Err("Steam's runtime (SteamLinuxRuntime_sniper) isn't installed: start SteamVR once from Steam".into());
+    }
+    // ldd prints resolved paths: compare with the resolved folder (a path given as kit/../trial/... wouldn't match).
+    let folder = so.parent().and_then(|f| f.canonicalize().ok()).unwrap_or_default();
+    let mut missing = vec![];
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let (name, path) = match parts.as_slice() {
+            [n, "=>", p, ..] => (*n, *p),
+            _ => continue,
+        };
+        if HOST_LIBS.iter().any(|h| name.starts_with(h)) || runtime.contains(name) || Path::new(path).starts_with(&folder) {
+            continue;
+        }
+        missing.push(name.to_string());
+    }
+    Ok(missing)
+}
+
 /// Registered: our plugin in SteamVR's driver list (Steam starts SteamVR with it, as with Sony's). The PS VR2
 /// entries it replaces are kept in ~/.config/PSVR2-DriverKit/replaced-drivers.json for Unregister.
 fn register_driver(plugin: &Path) -> Result<String, String> {
@@ -1267,6 +1360,30 @@ impl Launcher {
         });
     }
 
+    /// The driver to register: the first build SteamVR can load inside Steam's runtime container (the Compile Driver
+    /// tab's install, this app's driver build, the kit's container build next to it).
+    fn registrable_plugin(&mut self) -> Option<PathBuf> {
+        if let Some((t, p)) = &self.reg_cache {
+            if t.elapsed() < Duration::from_secs(5) {
+                return p.clone();
+            }
+        }
+        let p = self.find_registrable_plugin();
+        self.reg_cache = Some((Instant::now(), p.clone()));
+        p
+    }
+
+    fn find_registrable_plugin(&self) -> Option<PathBuf> {
+        let mut builds: Vec<PathBuf> = driver_env().into_iter().filter(|(k, _)| k == "MONADO_BUILD").map(|(_, v)| PathBuf::from(v)).collect();
+        builds.push(PathBuf::from(&self.cfg.monado_build));
+        builds.push(Path::new(&self.cfg.test_kit).join("../trial/build-steamvr"));
+        builds
+            .into_iter()
+            .map(|b| b.join("steamvr-monado-psvr2"))
+            .map(|p| p.canonicalize().unwrap_or(p))
+            .find(|p| container_problems(p).is_ok_and(|m| m.is_empty()))
+    }
+
     /// Compile and install on a thread: the compile script built into this app (build-driver.sh, so an AppImage of
     /// DriverKit can install and update everything), source always our GitHub repository. Its output drives the
     /// progress bar. When it's done, this app uses the new build and kit (saved), and driver.env tells the scripts.
@@ -1435,13 +1552,16 @@ impl Launcher {
         });
 
         theme::section(ui, "Register with SteamVR", |ui| {
-            let plugin = Path::new(&self.cfg.monado_build).join("steamvr-monado-psvr2");
+            let plugin = self.registrable_plugin().unwrap_or_else(|| Path::new(&self.cfg.monado_build).join("steamvr-monado-psvr2"));
             let list = external_drivers().map(|(_, l)| l).unwrap_or_default();
             let ours = list.iter().any(|p| p.trim_end_matches('/').ends_with("steamvr-monado-psvr2"));
+            // Registered, but not this (container-ready) copy: Register replaces it.
+            let current = list.iter().any(|p| Path::new(p.trim_end_matches('/')) == plugin.as_path());
             let sony = list.iter().any(|p| p.contains("PlayStation VR2 App"));
             theme::note(ui, "When our driver is registered, Steam starts SteamVR with it, from the Library or from any game. Unregister brings Sony's driver back.");
             ui.horizontal(|ui| {
                 let (color, text) = match (ours, sony) {
+                    (true, _) if !current => (theme::FAULT, "The registered copy of our driver can't load when Steam starts SteamVR: Register replaces it with this one"),
                     (true, _) => (theme::LIT, "Our driver is registered"),
                     (false, true) => (theme::SLATE, "Sony's PS VR2 driver is registered"),
                     _ => (theme::SLATE, "No PS VR2 driver is registered"),
@@ -1450,11 +1570,19 @@ impl Launcher {
             });
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!steamvr && !ours && plugin.join("driver.vrdrivermanifest").exists(), theme::primary("Register our driver"))
-                    .on_disabled_hover_text(if steamvr { "Close SteamVR first." } else if ours { "Already registered." } else { "Compile the driver first." })
+                    .add_enabled(!steamvr && !current && plugin.join("driver.vrdrivermanifest").exists(), theme::primary("Register our driver"))
+                    .on_disabled_hover_text(if steamvr { "Close SteamVR first." } else if current { "Already registered." } else { "Compile the driver first." })
                     .clicked()
                 {
-                    self.message = register_driver(&plugin).unwrap_or_else(|e| format!("Couldn't register: {e}"));
+                    self.message = match container_problems(&plugin) {
+                        Ok(m) if m.is_empty() => register_driver(&plugin).unwrap_or_else(|e| format!("Couldn't register: {e}")),
+                        Ok(m) => format!(
+                            "Not registered: SteamVR started by Steam runs inside Steam's runtime, which lacks {} needed by {}. Compile the driver on this tab first (it bundles them).",
+                            m.join(", "),
+                            plugin.display()
+                        ),
+                        Err(e) => format!("Not registered: {e}"),
+                    };
                 }
                 if ui
                     .add_enabled(!steamvr && ours, egui::Button::new("Unregister"))
