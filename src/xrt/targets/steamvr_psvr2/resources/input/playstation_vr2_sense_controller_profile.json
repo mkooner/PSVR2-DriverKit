@@ -270,6 +270,31 @@
         0,
         0
       ]
+    },
+    "/input/skeleton/left": {
+      "type": "skeleton",
+      "side": "left",
+      "skeleton": "/skeleton/hand/left",
+      "binding_image_point": [
+        75,
+        75
+      ]
+    },
+    "/input/skeleton/right": {
+      "type": "skeleton",
+      "side": "right",
+      "skeleton": "/skeleton/hand/right",
+      "binding_image_point": [
+        75,
+        75
+      ]
     }
-  }
+  },
+  "default_bindings": [
+    {
+      "app_key": "openvr.component.vrcompositor",
+      "binding_url": "vrcompositor_binding_playstation_vr2_sense_controller.json"
+    }
+  ],
+  "compatibility_mode_controller_type": "oculus_touch"
 }

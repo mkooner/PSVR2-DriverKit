@@ -51,6 +51,14 @@ public:
 	void
 	updateInputs(int64_t)
 	{
+		if (m_proximityHandle != vr::k_ulInvalidInputComponentHandle) {
+			const bool worn = m_backend->headWorn();
+			if (worn != m_wornSent || !m_wornSentOnce) {
+				m_wornSent = worn;
+				m_wornSentOnce = true;
+				vr::VRDriverInput()->UpdateBooleanComponent(m_proximityHandle, worn, 0.0);
+			}
+		}
 		if (m_buttonHandle == vr::k_ulInvalidInputComponentHandle) {
 			return;
 		}
@@ -267,6 +275,21 @@ protected:
 		// Inside-out tracking: cameras on the headset looking at the world (as Sony's driver reports it; documented
 		// effect: SteamVR's wording in its UI, e.g. Room Setup).
 		props->SetInt32Property(m_container, vr::Prop_HmdTrackingStyle_Int32, vr::HmdTrackingStyle_InsideOutCameras);
+		/*
+		 * SteamVR's in-headset playspace setup (as on Steam Frame): its dashboard offers "Playspace Setup" and "Adjust
+		 * Floor Height" only for a headset reporting SupportsInHMDRoomSetup_Bool (property 11003 in SteamVR 2.19's
+		 * dashboard, systemui.js; not in the published openvr_driver.h 2.15.6). SteamVR ignores an unknown property.
+		 * OVRN_IN_HMD_ROOM_SETUP=0 doesn't report it.
+		 */
+		{
+			const char *e = getenv("OVRN_IN_HMD_ROOM_SETUP");
+			if (e == nullptr || strcmp(e, "0") != 0) {
+				constexpr auto kSupportsInHMDRoomSetup = (vr::ETrackedDeviceProperty)11003;
+				props->SetBoolProperty(m_container, kSupportsInHMDRoomSetup, true);
+				log("ovrn: in-headset playspace setup offered to SteamVR (SupportsInHMDRoomSetup_Bool; "
+				    "OVRN_IN_HMD_ROOM_SETUP=0 off)\n");
+			}
+		}
 
 		vr::HmdMatrix34_t eye[2];
 		for (int e = 0; e < 2; e++) {
@@ -276,6 +299,7 @@ protected:
 		loadHiddenArea();
 		setupCamera();
 		setupHeadButton();
+		setupProximity();
 		log("ovrn: headset %s (%s), %ux%u at %.2f Hz, render %ux%u per eye, IPD %.1f mm, vsync-to-photons %.5f s, "
 		    "head pose: %s, backend %s\n",
 		    m_info.model.c_str(), m_info.serial.c_str(), m_display.width, m_display.height, m_display.refresh_hz,
@@ -291,6 +315,26 @@ private:
 	 * The passthrough cameras (SteamVR's Room View and the camera in Room Setup), when the backend has them. Their
 	 * calibration comes with the headset's calibration block; waits up to 3 s for it. OVRN_CAMERA=0: no camera.
 	 */
+	/*!
+	 * The headset's wear sensor as /proximity (Sony's headset profile and legacy binding: /user/head/proximity) and
+	 * Prop_ContainsProximitySensor_Bool, as Sony's driver reports them. Games read it for "headset on"; AMID EVIL VR
+	 * asked for it and got "Invalid input type button::click for path (/user/head/proximity)" (2026-11-19).
+	 */
+	void
+	setupProximity()
+	{
+		if (!m_backend->hasProximity() || vr::VRDriverInput() == nullptr) {
+			return;
+		}
+		vr::VRProperties()->SetBoolProperty(m_container, vr::Prop_ContainsProximitySensor_Bool, true);
+		if (vr::VRDriverInput()->CreateBooleanComponent(m_container, "/proximity", &m_proximityHandle) !=
+		    vr::VRInputError_None) {
+			m_proximityHandle = vr::k_ulInvalidInputComponentHandle;
+			return;
+		}
+		log("ovrn: headset wear sensor as /proximity\n");
+	}
+
 	void
 	setupHeadButton()
 	{
@@ -333,6 +377,9 @@ private:
 
 	vr::VRInputComponentHandle_t m_buttonHandle = vr::k_ulInvalidInputComponentHandle;
 	bool m_buttonSent = false;
+	vr::VRInputComponentHandle_t m_proximityHandle = vr::k_ulInvalidInputComponentHandle;
+	bool m_wornSent = false;
+	bool m_wornSentOnce = false;
 	std::unique_ptr<Camera> m_camera;
 
 	//! The hidden-area mask from the backend's file, handed to SteamVR as it is (render target UV).

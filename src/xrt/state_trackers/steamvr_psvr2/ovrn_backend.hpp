@@ -213,6 +213,17 @@ public:
 	{
 		return false;
 	}
+	//! Whether the headset has a wear (proximity) sensor; headWorn() is its state, read in runFrame.
+	virtual bool
+	hasProximity()
+	{
+		return false;
+	}
+	virtual bool
+	headWorn()
+	{
+		return false;
+	}
 	//! Whether the headset has passthrough cameras at all (their calibration may still be on its way).
 	virtual bool
 	hasCameras()

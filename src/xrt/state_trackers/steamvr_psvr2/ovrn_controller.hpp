@@ -9,7 +9,9 @@
 #pragma once
 
 #include "ovrn_device.hpp"
+#include "ovrn_hand_skeleton.hpp"
 
+#include <cstring>
 #include <vector>
 
 namespace ovrn {
@@ -19,7 +21,7 @@ class Controller final : public TrackedDevice
 public:
 	Controller(Backend *backend, Hand hand)
 	    : TrackedDevice(vr::TrackedDeviceClass_Controller, backend->controllerInfo(hand).serial), m_backend(backend),
-	      m_hand(hand), m_info(backend->controllerInfo(hand))
+	      m_hand(hand), m_info(backend->controllerInfo(hand)), m_skeleton(hand == Hand::Left)
 	{}
 
 	Hand
@@ -76,6 +78,22 @@ public:
 				vr::VRDriverInput()->UpdateScalarComponent(m_handles[i], m_values[i], 0.0);
 			}
 		}
+		updateSkeleton(n);
+	}
+
+	//! The finger state for the skeleton from this frame's input values (public for the tests).
+	skel::HandInput
+	handInput(size_t n) const
+	{
+		skel::HandInput in;
+		auto value = [&](int idx) { return idx >= 0 && (size_t)idx < n ? m_values[idx] : 0.0f; };
+		in.trigger = value(m_skelIdx.trigger);
+		in.trigger_touch = value(m_skelIdx.trigger_touch) > 0.5f || in.trigger > 0.0f;
+		in.grip = value(m_skelIdx.grip);
+		for (int idx : m_skelIdx.thumb) {
+			in.thumb_touch = in.thumb_touch || value(idx) > 0.5f;
+		}
+		return in;
 	}
 
 	void
@@ -112,12 +130,82 @@ protected:
 		if (!haptic_path.empty()) {
 			vr::VRDriverInput()->CreateHapticComponent(m_container, haptic_path.c_str(), &m_haptic);
 		}
+		setupSkeleton(descs);
 		log("ovrn: %s controller %s (%s), %zu inputs%s\n", m_hand == Hand::Left ? "left" : "right",
 		    m_info.model.c_str(), m_info.serial.c_str(), m_handles.size(), haptic_path.empty() ? "" : ", haptics");
 		return vr::VRInitError_None;
 	}
 
 private:
+	//! Which inputs drive the skeleton: trigger value and touch, grip, and the thumb's touches (stick, face buttons).
+	struct SkeletonInputs
+	{
+		int trigger = -1;
+		int trigger_touch = -1;
+		int grip = -1;
+		std::vector<int> thumb;
+	};
+
+	/*!
+	 * The hand skeleton, as Sony's driver has one per Sense (/input/skeleton/left|right, our profile's skeleton
+	 * inputs): partial tracking from the buttons (ALVR's bone tables, ovrn_hand_skeleton.hpp), both motion ranges
+	 * set before the first frame so a game never reads a skeleton without bones.
+	 */
+	void
+	setupSkeleton(const std::vector<InputDesc> &descs)
+	{
+		m_skelIdx = SkeletonInputs{};
+		for (size_t i = 0; i < descs.size(); i++) {
+			const std::string &p = descs[i].path;
+			const bool stick_touch = p == "/input/left_stick/touch" || p == "/input/right_stick/touch";
+			if (p == "/input/l2/value" || p == "/input/r2/value") {
+				m_skelIdx.trigger = (int)i;
+			} else if (p == "/input/l2/touch" || p == "/input/r2/touch") {
+				m_skelIdx.trigger_touch = (int)i;
+			} else if (p == "/input/l1/value" || p == "/input/r1/value") {
+				m_skelIdx.grip = (int)i;
+			} else if (stick_touch || p == "/input/square/touch" || p == "/input/triangle/touch" ||
+			           p == "/input/cross/touch" || p == "/input/circle/touch") {
+				m_skelIdx.thumb.push_back((int)i);
+			}
+		}
+		const bool left = m_hand == Hand::Left;
+		const vr::EVRInputError err = vr::VRDriverInput()->CreateSkeletonComponent(
+		    m_container, left ? "/input/skeleton/left" : "/input/skeleton/right",
+		    left ? "/skeleton/hand/left" : "/skeleton/hand/right", "/pose/raw", vr::VRSkeletalTracking_Partial,
+		    nullptr, 0, &m_skeletonHandle);
+		if (err != vr::VRInputError_None) {
+			m_skeletonHandle = vr::k_ulInvalidInputComponentHandle;
+			log("ovrn: %s hand skeleton not created (error %d)\n", left ? "left" : "right", (int)err);
+			return;
+		}
+		m_skeleton.update(skel::HandInput{});
+		submitSkeleton();
+		log("ovrn: %s hand skeleton (from trigger, grip and thumb touches)\n", left ? "left" : "right");
+	}
+
+	void
+	updateSkeleton(size_t n)
+	{
+		if (m_skeletonHandle == vr::k_ulInvalidInputComponentHandle) {
+			return;
+		}
+		m_skeleton.update(handInput(n));
+		submitSkeleton();
+	}
+
+	void
+	submitSkeleton()
+	{
+		vr::VRBoneTransform_t bones[skel::kBoneCount];
+		m_skeleton.pose(true, bones);
+		vr::VRDriverInput()->UpdateSkeletonComponent(m_skeletonHandle, vr::VRSkeletalMotionRange_WithController,
+		                                             bones, skel::kBoneCount);
+		m_skeleton.pose(false, bones);
+		vr::VRDriverInput()->UpdateSkeletonComponent(m_skeletonHandle, vr::VRSkeletalMotionRange_WithoutController,
+		                                             bones, skel::kBoneCount);
+	}
+
 	Backend *const m_backend;
 	const Hand m_hand;
 	const DeviceInfo m_info;
@@ -125,6 +213,9 @@ private:
 	std::vector<InputKind> m_kinds;
 	std::vector<float> m_values;
 	vr::VRInputComponentHandle_t m_haptic = vr::k_ulInvalidInputComponentHandle;
+	vr::VRInputComponentHandle_t m_skeletonHandle = vr::k_ulInvalidInputComponentHandle;
+	SkeletonInputs m_skelIdx;
+	skel::HandSkeleton m_skeleton;
 };
 
 } // namespace ovrn

@@ -244,6 +244,37 @@ struct Component
 };
 std::vector<Component> g_components; //!< handle = index + 1
 
+//! A skeleton component: its updates per motion range, and the first problem seen in a pose (empty: all valid).
+struct Skeleton
+{
+	PropertyContainerHandle_t container;
+	std::string path, skeleton_path;
+	int with_controller = 0, without_controller = 0;
+	std::string problem;
+};
+std::vector<Skeleton> g_skeletons; //!< handle = 100000 + index
+
+std::string
+bone_problem(const VRBoneTransform_t *t, uint32_t n)
+{
+	if (n != 31) {
+		return "bone count " + std::to_string(n);
+	}
+	for (uint32_t i = 0; i < n; i++) {
+		const float q = t[i].orientation.w * t[i].orientation.w + t[i].orientation.x * t[i].orientation.x +
+		                t[i].orientation.y * t[i].orientation.y + t[i].orientation.z * t[i].orientation.z;
+		if (!std::isfinite(q) || std::fabs(q - 1.0f) > 2e-3f) {
+			return "bone " + std::to_string(i) + " rotation";
+		}
+		for (int k = 0; k < 3; k++) {
+			if (!std::isfinite(t[i].position.v[k]) || std::fabs(t[i].position.v[k]) > 0.25f) {
+				return "bone " + std::to_string(i) + " position";
+			}
+		}
+	}
+	return {};
+}
+
 struct FakeInput : IVRDriverInput
 {
 	EVRInputError
@@ -270,8 +301,28 @@ struct FakeInput : IVRDriverInput
 	EVRInputError CreateScalarComponent(PropertyContainerHandle_t c, const char *n, VRInputComponentHandle_t *h, EVRScalarType, EVRScalarUnits) override { return add(c, n, 1, h); }
 	EVRInputError UpdateScalarComponent(VRInputComponentHandle_t h, float v, double) override { return set(h, v); }
 	EVRInputError CreateHapticComponent(PropertyContainerHandle_t c, const char *n, VRInputComponentHandle_t *h) override { return add(c, n, 2, h); }
-	EVRInputError CreateSkeletonComponent(PropertyContainerHandle_t, const char *, const char *, const char *, EVRSkeletalTrackingLevel, const VRBoneTransform_t *, uint32_t, VRInputComponentHandle_t *) override { return VRInputError_None; }
-	EVRInputError UpdateSkeletonComponent(VRInputComponentHandle_t, EVRSkeletalMotionRange, const VRBoneTransform_t *, uint32_t) override { return VRInputError_None; }
+	EVRInputError
+	CreateSkeletonComponent(PropertyContainerHandle_t c, const char *name, const char *skeleton, const char *, EVRSkeletalTrackingLevel, const VRBoneTransform_t *, uint32_t, VRInputComponentHandle_t *h) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_skeletons.push_back({c, name, skeleton});
+		*h = 100000 + g_skeletons.size() - 1;
+		return VRInputError_None;
+	}
+	EVRInputError
+	UpdateSkeletonComponent(VRInputComponentHandle_t h, EVRSkeletalMotionRange range, const VRBoneTransform_t *t, uint32_t n) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		if (h < 100000 || h - 100000 >= g_skeletons.size()) {
+			return VRInputError_InvalidHandle;
+		}
+		Skeleton &s = g_skeletons[h - 100000];
+		(range == VRSkeletalMotionRange_WithController ? s.with_controller : s.without_controller)++;
+		if (s.problem.empty()) {
+			s.problem = bone_problem(t, n);
+		}
+		return VRInputError_None;
+	}
 	EVRInputError CreatePoseComponent(PropertyContainerHandle_t, const char *, VRInputComponentHandle_t *) override { return VRInputError_None; }
 	EVRInputError UpdatePoseComponent(VRInputComponentHandle_t, const HmdMatrix34_t *, double) override { return VRInputError_None; }
 	EVRInputError CreateEyeTrackingComponent(PropertyContainerHandle_t, const char *, VRInputComponentHandle_t *) override { return VRInputError_None; }
@@ -568,6 +619,7 @@ main(int argc, char **argv)
 			g_props.clear();
 			g_eyeToHead.clear();
 			g_components.clear();
+			g_skeletons.clear();
 			g_events.clear();
 		}
 		unsetenv("DISABLE_STEAMVR_LINUX_FIXES");
@@ -806,6 +858,23 @@ main(int argc, char **argv)
 			}
 			check(n_inputs[0] == 3 && n_inputs[1] == 3 && n_haptic[0] == 1 && n_haptic[1] == 1,
 			      "each controller has its input components and a haptic component");
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				bool paths = g_skeletons.size() == 2, valid = true, every_frame = true;
+				for (const Skeleton &k : g_skeletons) {
+					const bool left = k.container == 1001;
+					paths = paths && k.path == (left ? "/input/skeleton/left" : "/input/skeleton/right") &&
+					        k.skeleton_path == (left ? "/skeleton/hand/left" : "/skeleton/hand/right");
+					valid = valid && k.problem.empty();
+					every_frame = every_frame && k.with_controller >= 41 && k.without_controller >= 41;
+					if (!k.problem.empty()) {
+						printf("    skeleton %s: %s\n", k.path.c_str(), k.problem.c_str());
+					}
+				}
+				check(paths, "each controller has a hand skeleton (/input/skeleton/left|right, as Sony's driver)");
+				check(valid, "every skeleton pose SteamVR gets has 31 valid bones");
+				check(every_frame, "both skeleton motion ranges are set at activation and every frame after");
+			}
 			check(trigger == 0.5f && trigger_updates >= 40 && stick_l == -1.0f && stick_r == 1.0f,
 			      "input values reach SteamVR every frame, per hand");
 			uint64_t universe1 = 0, universe_c = 0;
