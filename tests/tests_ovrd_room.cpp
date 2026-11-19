@@ -234,6 +234,50 @@ TEST_CASE("ovrd_room lowest point")
 	CHECK(ovrd_room_lowest_point(grip, outline, 3, 0.0f) == Approx(1.0f - 0.01f));
 }
 
+TEST_CASE("ovrd_room chaperone file: the driver's rectangle in the room universe")
+{
+	std::string dir = temp_dir();
+	std::string path = dir + "/chaperone_info.vrchap";
+	bool has_room = true;
+	std::string err;
+
+	// An undrawn room (seeded without a play area) gets the rectangle; it doesn't count as a drawn room.
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err));
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 3.0f));
+	CHECK_FALSE(has_room);
+	cJSON *doc = cJSON_Parse(slurp(path).c_str());
+	REQUIRE(doc != nullptr);
+	cJSON *u2 = find_universe(doc, "2");
+	REQUIRE(u2 != nullptr);
+	CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(u2, "collision_bounds")) == 4);
+	CHECK(cJSON_GetArrayItem(cJSON_GetObjectItem(u2, "play_area"), 0)->valuedouble == Catch::Approx(3.0));
+	cJSON_Delete(doc);
+
+	// Unchanged on a second run; a new size replaces the driver's own rectangle.
+	std::string before = slurp(path);
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 3.0f));
+	CHECK(slurp(path) == before);
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 2.5f));
+	CHECK_FALSE(has_room);
+	doc = cJSON_Parse(slurp(path).c_str());
+	u2 = find_universe(doc, "2");
+	CHECK(cJSON_GetArrayItem(cJSON_GetObjectItem(u2, "play_area"), 0)->valuedouble == Catch::Approx(2.5));
+
+	// A room drawn in Room Setup (SteamVR rewrites the entry without our mark) is never replaced.
+	cJSON_DeleteItemFromObject(u2, "monado_rectangle");
+	cJSON_ReplaceItemInObject(u2, "play_area", cJSON_Parse("[1.7,2.2]"));
+	char *text = cJSON_Print(doc);
+	FILE *f = fopen(path.c_str(), "w");
+	fputs(text, f);
+	fclose(f);
+	cJSON_free(text);
+	cJSON_Delete(doc);
+	before = slurp(path);
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 3.0f));
+	CHECK(has_room);
+	CHECK(slurp(path) == before);
+}
+
 TEST_CASE("ovrd_room chaperone file: fresh, existing room, idempotent, foreign files")
 {
 	std::string dir = temp_dir();

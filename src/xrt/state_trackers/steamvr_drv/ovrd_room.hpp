@@ -216,8 +216,17 @@ ovrd_room_chaperone_path(void);
  *    to draw in (without one SteamVR logs "Failed to update shared data" and Room Setup shows the devices as Off).
  * @p out_has_room is set when universe 2 already has a drawn room (a play area or collision bounds).
  */
+/*!
+ * @p room_size > 0: the room (universe 2) gets a square play area of that size from the driver, as ALVR gives SteamVR
+ * a rectangle instead of using Room Setup, unless a room was drawn there in Room Setup (a drawn room is never
+ * replaced). The driver's rectangle is marked ("monado_rectangle") so a new size replaces it.
+ */
 bool
-ovrd_room_prepare_chaperone(const std::string &path, float session_size, bool *out_has_room, std::string *out_error);
+ovrd_room_prepare_chaperone(const std::string &path,
+                            float session_size,
+                            bool *out_has_room,
+                            std::string *out_error,
+                            float room_size = 0.0f);
 
 //! Load the saved room, false if missing or invalid (version, finite numbers).
 bool

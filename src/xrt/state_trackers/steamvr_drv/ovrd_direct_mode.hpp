@@ -22,6 +22,7 @@
  *   R,host_ns,frame_id,display_ns,render px,py,pz,qx,qy,qz,qw,pred px,py,pz,qx,qy,qz,qw
  *     (layer 0 at submit, device space: the pose the game rendered with, and the device's own prediction for the
  *     frame's display time made now; analysis/shown_pose_error.py compares both with T)
+ *   U,host_ns,target_ns,px,py,pz,qx,qy,qz,qw   (every head pose handed to SteamVR; target_ns 0: not a frame pose)
  *   T,host_ns,px,py,pz,qx,qy,qz,qw   (the device's pose at host_ns: where the head was; every 2 ms from a sampler
  *     thread, plus at Present and PostPresent)
  */
@@ -37,19 +38,57 @@
 #include "math/m_api.h"
 #include "ovrd_steamvr_sync.hpp"
 #include "ovrd_vk_wait.hpp"
+#include "ovrd_frame_recorder.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdio>
 #include <functional>
 #include <map>
 #include <mutex>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <unistd.h>
+
+/*!
+ * One head pose per frame (direct mode): the pose for a display time is computed once, by whichever thread asks first
+ * (frame start or the 1 ms pose thread), and the same pose is returned for that display time afterwards, so the game's
+ * pose and SteamVR's layer label (mHmdPose) are the same pose.
+ */
+class OvrdFramePose
+{
+public:
+	/*!
+	 * The pose for @p display_ns; @p out_target gets the display time of the pose returned. A request for an older
+	 * display time than the cached one (a thread that read the target just before the clock thread moved it on) gets
+	 * the newer frame's pose, never a recomputed old one (audit 3: that sent SteamVR a stale pose after the new one).
+	 */
+	template <typename Compute>
+	vr::DriverPose_t
+	get(int64_t display_ns, Compute compute, int64_t *out_target = NULL)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (display_ns > m_target) {
+			m_pose = compute();
+			m_target = display_ns;
+		}
+		if (out_target != NULL) {
+			*out_target = m_target;
+		}
+		return m_pose;
+	}
+
+private:
+	std::mutex m_mutex;
+	int64_t m_target = 0;
+	vr::DriverPose_t m_pose = {};
+};
 
 class OvrdDirectMode : public vr::IVRDriverDirectModeComponent
 {
@@ -103,15 +142,62 @@ public:
 		return m_out.xcn != NULL;
 	}
 
+	//! A U row: the head pose handed to SteamVR (TrackedDevicePoseUpdated) for display time @p target_ns.
+	void
+	logSubmittedPose(int64_t target_ns, const vr::DriverPose_t &pose)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (target_ns != 0 && target_ns != m_hist[(m_histPos + kHist - 1) % kHist].target) {
+			// A new frame pose: remember it, to recognise it in SteamVR's labels (SubmitLayer).
+			Hist &h = m_hist[m_histPos];
+			h.target = target_ns;
+			for (int i = 0; i < 3; i++) {
+				h.p[i] = pose.vecPosition[i];
+			}
+			h.q[0] = pose.qRotation.x;
+			h.q[1] = pose.qRotation.y;
+			h.q[2] = pose.qRotation.z;
+			h.q[3] = pose.qRotation.w;
+			m_histPos = (m_histPos + 1) % kHist;
+			if (m_rec.on()) {
+				OvrdFrameRecorder::Rec r = {};
+				r.kind = 'U';
+				r.t0 = os_monotonic_get_ns();
+				r.t1 = target_ns;
+				for (int i = 0; i < 3; i++) {
+					r.f[i] = (float)h.p[i];
+				}
+				for (int i = 0; i < 4; i++) {
+					r.f[3 + i] = (float)h.q[i];
+				}
+				m_rec.push(r);
+			}
+		}
+		if (m_log != NULL) {
+			const vr::HmdQuaternion_t &q = pose.qRotation;
+			fprintf(m_log, "U,%lld,%lld,%.6f,%.6f,%.6f,%.7f,%.7f,%.7f,%.7f\n",
+			        (long long)os_monotonic_get_ns(), (long long)target_ns, pose.vecPosition[0],
+			        pose.vecPosition[1], pose.vecPosition[2], q.x, q.y, q.z, q.w);
+		}
+	}
+
 	/*!
-	 * Monado's display time of the frame SteamVR renders next (0 until the first frame): the frame a game starts
-	 * now is shown at it (99.9% of 5705 frames, 2026-11-18 10:01 session). For giving the game Monado's own head
-	 * prediction for that moment, as on the OpenXR path.
+	 * The display time the frame a game starts now will really be shown at (0 until the first frame): Monado's
+	 * display time of the current frame plus the measured delay of SteamVR's pipeline (m_delayNs, learned from every
+	 * game frame: when Monado showed it minus the time its pose was for). 2026-11-18 12:01: game frames were shown
+	 * 22.5 ms after the display time of the frame they started in.
 	 */
+	//! SteamVR's measured pipeline delay added to the pose target (for tests and logs).
+	int64_t
+	pipelineDelayNs() const
+	{
+		return m_delayNs.load();
+	}
+
 	int64_t
 	displayTarget() const
 	{
-		return m_displayAt.load();
+		return m_targetNs.load(); // fixed for the frame (set at its start), so one pose per frame
 	}
 
 	//! The eye-to-head poses changed (IPD dial).
@@ -157,8 +243,17 @@ public:
 				ovrd_log("Direct mode: can't wait for SteamVR's writes (%s), frames unsynchronized\n", why.c_str());
 			}
 		}
+		const char *frame_log = getenv("OVRD_FRAME_LOG");
+		if (frame_log != NULL && frame_log[0] != '\0') {
+			ovrd_log(m_rec.start(frame_log) ? "Direct mode: frame timing to %s (memory only on live threads)\n"
+			                                : "Direct mode: can't write %s\n",
+			         frame_log);
+		}
 		m_running = true;
 		m_vsyncThread = std::thread(&OvrdDirectMode::vsyncLoop, this);
+		if (m_out.xcn != NULL) {
+			m_frameThread = std::thread(&OvrdDirectMode::frameLoop, this);
+		}
 		if (m_log != NULL && check_head != NULL) {
 			// The reference for "where the head was" at any display time: the device's own pose every 2 ms.
 			m_truthThread = std::thread([this]() {
@@ -181,6 +276,11 @@ public:
 		if (m_running.exchange(false) && m_vsyncThread.joinable()) {
 			m_vsyncThread.join();
 		}
+		m_frameCv.notify_all();
+		if (m_frameThread.joinable()) {
+			m_frameThread.join();
+		}
+		m_rec.stop();
 		if (m_truthThread.joinable()) {
 			m_truthThread.join();
 		}
@@ -212,6 +312,8 @@ public:
 		*out = {};
 		Set set = {};
 		set.pid = unPid;
+		set.compositor = isCompositorPid(unPid);
+		set.uid = ++m_setUid;
 		set.desc = *desc;
 		// As ALVR: sampled + transfer source + input attachment, mutable format (sRGB views); no compute access,
 		// sRGB formats can't be storage images.
@@ -328,10 +430,44 @@ public:
 		float q[4];
 		matrix_to_quat(m, q);
 		struct xrt_pose world = {{q[0], q[1], q[2], q[3]}, {m.m[0][3], m.m[1][3], m.m[2][3]}};
+		// SteamVR labels an application's image with the frame pose current when it composes, one frame pose newer
+		// than the one the application drew with (2026-11-18 12:01: 92% of 432 turning frames, all identified
+		// exactly). Give Monado the one before it, so the re-warp starts from the pose the image was drawn with.
+		const struct xrt_pose label_device = world_to_device ? world_to_device(world) : world; // SteamVR's own
+		int64_t pose_target = 0, label_target = 0;
+		bool app_image = false;
+		{
+			auto it = m_handleToSet.find(perEye[0].hTexture);
+			app_image = it != m_handleToSet.end() && !m_sets[it->second].compositor;
+		}
+		const int k = findHistLocked(world);
+		if (k >= 0) {
+			label_target = m_hist[k].target;
+			const Hist &prev = m_hist[(k + kHist - 1) % kHist];
+			if (label_fix && app_image && prev.target != 0 && prev.target < m_hist[k].target) {
+				world = {{(float)prev.q[0], (float)prev.q[1], (float)prev.q[2], (float)prev.q[3]},
+				         {(float)prev.p[0], (float)prev.p[1], (float)prev.p[2]}};
+				pose_target = prev.target;
+				m_labelFixed++;
+			}
+		} else if (app_image) {
+			m_labelUnknown++;
+		}
+		if (m_rec.on()) {
+			OvrdFrameRecorder::Rec r = {};
+			r.kind = 'L';
+			r.t0 = now;
+			r.i = m_layers;
+			r.t1 = label_target;
+			r.t2 = pose_target;
+			r.flags = app_image ? 1 : 0;
+			m_rec.push(r);
+		}
 		struct xrt_pose device = world_to_device ? world_to_device(world) : world;
 		if (m_layers < kMaxLayers) {
 			Layer &L = m_layerBuf[m_layers];
 			L.head = device;
+			L.poseTarget = pose_target;
 			for (int e = 0; e < 2; e++) {
 				L.tex[e] = perEye[e].hTexture;
 				L.bounds[e] = perEye[e].bounds;
@@ -343,14 +479,12 @@ public:
 			struct xrt_space_relation rel = {};
 			const int64_t at = now + (int64_t)(perEye[0].flHmdPosePredictionTimeInSecondsFromNow * 1e9);
 			if (xrt_device_get_tracked_pose(check_head, XRT_INPUT_GENERIC_HEAD_POSE, at, &rel) == XRT_SUCCESS) {
-				struct xrt_vec3 d = {device.position.x - rel.pose.position.x,
-				                     device.position.y - rel.pose.position.y,
-				                     device.position.z - rel.pose.position.z};
+				const struct xrt_pose &lp = label_device;
+				struct xrt_vec3 d = {lp.position.x - rel.pose.position.x, lp.position.y - rel.pose.position.y,
+				                     lp.position.z - rel.pose.position.z};
 				err_mm = 1000.0f * sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
-				float dot = fabsf(device.orientation.x * rel.pose.orientation.x +
-				                  device.orientation.y * rel.pose.orientation.y +
-				                  device.orientation.z * rel.pose.orientation.z +
-				                  device.orientation.w * rel.pose.orientation.w);
+				float dot = fabsf(lp.orientation.x * rel.pose.orientation.x + lp.orientation.y * rel.pose.orientation.y +
+				                  lp.orientation.z * rel.pose.orientation.z + lp.orientation.w * rel.pose.orientation.w);
 				err_deg = 2.0f * acosf(fminf(1.0f, dot)) * 57.29578f;
 			}
 		}
@@ -375,46 +509,72 @@ public:
 		m_layers++;
 	}
 
+	/*!
+	 * Hands the frame to the frame thread (frameLoop) and returns at once: SteamVR's submit thread is never held
+	 * (ALVR PR #3425: holding it made vrcompositor's WaitForAcquire time out and render into the texture still being
+	 * read). Only the values the frame's GPU writes will signal are read here, as they must be read at Present.
+	 */
 	void
 	Present(vr::SharedTextureHandle_t syncTexture) override
 	{
 		logTruth();
-		// Wait until SteamVR's (and the app's) GPU writes into this frame's images are done, outside the lock.
-		int sync_state = 0;
-		int64_t sync_wait_ns = 0;
+		const int64_t t_in = os_monotonic_get_ns();
 		if (m_out.xcn != NULL && gpu_sync && m_vk.ready()) {
-			waitForWrites(&sync_state, &sync_wait_ns);
-			maybeCapture();
+			maybeCapture(); // opt-in (capture_after_s), blocks once
 		}
-		// The first frame (and one after a failed wait) waits for its Monado frame here, outside the lock.
-		if (m_out.xcn != NULL && !m_waited) {
-			waitFrame();
+		Pending p = {};
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			p.n = std::min(m_layers, kMaxLayers);
+			for (int l = 0; l < p.n; l++) {
+				p.layers[l] = m_layerBuf[l];
+			}
+		}
+		if (m_out.xcn != NULL && gpu_sync && m_vk.ready()) {
+			for (int l = 0; l < p.n; l++) {
+				for (int e = 0; e < 2; e++) {
+					const vr::SharedTextureHandle_t t = p.layers[l].tex[e];
+					bool seen = false;
+					for (int k = 0; k < p.nWaits; k++) {
+						seen = seen || p.waits[k].texture == t;
+					}
+					if (t == 0 || seen || p.nWaits >= kMaxWaits) {
+						continue;
+					}
+					Wait w = {};
+					w.texture = t;
+					w.sem = m_sync.semaphoreOf(t);
+					if (w.sem == 0 || !m_sync.value(w.sem, &w.value)) {
+						p.missing = true;
+						continue;
+					}
+					p.waits[p.nWaits++] = w;
+				}
+			}
+			p.sync = true;
 		}
 		std::lock_guard<std::mutex> lock(m_mutex);
 		const int64_t now = os_monotonic_get_ns();
-		bool submitted = false;
-		int64_t target_err = 0;
-		if (sync_state != 0) {
-			m_syncStates[sync_state]++;
-			if (sync_state == 1) {
-				m_syncWaitUs.push_back(sync_wait_ns / 1e3);
+		p.valid = true;
+		p.presentNs = now;
+		p.syncTexture = syncTexture;
+		p.layerCount = m_layers;
+		p.lastSubmitNs = m_lastSubmitNs;
+		p.predictS = m_lastPredictS;
+		if (m_out.xcn != NULL) {
+			if (m_pending.valid) {
+				// The frame thread didn't take the previous frame yet: this newer one replaces it.
+				m_replaced++;
+				logPresentLocked(m_pending, -1, 0, false, 0, 0);
+				OvrdFrameRecorder::Rec r = {};
+				r.kind = 'R';
+				r.t0 = m_pending.presentNs;
+				m_rec.push(r);
 			}
-		}
-		if (m_out.xcn != NULL && m_waited) {
-			// SteamVR's prediction target for this frame vs the time Monado shows it (measurement only).
-			if (m_layers > 0 && m_lastSubmitNs != 0) {
-				const int64_t target = m_lastSubmitNs + (int64_t)(m_lastPredictS * 1e9);
-				target_err = target - m_displayNs;
-				m_targetErrMs.push_back(target_err / 1e6);
-			}
-			submitted = submitLocked();
-			m_waited = false;
-			m_submitted += submitted ? 1 : 0;
-		}
-		if (m_log != NULL) {
-			fprintf(m_log, "P,%lld,%llu,%d,%lld,%lld,%d,%lld,%.1f,%d\n", (long long)now,
-			        (unsigned long long)syncTexture, m_layers, (long long)m_frameId, (long long)m_displayNs,
-			        submitted ? 1 : 0, (long long)target_err, sync_wait_ns / 1e3, sync_state);
+			m_pending = p;
+			m_frameCv.notify_one();
+		} else {
+			logPresentLocked(p, m_frameId, m_displayNs, false, 0, 0);
 		}
 		if (m_lastPresentNs != 0) {
 			m_presentGapsMs.push_back((now - m_lastPresentNs) / 1e6);
@@ -424,28 +584,53 @@ public:
 		m_frames++;
 		m_layerSum += m_layers;
 		m_layers = 0;
+		const int64_t call_ns = os_monotonic_get_ns() - t_in;
+		m_presentCallUs.push_back(call_ns / 1e3);
+		if (m_rec.on()) {
+			OvrdFrameRecorder::Rec r = {};
+			r.kind = 'P';
+			r.t0 = now;
+			r.layers = (uint8_t)std::min(p.layerCount, 255);
+			r.i = (int32_t)std::min<int64_t>(call_ns, INT32_MAX);
+			m_rec.push(r);
+		}
 		summaryLocked(now);
 	}
 
+	//! With Monado's compositor: holds until the next declared vsync (the clock thread sends the vsync events).
 	void
 	PostPresent(const Throttling_t *throttling) override
 	{
 		int64_t woke;
 		if (m_out.xcn != NULL) {
-			// Monado's compositor paces SteamVR: wait for the next frame's wake-up, then tell SteamVR a vsync
-			// happened so it starts rendering the frame for it.
-			waitFrame();
-			woke = os_monotonic_get_ns();
-			if (on_frame_start && m_waited) {
-				on_frame_start(m_displayAt.load());
+			// Hold SteamVR's submit thread until the next declared vsync (+ throttled frames), measured from the
+			// last declared one so a skipped tick doesn't lengthen it (ALVR's PaceAfterPresent); at most 2 periods.
+			const int64_t period = m_gridPeriodNs.load() > 0 ? m_gridPeriodNs.load() : m_periodNs;
+			const int64_t last = m_lastVsyncNs.load();
+			const int64_t now = os_monotonic_get_ns();
+			if (hold && last != 0) {
+				const uint32_t thr = throttling ? throttling->nFramesToThrottle : 0;
+				int64_t until = last + period * (1 + (int64_t)thr);
+				until = std::min(until, now + 2 * period);
+				if (until > now) {
+					os_nanosleep(until - now);
+				}
 			}
-			vr::VRServerDriverHost()->VsyncEvent(0.0);
+			woke = os_monotonic_get_ns();
 		} else {
 			// Hold SteamVR's compositor until the next tick of the display clock, as ALVR does: it then starts
 			// its next frame one display period after the last.
 			woke = waitNextTick();
 		}
 		logTruth();
+		if (m_rec.on()) {
+			OvrdFrameRecorder::Rec r = {};
+			r.kind = 'Q';
+			r.t0 = os_monotonic_get_ns();
+			r.i = throttling ? (int32_t)throttling->nFramesToThrottle : 0;
+			r.j = throttling ? (int32_t)throttling->nAdditionalFramesToPredict : 0;
+			m_rec.push(r);
+		}
 		if (m_log != NULL) {
 			std::lock_guard<std::mutex> lock(m_mutex);
 			fprintf(m_log, "Q,%lld,%u,%u,%lld\n", (long long)os_monotonic_get_ns(),
@@ -475,6 +660,9 @@ private:
 		int fds[3] = {-1, -1, -1};
 		uint32_t next = 0;
 		struct xrt_swapchain *xsc = NULL; //!< imported into Monado's compositor
+		bool compositor = false;          //!< created by vrcompositor (SteamVR draws it itself)
+		bool copied = false;              //!< xsc is Monado's own swapchain, SteamVR's images are copied into it
+		uint64_t uid = 0;                 //!< unique per set (copy image keys; pointers can be reused)
 	};
 
 	static constexpr int kMaxLayers = 8;
@@ -483,6 +671,31 @@ private:
 		struct xrt_pose head;          //!< SteamVR's render pose, in the device's space
 		vr::SharedTextureHandle_t tex[2];
 		vr::VRTextureBounds_t bounds[2];
+		int64_t poseTarget; //!< the display time of the frame pose given as its pose (0: SteamVR's label kept)
+	};
+	static constexpr int kMaxWaits = 2 * kMaxLayers;
+	struct Wait
+	{
+		vr::SharedTextureHandle_t texture;
+		uint64_t sem;
+		uint64_t value; //!< the value this frame's write signals (read at Present)
+	};
+	//! A presented frame, from Present to the frame thread.
+	struct Pending
+	{
+		bool valid;
+		Layer layers[kMaxLayers];
+		int n;          //!< layers kept
+		int layerCount; //!< layers SteamVR submitted
+		Wait waits[kMaxWaits];
+		int nWaits;
+		bool sync;    //!< GPU sync on
+		bool missing; //!< an image had no semaphore (yet)
+		int64_t presentNs;
+		vr::SharedTextureHandle_t syncTexture;
+		int64_t lastSubmitNs;
+		float predictS;
+		int dstIndex[kMaxLayers][2]; //!< Monado swapchain image the copy went to (-1: SteamVR's image itself)
 	};
 
 	//! Import a new set's three images into Monado's compositor as one swapchain.
@@ -517,13 +730,33 @@ private:
 		if (pair != 0) {
 			info.formats[info.format_count++] = pair;
 		}
+		if (copy_mode && m_vk.ready()) {
+			// Monado's own swapchain: SteamVR's images are copied into it each frame with the GPU synchronisation
+			// the hardware needs (OvrdVkWait::copy), as Monado's own Vulkan clients hand images over.
+			info.bits = (enum xrt_swapchain_usage_bits)(info.bits | XRT_SWAPCHAIN_USAGE_TRANSFER_DST);
+			xrt_result_t cret;
+			{
+				std::lock_guard<std::mutex> comp_lock(m_compMutex);
+				cret = xrt_comp_create_swapchain(&m_out.xcn->base, &info, &set.xsc);
+			}
+			set.copied = cret == XRT_SUCCESS && set.xsc != NULL;
+			ovrd_log("Direct mode: Monado swapchain for copies (format %u %ux%u): %s (%d)\n", set.desc.nFormat,
+			         set.desc.nWidth, set.desc.nHeight, set.copied ? "ok" : "FAILED", (int)cret);
+			if (set.copied) {
+				return;
+			}
+		}
 		struct xrt_image_native natives[3] = {};
 		for (int i = 0; i < 3; i++) {
 			natives[i].handle = dup(set.fds[i]); // the compositor takes ownership
 			natives[i].size = 0;
 			natives[i].use_dedicated_allocation = true;
 		}
-		xrt_result_t xret = xrt_comp_import_swapchain(&m_out.xcn->base, &info, natives, 3, &set.xsc);
+		xrt_result_t xret;
+		{
+			std::lock_guard<std::mutex> comp_lock(m_compMutex);
+			xret = xrt_comp_import_swapchain(&m_out.xcn->base, &info, natives, 3, &set.xsc);
+		}
 		if (xret != XRT_SUCCESS) {
 			for (int i = 0; i < 3; i++) {
 				close(natives[i].handle);
@@ -556,46 +789,28 @@ private:
 	}
 
 	/*!
-	 * Waits until every image of the frame being presented has been written (SteamVR's per-texture timeline
-	 * semaphore reaches the value of its last submitted write). @p state: 1 all done, 2 a wait timed out, 3 an image
-	 * had no semaphore (yet), 4 import/wait error. Bounded by one frame period in total so a stuck signal can't stall
-	 * SteamVR.
+	 * Waits until every image of @p p has been written (SteamVR's per-texture timeline semaphore reaches the value
+	 * read at Present). @p state: 1 all done, 2 a wait timed out, 3 an image had no semaphore (yet), 4 import/wait
+	 * error. Bounded by one frame period in total. Runs on the frame thread, never on SteamVR's.
 	 */
 	void
-	waitForWrites(int *state, int64_t *waited_ns)
+	waitForWrites(const Pending &p, int *state, int64_t *waited_ns)
 	{
-		std::vector<vr::SharedTextureHandle_t> textures;
-		{
-			std::lock_guard<std::mutex> lock(m_mutex);
-			for (int l = 0; l < std::min(m_layers, kMaxLayers); l++) {
-				for (int e = 0; e < 2; e++) {
-					vr::SharedTextureHandle_t t = m_layerBuf[l].tex[e];
-					if (t != 0 && std::find(textures.begin(), textures.end(), t) == textures.end()) {
-						textures.push_back(t);
-					}
-				}
-			}
-		}
 		const int64_t t0 = os_monotonic_get_ns();
-		int result = 1;
-		for (vr::SharedTextureHandle_t t : textures) {
-			uint64_t sem = m_sync.semaphoreOf(t);
-			uint64_t value = 0;
-			if (sem == 0 || !m_sync.value(sem, &value)) {
-				result = std::max(result, 3);
-				continue;
-			}
-			// One frame period in total for all images, so a stuck write costs SteamVR at most one frame.
+		int result = p.missing ? 3 : 1;
+		for (int k = 0; k < p.nWaits; k++) {
+			const Wait &w = p.waits[k];
 			const int64_t left = std::max<int64_t>(0, t0 + m_periodNs - (int64_t)os_monotonic_get_ns());
+			const uint64_t sem = w.sem;
 			OvrdVkWait::Result r =
-			    m_vk.wait(sem, value, (uint64_t)left, [this, sem]() { return m_sync.dupFd(sem); });
+			    m_vk.wait(sem, w.value, (uint64_t)left, [this, sem]() { return m_sync.dupFd(sem); });
 			if (r == OvrdVkWait::kTimeout) {
 				result = std::max(result, 2);
 			} else if (r == OvrdVkWait::kError) {
 				result = 4;
 			}
 		}
-		*state = textures.empty() ? 0 : result;
+		*state = (!p.sync || (p.nWaits == 0 && !p.missing)) ? 0 : result;
 		*waited_ns = os_monotonic_get_ns() - t0;
 	}
 
@@ -648,46 +863,271 @@ private:
 		}
 	}
 
-	//! Monado's next frame: blocks until its wake-up time.
+	/*!
+	 * The hand-over thread: gives SteamVR's newest frame to Monado. Per Monado frame: wait for its wake-up, take the
+	 * newest presented frame (waiting for one at most until handoff_margin before its display time), wait for its GPU
+	 * writes, copy it (copyLayers) and commit it. It doesn't pace SteamVR: Monado's app pacing moves this thread's
+	 * wake-up with its own measured frame times (u_pacing_app.c), so SteamVR's vsync events and poses come from the
+	 * steady clock thread (clockLoop) instead. A Monado frame without a new SteamVR frame is discarded; Monado keeps
+	 * showing the last one, re-warped.
+	 */
 	void
-	waitFrame()
-	{
-		int64_t id = 0, display = 0, period = 0;
-		xrt_result_t xret = xrt_comp_wait_frame(&m_out.xcn->base, &id, &display, &period);
-		std::lock_guard<std::mutex> lock(m_mutex);
-		if (xret != XRT_SUCCESS) {
-			m_waited = false;
-			m_waitFails++;
-			return;
-		}
-		m_frameId = id;
-		m_displayNs = display;
-		m_displayAt = display;
-		m_monadoPeriodNs = period;
-		m_waited = true;
-	}
-
-	//! Hand the frame's layers to Monado's compositor (the frame waited for last).
-	bool
-	submitLocked()
+	frameLoop()
 	{
 		struct xrt_compositor *xc = &m_out.xcn->base;
-		if (xrt_comp_begin_frame(xc, m_frameId) != XRT_SUCCESS) {
+		while (m_running) {
+			int64_t id = 0, display = 0, period = 0;
+			xrt_result_t xret = xrt_comp_wait_frame(xc, &id, &display, &period);
+			const int64_t woke = os_monotonic_get_ns();
+			if (xret != XRT_SUCCESS) {
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					m_waitFails++;
+				}
+				os_nanosleep(m_periodNs);
+				continue;
+			}
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				m_frameId = id;
+				m_displayNs = display;
+				m_monadoPeriodNs = period;
+			}
+			// The display grid for the clock thread (Monado's display times are on its vblank grid).
+			if (period > 0) {
+				m_gridPeriodNs = period;
+			}
+			m_gridAnchorNs = display;
+			m_displayAt = display;
+			const int64_t vsync_ns = m_lastVsyncNs.load();
+			if (test_handover_delay_ns > 0) {
+				os_nanosleep(test_handover_delay_ns); // tests: a slow hand-over must not move SteamVR's clock
+			}
+			// The newest presented frame; if none is waiting, wait for one until handoff_margin before display.
+			const int64_t deadline = display - handoff_margin_ns;
+			Pending p = {};
+			{
+				std::unique_lock<std::mutex> lock(m_mutex);
+				const auto until = std::chrono::steady_clock::now() +
+				                   std::chrono::nanoseconds(std::max<int64_t>(0, deadline - os_monotonic_get_ns()));
+				m_frameCv.wait_until(lock, until, [this]() { return m_pending.valid || !m_running; });
+				if (m_pending.valid) {
+					p = m_pending;
+					m_pending.valid = false;
+				}
+			}
+			if (!p.valid) {
+				discardFrame(id);
+				std::lock_guard<std::mutex> lock(m_mutex);
+				m_missed++;
+				recordFrameLocked(woke, id, display, vsync_ns, p, 0, 0, 4);
+				continue;
+			}
+			int sync_state = 0;
+			int64_t sync_wait_ns = 0;
+			if (p.sync) {
+				waitForWrites(p, &sync_state, &sync_wait_ns);
+			}
+			if (sync_state == 2 || sync_state == 4) {
+				// A write that didn't finish in time (or a failed wait) would be shown half drawn: don't show the
+				// frame, Monado keeps the last one (audit 9). Without a semaphore yet (sync 3) there is nothing to
+				// wait on: shown as is (a mitigation, as before).
+				discardFrame(id);
+				std::lock_guard<std::mutex> lock(m_mutex);
+				m_syncStates[sync_state]++;
+				m_syncDropped++;
+				logPresentLocked(p, id, display, false, 0, sync_wait_ns, sync_state);
+				recordFrameLocked(woke, id, display, vsync_ns, p, sync_wait_ns, sync_state, 16);
+				continue;
+			}
+			if (!copyLayers(p, sync_state)) {
+				discardFrame(id);
+				std::lock_guard<std::mutex> lock(m_mutex);
+				m_copyFails++;
+				logPresentLocked(p, id, display, false, 0, sync_wait_ns, sync_state);
+				recordFrameLocked(woke, id, display, vsync_ns, p, sync_wait_ns, sync_state, 8);
+				continue;
+			}
+			// Build the frame under m_mutex, but hand it to Monado without it: layer_commit renders the whole frame
+			// synchronously (comp_compositor.c), which must not block SteamVR's Present, the clock thread's pose
+			// and vsync, or the pose thread (audit 1).
+			Prepared prep;
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				prepareLocked(p, id, display, &prep);
+			}
+			const bool submitted = submitPrepared(prep, id, display);
+			releasePrepared(&prep);
+			std::lock_guard<std::mutex> lock(m_mutex);
+			int64_t target_err = 0;
+			if (p.layerCount > 0 && p.lastSubmitNs != 0) {
+				// SteamVR's prediction target for this frame vs the time Monado shows it (measurement only).
+				const int64_t target = p.lastSubmitNs + (int64_t)(p.predictS * 1e9);
+				target_err = target - display;
+				m_targetErrMs.push_back(target_err / 1e6);
+			}
+			if (sync_state != 0) {
+				m_syncStates[sync_state]++;
+				if (sync_state == 1) {
+					m_syncWaitUs.push_back(sync_wait_ns / 1e3);
+				}
+			}
+			m_submitted += submitted ? 1 : 0;
+			if (submitted && p.n > 0 && p.layers[0].poseTarget != 0) {
+				// When this image is shown minus the time its pose was for: steer the pose target onto it.
+				const int64_t err = display - p.layers[0].poseTarget;
+				m_delayErrMs.push_back(err / 1e6);
+				m_recentErrMs.push_back(err / 1e6);
+				if (m_recentErrMs.size() > 30) {
+					m_recentErrMs.erase(m_recentErrMs.begin());
+				}
+				// Steer by the median of the last 9 errors (a single mislabelled frame can't jolt the target), a
+				// quarter of it per frame: converges in ~10 frames (the old err/20 with a 0.25 ms cap per frame took
+				// ~20 s at 90 Hz). The errors were measured against targets older than the latest correction, so the
+				// window restarts after each step to avoid steering twice on the same error.
+				m_steerErrs.push_back(err);
+				if (m_steerErrs.size() >= 9) {
+					std::vector<int64_t> v = m_steerErrs;
+					std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+					const int64_t period = m_gridPeriodNs.load() > 0 ? m_gridPeriodNs.load() : m_periodNs;
+					const int64_t med = std::max<int64_t>(-2 * period, std::min<int64_t>(2 * period, v[v.size() / 2]));
+					const int64_t cap = 6 * period; // at most 6 display periods
+					m_delayNs = std::max<int64_t>(0, std::min<int64_t>(cap, m_delayNs.load() + med / 2));
+					m_steerErrs.clear();
+				}
+			}
+			logPresentLocked(p, id, display, submitted, target_err, sync_wait_ns, sync_state);
+			recordFrameLocked(woke, id, display, vsync_ns, p, sync_wait_ns, sync_state, submitted ? 1 : 0);
+		}
+	}
+
+	//! F row (OVRD_FRAME_LOG): one Monado frame as the frame thread handled it.
+	void
+	recordFrameLocked(int64_t woke,
+	                  int64_t id,
+	                  int64_t display,
+	                  int64_t vsync_ns,
+	                  const Pending &p,
+	                  int64_t wait_ns,
+	                  int sync_state,
+	                  int flags)
+	{
+		if (!m_rec.on()) {
+			return;
+		}
+		OvrdFrameRecorder::Rec r = {};
+		r.kind = 'F';
+		r.t0 = woke;
+		r.t1 = id;
+		r.t2 = display;
+		r.t3 = vsync_ns;
+		r.t4 = p.valid ? p.presentNs : 0;
+		r.i = (int32_t)(wait_ns / 1000);
+		r.sync = (int8_t)sync_state;
+		r.flags = (uint8_t)flags;
+		r.layers = (uint8_t)(p.valid ? std::min(p.layerCount, 255) : 0);
+		uint64_t *h[2] = {&r.h0, &r.h1};
+		for (int l = 0; l < 2 && l < p.n; l++) {
+			auto it = m_handleToSet.find(p.layers[l].tex[0]);
+			*h[l] = it != m_handleToSet.end() ? it->second : 0;
+		}
+		m_rec.push(r);
+	}
+
+	//! P row for a presented frame (@p frame_id -1: replaced by a newer frame before it was shown).
+	void
+	logPresentLocked(const Pending &p,
+	                 int64_t frame_id,
+	                 int64_t display,
+	                 bool submitted,
+	                 int64_t target_err,
+	                 int64_t sync_wait_ns,
+	                 int sync_state = 0)
+	{
+		if (m_log != NULL) {
+			fprintf(m_log, "P,%lld,%llu,%d,%lld,%lld,%d,%lld,%.1f,%d\n", (long long)p.presentNs,
+			        (unsigned long long)p.syncTexture, p.layerCount, (long long)frame_id, (long long)display,
+			        submitted ? 1 : 0, (long long)target_err, sync_wait_ns / 1e3, sync_state);
+		}
+	}
+
+	//! Tells Monado frame @p frame_id won't be submitted (it keeps showing the last one).
+	void
+	discardFrame(int64_t frame_id)
+	{
+		std::lock_guard<std::mutex> comp_lock(m_compMutex);
+		struct xrt_compositor *xc = &m_out.xcn->base;
+		if (xrt_comp_begin_frame(xc, frame_id) == XRT_SUCCESS) {
+			xrt_comp_discard_frame(xc, frame_id);
+		}
+	}
+
+	//! A frame ready for Monado: its layers with references to their swapchains (built under m_mutex).
+	struct Prepared
+	{
+		int n = 0;
+		struct xrt_layer_data d[kMaxLayers];
+		struct xrt_swapchain *xsc[kMaxLayers][XRT_MAX_VIEWS];
+	};
+
+	//! Hands @p prep to Monado as frame @p frame_id (without m_mutex). Nothing to show: the frame is discarded, so
+	//! Monado keeps showing the last one instead of an empty (black) frame (audit 8).
+	bool
+	submitPrepared(const Prepared &prep, int64_t frame_id, int64_t display_ns)
+	{
+		std::lock_guard<std::mutex> comp_lock(m_compMutex);
+		struct xrt_compositor *xc = &m_out.xcn->base;
+		if (xrt_comp_begin_frame(xc, frame_id) != XRT_SUCCESS) {
+			return false;
+		}
+		if (prep.n == 0) {
+			xrt_comp_discard_frame(xc, frame_id);
 			return false;
 		}
 		struct xrt_layer_frame_data fd = {};
-		fd.frame_id = m_frameId;
-		fd.display_time_ns = m_displayNs;
+		fd.frame_id = frame_id;
+		fd.display_time_ns = display_ns;
 		fd.env_blend_mode = XRT_BLEND_MODE_OPAQUE;
-		xrt_comp_layer_begin(xc, &fd);
+		if (xrt_comp_layer_begin(xc, &fd) != XRT_SUCCESS) {
+			xrt_comp_discard_frame(xc, frame_id);
+			return false;
+		}
 		int shown = 0;
-		for (int l = 0; l < std::min(m_layers, kMaxLayers); l++) {
-			const Layer &L = m_layerBuf[l];
+		for (int l = 0; l < prep.n; l++) {
+			struct xrt_swapchain *xsc[XRT_MAX_VIEWS] = {prep.xsc[l][0], prep.xsc[l][1]};
+			if (xrt_comp_layer_projection(xc, m_out.head, xsc, &prep.d[l]) == XRT_SUCCESS) {
+				shown++;
+			}
+		}
+		// Layers already given can't be taken back: commit even if one was refused.
+		return xrt_comp_layer_commit(xc, XRT_GRAPHICS_SYNC_HANDLE_INVALID) == XRT_SUCCESS && shown > 0;
+	}
+
+	void
+	releasePrepared(Prepared *prep)
+	{
+		std::lock_guard<std::mutex> comp_lock(m_compMutex);
+		for (int l = 0; l < prep->n; l++) {
+			for (int e = 0; e < 2; e++) {
+				xrt_swapchain_reference(&prep->xsc[l][e], NULL);
+			}
+		}
+		prep->n = 0;
+	}
+
+	//! Builds @p prep from @p p's layers (references the swapchains so a set destroyed meanwhile stays valid).
+	void
+	prepareLocked(const Pending &p, int64_t frame_id, int64_t display_ns, Prepared *prep)
+	{
+		prep->n = 0;
+		for (int l = 0; l < std::min(p.n, max_layers); l++) {
+			const Layer &L = p.layers[l];
 			struct xrt_swapchain *xsc[XRT_MAX_VIEWS] = {};
 			struct xrt_layer_data d = {};
+			bool flip[2] = {false, false};
 			d.type = XRT_LAYER_PROJECTION;
 			d.name = XRT_INPUT_GENERIC_HEAD_POSE;
-			d.timestamp = m_displayNs;
+			d.timestamp = display_ns;
 			// SteamVR's first layer is the scene, later ones (dashboard, overlays) are blended over it.
 			d.flags = l > 0 ? XRT_LAYER_COMPOSITION_BLEND_TEXTURE_SOURCE_ALPHA_BIT
 			                : (enum xrt_layer_composition_flags)0;
@@ -708,11 +1148,18 @@ private:
 						index = i;
 					}
 				}
+				if (set.copied) {
+					if (p.dstIndex[l][e] < 0) {
+						ok = false; // not copied this frame
+						break;
+					}
+					index = (uint32_t)p.dstIndex[l][e];
+				}
 				xsc[e] = set.xsc;
 				vr::VRTextureBounds_t b = L.bounds[e];
 				if (b.vMin > b.vMax) {
 					std::swap(b.vMin, b.vMax);
-					d.flip_y = true;
+					flip[e] = true;
 				}
 				struct xrt_layer_projection_view_data &v = d.proj.v[e];
 				v.sub.image_index = index;
@@ -724,26 +1171,37 @@ private:
 				v.fov = m_out.fov[e];
 				math_pose_transform(&L.head, &m_out.eye_in_head[e], &v.pose);
 			}
+			// flip_y is per layer in Monado, bounds are per eye in SteamVR (audit 12).
+			if (ok && flip[0] != flip[1]) {
+				if (!m_flipWarned) {
+					ovrd_log("Direct mode: a layer flips one eye but not the other; not shown\n");
+					m_flipWarned = true;
+				}
+				ok = false;
+			}
+			d.flip_y = flip[0];
 			if (!ok) {
 				continue;
 			}
 			if (l == 0 && m_log != NULL) {
 				struct xrt_space_relation pred = {};
-				xrt_device_get_tracked_pose(m_out.head, XRT_INPUT_GENERIC_HEAD_POSE, m_displayNs, &pred);
+				xrt_device_get_tracked_pose(m_out.head, XRT_INPUT_GENERIC_HEAD_POSE, display_ns, &pred);
 				const struct xrt_pose &r = L.head;
 				const struct xrt_pose &q = pred.pose;
 				fprintf(m_log,
 				        "R,%lld,%lld,%lld,%.6f,%.6f,%.6f,%.7f,%.7f,%.7f,%.7f,%.6f,%.6f,%.6f,%.7f,%.7f,%.7f,%.7f\n",
-				        (long long)os_monotonic_get_ns(), (long long)m_frameId, (long long)m_displayNs,
+				        (long long)os_monotonic_get_ns(), (long long)frame_id, (long long)display_ns,
 				        r.position.x, r.position.y, r.position.z, r.orientation.x, r.orientation.y,
 				        r.orientation.z, r.orientation.w, q.position.x, q.position.y, q.position.z,
 				        q.orientation.x, q.orientation.y, q.orientation.z, q.orientation.w);
 			}
-			if (xrt_comp_layer_projection(xc, m_out.head, xsc, &d) == XRT_SUCCESS) {
-				shown++;
+			const int k = prep->n++;
+			prep->d[k] = d;
+			for (int e = 0; e < 2; e++) {
+				prep->xsc[k][e] = NULL;
+				xrt_swapchain_reference(&prep->xsc[k][e], xsc[e]);
 			}
 		}
-		return xrt_comp_layer_commit(xc, XRT_GRAPHICS_SYNC_HANDLE_INVALID) == XRT_SUCCESS && shown > 0;
 	}
 
 	void
@@ -762,7 +1220,17 @@ private:
 				close(it->second.fds[i]);
 			}
 		}
-		xrt_swapchain_reference(&it->second.xsc, NULL);
+		if (it->second.copied) {
+			std::vector<uint64_t> dst;
+			for (uint64_t i = 0; i < 3; i++) {
+				dst.push_back(dstKey(it->second.uid, (uint32_t)i));
+			}
+			m_vk.forgetImages(std::vector<uint64_t>(it->second.handles, it->second.handles + 3), dst);
+		}
+		{
+			std::lock_guard<std::mutex> comp_lock(m_compMutex);
+			xrt_swapchain_reference(&it->second.xsc, NULL);
+		}
 		std::vector<uint64_t> textures(it->second.handles, it->second.handles + 3);
 		m_vk.forget(m_sync.forget(textures));
 		m_sets.erase(it);
@@ -781,16 +1249,64 @@ private:
 
 	/*!
 	 * Tells SteamVR about each vsync of the steady display clock (Prop_DriverDirectModeSendsVsyncEvents_Bool).
-	 * With Monado's compositor, PostPresent sends them paced by Monado's frames; this clock then only runs while
-	 * no frame came for 100 ms (before SteamVR's first frame, or when it stalls), so SteamVR never waits forever
-	 * for a vsync to start a frame.
+	 * With Monado's compositor, the frame thread sends them paced by Monado's frames; this clock then only runs
+	 * while that thread sent none for 100 ms, so SteamVR never waits forever for a vsync to start a frame.
 	 */
+	/*!
+	 * SteamVR's vsync clock with Monado's compositor (Valve's driver direct mode sequence, as ALVR's vsync.rs): a
+	 * steady grid on Monado's display timing that doesn't follow the frames. Each declared vsync V is
+	 * vsync_lead_ns before a Monado display time; at V - running_start_ns ("running start") the head pose for the
+	 * display time the frame SteamVR starts now will be shown at is submitted, then VsyncEvent with the time until V.
+	 */
+	void
+	clockLoop()
+	{
+		while (m_running) {
+			const int64_t period = m_gridPeriodNs.load() > 0 ? m_gridPeriodNs.load() : m_periodNs;
+			const int64_t anchor = m_gridAnchorNs.load();
+			const int64_t now = os_monotonic_get_ns();
+			int64_t v;
+			if (anchor == 0) {
+				v = now + running_start_ns + period; // no Monado frame yet: a provisional grid
+			} else {
+				const int64_t base = anchor - vsync_lead_ns;
+				// The first grid vsync whose running start is after now: floor division, also when base is ahead
+				// of now (truncation skipped a vsync there, audit 6).
+				const int64_t x = now + running_start_ns - base;
+				const int64_t n = (x >= 0 ? x / period : -((-x + period - 1) / period)) + 1;
+				v = base + n * period;
+			}
+			const int64_t fire = v - running_start_ns;
+			if (fire > now) {
+				os_nanosleep(fire - now);
+			}
+			if (!m_running) {
+				break;
+			}
+			if (m_delayNs.load() == 0 && anchor != 0) {
+				m_delayNs = vsync_lead_ns + period; // first guess; then learned from when frames are shown
+			}
+			m_targetNs = v + m_delayNs.load();
+			if (on_frame_start) {
+				on_frame_start(displayTarget());
+			}
+			const int64_t t = os_monotonic_get_ns();
+			vr::VRServerDriverHost()->VsyncEvent((double)(v - t) / 1e9);
+			m_lastVsyncNs = v;
+			m_lastFrameVsyncNs = t;
+		}
+	}
+
 	void
 	vsyncLoop()
 	{
+		if (m_out.xcn != NULL) {
+			clockLoop();
+			return;
+		}
 		while (m_running) {
 			waitNextTick();
-			if (m_out.xcn != NULL && os_monotonic_get_ns() - m_lastPresentAt.load() < 100000000LL) {
+			if (m_out.xcn != NULL && os_monotonic_get_ns() - m_lastFrameVsyncNs.load() < 100000000LL) {
 				continue;
 			}
 			vr::VRServerDriverHost()->VsyncEvent(0.0);
@@ -820,14 +1336,27 @@ private:
 		         "ms; pose predicted median %.2f (%.2f-%.2f) ms ahead; %zu image sets; shown %d, wait failures %d; "
 		         "pose vs device median %.1f mm / %.2f deg, p99 %.1f mm / %.2f deg; %d clock vsyncs; SteamVR's "
 		         "target - display median %+.2f (%+.2f..%+.2f) ms; GPU sync: %d waited (median %.0f us, p99 %.0f "
-		         "us), %d timed out, %d without semaphore, %d errors\n",
+		         "us), %d timed out, %d without semaphore, %d errors; Present call median %.0f us, max %.0f us; %d "
+		         "frames replaced, %d Monado frames without one; labels corrected %d, unknown %d; pose target delay "
+		         "%.2f ms, shown - pose time median %+.2f (p10 %+.2f, p90 %+.2f) ms; GPU copy median %.0f us, p99 %.0f "
+		         "us, %d failed\n",
 		         secs, m_frames, m_frames / secs, m_frames ? (double)m_layerSum / m_frames : 0.0,
 		         pct(m_presentGapsMs, 0.5), pct(m_presentGapsMs, 0.99), pct(pred_ms, 0.5), pct(pred_ms, 0.01),
 		         pct(pred_ms, 0.99), m_sets.size(), m_submitted, m_waitFails, pct(m_errMm, 0.5),
 		         pct(m_errDeg, 0.5), pct(m_errMm, 0.99), pct(m_errDeg, 0.99), m_clockVsyncs.exchange(0),
 		         pct(m_targetErrMs, 0.5), pct(m_targetErrMs, 0.01), pct(m_targetErrMs, 0.99), m_syncStates[1],
 		         pct(m_syncWaitUs, 0.5), pct(m_syncWaitUs, 0.99), m_syncStates[2], m_syncStates[3],
-		         m_syncStates[4]);
+		         m_syncStates[4], pct(m_presentCallUs, 0.5), pct(m_presentCallUs, 1.0), m_replaced, m_missed,
+		         m_labelFixed, m_labelUnknown, m_delayNs.load() / 1e6, pct(m_delayErrMs, 0.5), pct(m_delayErrMs, 0.1),
+		         pct(m_delayErrMs, 0.9), pct(m_copyUs, 0.5), pct(m_copyUs, 0.99), m_copyFails);
+		m_copyUs.clear();
+		m_copyFails = 0;
+		m_labelFixed = 0;
+		m_labelUnknown = 0;
+		m_delayErrMs.clear();
+		m_presentCallUs.clear();
+		m_replaced = 0;
+		m_missed = 0;
 		m_targetErrMs.clear();
 		m_syncWaitUs.clear();
 		for (int &c : m_syncStates) {
@@ -922,7 +1451,283 @@ private:
 	// Output to Monado's compositor
 	Output m_out;
 	Layer m_layerBuf[kMaxLayers];
-	bool m_waited = false; //!< a Monado frame was waited for and not submitted yet
-	int64_t m_frameId = -1;
+	int64_t m_frameId = -1; //!< the frame thread's current Monado frame
 	int64_t m_displayNs = 0;
+	std::thread m_frameThread;
+	std::condition_variable m_frameCv;
+	Pending m_pending = {};              //!< the newest presented frame not taken by the frame thread yet
+	std::atomic<int64_t> m_lastFrameVsyncNs{0};
+	int m_replaced = 0;                  //!< presented frames replaced before the frame thread took them
+	int m_missed = 0;                    //!< Monado frames SteamVR delivered no frame for in time
+	std::vector<double> m_presentCallUs; //!< time spent in Present (SteamVR's thread)
+	OvrdFrameRecorder m_rec;             //!< OVRD_FRAME_LOG
+	std::vector<double> m_copyUs;        //!< GPU copy time per frame
+	int m_copyFails = 0;
+	int m_syncDropped = 0; //!< frames not shown because their write didn't finish in time
+	uint64_t m_lastDstKey = 0;           //!< for tests: the last copy destination of layer 0's left eye
+	uint64_t m_lastSrcKey = 0;           //!< and its source (SteamVR's image)
+	uint64_t m_setUid = 0;
+	bool m_flipWarned = false;
+	std::mutex m_compMutex;              //!< serializes calls into Monado's compositor (never held with m_mutex
+	                                     //!< taken after it: m_mutex -> m_compMutex only)
+
+public:
+	//! OVRD_DIRECT_MODE_COPY (default on): copy SteamVR's images into Monado's own swapchains (see importLocked).
+	bool copy_mode = true;
+
+	//! For tests: the first pixel (RGBA8) of the image Monado was last given for layer 0's left eye.
+	bool
+	readLastOutputPixel(uint8_t out[4])
+	{
+		uint64_t key;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			key = m_lastDstKey;
+		}
+		return key != 0 && m_vk.readFirstPixel(key, out);
+	}
+
+	//! For tests: the first pixel of SteamVR's image that was copied into it.
+	bool
+	readLastSourcePixel(uint8_t out[4])
+	{
+		uint64_t key;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			key = m_lastSrcKey;
+		}
+		return key != 0 && m_vk.readFirstSourcePixel(key, out);
+	}
+
+	//! For tests: the median of the last shown - pose time errors (ms), NAN if none.
+	double
+	recentDelayErrMs()
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		std::vector<double> v(m_recentErrMs.begin(), m_recentErrMs.end());
+		if (v.empty()) {
+			return NAN;
+		}
+		std::sort(v.begin(), v.end());
+		return v[v.size() / 2];
+	}
+
+private:
+	static uint64_t
+	dstKey(uint64_t set_uid, uint32_t index)
+	{
+		return (set_uid << 2) | index;
+	}
+
+	/*!
+	 * For copied sets: takes a Monado swapchain image for every image of @p p (Monado's acquire/wait/release), copies
+	 * SteamVR's image into it on the GPU (OvrdVkWait::copy: waits on the writes, acquire/release barriers) and fills
+	 * p.dstIndex. The GPU waits only on writes the CPU already saw finish (@p sync_state 1), so a stuck write can't
+	 * stall the GPU. False if a copy failed (the frame isn't shown).
+	 */
+	bool
+	copyLayers(Pending &p, int sync_state)
+	{
+		struct Item
+		{
+			int l, e;
+			struct xrt_swapchain *xsc;
+			OvrdVkWait::CopyJob job;
+			uint32_t di;
+			bool acquired;
+			uint64_t uid;
+			vr::SharedTextureHandle_t first; //!< the set's key in m_sets
+		};
+
+		std::vector<Item> items;
+		for (int l = 0; l < kMaxLayers; l++) {
+			p.dstIndex[l][0] = p.dstIndex[l][1] = -1;
+		}
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			for (int l = 0; l < p.n; l++) {
+				for (int e = 0; e < 2; e++) {
+					auto it = m_handleToSet.find(p.layers[l].tex[e]);
+					if (it == m_handleToSet.end() || !m_sets[it->second].copied) {
+						continue;
+					}
+					Set &set = m_sets[it->second];
+					int src_fd = -1;
+					for (int i = 0; i < 3; i++) {
+						if (set.handles[i] == p.layers[l].tex[e] && set.fds[i] >= 0) {
+							src_fd = dup(set.fds[i]);
+						}
+					}
+					Item item = {};
+					item.l = l;
+					item.e = e;
+					item.uid = set.uid;
+					item.first = it->second;
+					xrt_swapchain_reference(&item.xsc, set.xsc);
+					item.job = {p.layers[l].tex[e], src_fd, 0, -1, set.desc.nWidth, set.desc.nHeight,
+					            set.desc.nFormat};
+					items.push_back(item);
+				}
+			}
+		}
+		if (items.empty()) {
+			return true;
+		}
+		bool ok = true;
+		std::vector<OvrdVkWait::CopyJob> jobs;
+		for (Item &it : items) {
+			it.acquired = false;
+			if (!ok || xrt_swapchain_acquire_image(it.xsc, &it.di) != XRT_SUCCESS) {
+				ok = false;
+				continue;
+			}
+			it.acquired = true; // released below whatever happens (audit 2: a failed wait leaked the index)
+			if (xrt_swapchain_wait_image(it.xsc, m_periodNs, it.di) != XRT_SUCCESS) {
+				ok = false;
+				continue;
+			}
+			struct xrt_swapchain_native *xscn = (struct xrt_swapchain_native *)it.xsc;
+			it.job.dst_key = dstKey(it.uid, it.di);
+			it.job.dst_fd = dup(xscn->images[it.di].handle);
+			jobs.push_back(it.job); // copy() now owns both fds
+			it.job.src_fd = -1;
+			it.job.dst_fd = -1;
+		}
+		int64_t gpu_ns = 0;
+		if (ok) {
+			std::vector<OvrdVkWait::CopyWait> waits;
+			if (sync_state == 1) {
+				for (int k = 0; k < p.nWaits; k++) {
+					waits.push_back({p.waits[k].sem, p.waits[k].value});
+				}
+			}
+			ok = m_vk.copy(jobs, waits, (uint64_t)m_periodNs, &gpu_ns) == OvrdVkWait::kReached;
+		} else {
+			for (OvrdVkWait::CopyJob &j : jobs) { // not handed to copy(): close both (audit 7)
+				close(j.src_fd);
+				close(j.dst_fd);
+			}
+		}
+		for (Item &it : items) {
+			if (it.job.src_fd >= 0) {
+				close(it.job.src_fd);
+			}
+			if (it.acquired) {
+				xrt_swapchain_release_image(it.xsc, it.di);
+				if (ok) {
+					p.dstIndex[it.l][it.e] = (int)it.di;
+				}
+			}
+		}
+		std::lock_guard<std::mutex> lock(m_mutex);
+		for (Item &it : items) {
+			auto st = m_sets.find(it.first);
+			if (st == m_sets.end() || st->second.uid != it.uid) {
+				// The set was destroyed during the copy: its images were re-cached under its keys (audit 4).
+				std::vector<uint64_t> dst;
+				for (uint32_t i = 0; i < 3; i++) {
+					dst.push_back(dstKey(it.uid, i));
+				}
+				m_vk.forgetImages({it.job.src_key}, dst);
+				ok = false;
+			} else if (ok && it.l == 0 && it.e == 0) {
+				m_lastDstKey = dstKey(it.uid, it.di);
+				m_lastSrcKey = it.job.src_key;
+			}
+			std::lock_guard<std::mutex> comp_lock(m_compMutex);
+			xrt_swapchain_reference(&it.xsc, NULL);
+		}
+		if (ok) {
+			m_copyUs.push_back(gpu_ns / 1e3);
+		}
+		return ok;
+	}
+	static constexpr int kHist = 16;
+	struct Hist
+	{
+		int64_t target = 0; //!< display time it was predicted for
+		double p[3] = {0, 0, 0};
+		double q[4] = {0, 0, 0, 1};
+	};
+	Hist m_hist[kHist];                  //!< the last frame poses handed to SteamVR (driver space)
+	int m_histPos = 0;
+	std::atomic<int64_t> m_delayNs{0};   //!< SteamVR's pipeline delay, added to the pose target
+	std::atomic<int64_t> m_targetNs{0};  //!< displayTarget() of the current frame
+	std::atomic<int64_t> m_gridAnchorNs{0}; //!< a recent Monado display time (its vblank grid)
+	std::atomic<int64_t> m_gridPeriodNs{0}; //!< Monado's display period
+	std::atomic<int64_t> m_lastVsyncNs{0};  //!< the last vsync declared to SteamVR
+
+public:
+	//! Declared vsync = Monado display time - this: SteamVR's frame must reach Monado before its compositor starts
+	//! (~7 ms before display, measured 2026-11-18) after SteamVR composes (~2.2 ms after the event) and the GPU wait
+	//! and copy (~2.3 ms). OVRD_DIRECT_MODE_VSYNC_LEAD_MS.
+	int64_t vsync_lead_ns = 12000000;
+	//! "Running start": how long before the declared vsync the pose and VsyncEvent are sent (ALVR: 2 ms).
+	int64_t running_start_ns = 2000000;
+	//! The hand-over thread waits for a new SteamVR frame until this long before Monado's display time.
+	int64_t handoff_margin_ns = 8000000;
+	//! PostPresent holds until the next declared vsync (OVRD_DIRECT_MODE_HOLD, default on).
+	bool hold = true;
+	//! OVRD_DIRECT_MODE_LAYERS: hand Monado only the first this many of SteamVR's layers (1: the scene only, no
+	//! dashboard/overlay layer; for isolating the overlay).
+	int max_layers = kMaxLayers;
+	//! Tests only: delay the hand-over thread per frame.
+	int64_t test_handover_delay_ns = 0;
+
+private:
+	int m_labelFixed = 0, m_labelUnknown = 0;
+	std::vector<double> m_delayErrMs;
+	std::vector<double> m_recentErrMs; //!< tests: the last 30 shown - pose time errors
+	std::vector<int64_t> m_steerErrs;  //!< errors since the last delay correction
+
+public:
+	//! OVRD_DIRECT_MODE_LABEL_FIX (default on): give Monado the pose an application's image was drawn with.
+	bool label_fix = true;
+
+private:
+	/*!
+	 * Which of the last frame poses @p world is (SteamVR passes our poses through unchanged, apart from float rounding
+	 * in its 3x4 matrix: ~4e-8 in the quaternion dot product), -1 if none. The closest one within float tolerance.
+	 */
+	int
+	findHistLocked(const struct xrt_pose &world) const
+	{
+		int best = -1;
+		double best_score = 1e30;
+		for (int n = 1; n <= kHist; n++) {
+			const int k = (m_histPos + kHist - n) % kHist;
+			const Hist &h = m_hist[k];
+			if (h.target == 0) {
+				continue;
+			}
+			const double dot = fabs(h.q[0] * world.orientation.x + h.q[1] * world.orientation.y +
+			                        h.q[2] * world.orientation.z + h.q[3] * world.orientation.w);
+			const double dx = h.p[0] - world.position.x, dy = h.p[1] - world.position.y,
+			             dz = h.p[2] - world.position.z;
+			const double d2 = dx * dx + dy * dy + dz * dz;
+			if (1.0 - dot < 1e-6 && d2 < 1e-10) {
+				const double score = (1.0 - dot) + d2 * 1e4;
+				if (score < best_score) {
+					best_score = score;
+					best = k;
+				}
+			}
+		}
+		return best;
+	}
+
+	//! vrcompositor's own images keep SteamVR's label (it draws them itself, with that pose).
+	static bool
+	isCompositorPid(uint32_t pid)
+	{
+		char path[64], comm[64] = {};
+		snprintf(path, sizeof(path), "/proc/%u/comm", pid);
+		FILE *f = fopen(path, "r");
+		if (f == NULL) {
+			return false;
+		}
+		const bool ok = fgets(comm, sizeof(comm), f) != NULL;
+		fclose(f);
+		return ok && strncmp(comm, "vrcompositor", 12) == 0;
+	}
 };

@@ -13,6 +13,7 @@
  */
 
 #include "ovrd_direct_mode.hpp"
+#include "ovrd_frame_recorder.hpp"
 
 #include "xrt/xrt_instance.h"
 #include "xrt/xrt_system.h"
@@ -23,6 +24,8 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <thread>
+#include <condition_variable>
+#include <mutex>
 
 #include <cstdlib>
 #include <cstring>
@@ -34,6 +37,20 @@ using namespace vr;
 namespace {
 
 std::atomic<int> g_vsyncs{0};
+std::mutex g_vsyncMutex;
+int64_t g_delayNs = 0;
+std::vector<int64_t> g_vsyncTimes; //!< declared vsync times (event time + offset)
+std::vector<double> g_vsyncOffsetsMs; //!< time from sending each event to its declared vsync
+uint8_t g_srcPixel[4] = {0, 0, 0, 0};
+bool g_srcOk = false;
+double g_recentErrMs = 0;
+int g_frames_after_recreate = 0;
+bool g_slowHandover = false;
+bool g_outOk = false;
+uint8_t g_outPixel[4] = {0, 0, 0, 0}; //!< first pixel of the image Monado was last given (layer 0, left eye)
+struct xrt_pose g_lastFramePose = {{0, 0, 0, 1}, {0, 0, 0}}; //!< the newest frame pose (SteamVR labels with it)
+int64_t g_lastFrameTarget = 0;                                 //!< and the display time it was for
+std::condition_variable g_vsyncCv;
 // SteamVR's rule (measured 2026-11-18): it predicts poses to 17.63 ms after the vsync time the driver reports.
 constexpr int64_t kSteamTargetAfterVsyncNs = 17630000;
 std::atomic<int64_t> g_reportedVsyncNs{0};
@@ -58,7 +75,13 @@ struct FakeHost : IVRServerDriverHost
 	void
 	VsyncEvent(double offset_s) override
 	{
-		g_vsyncs++;
+		{
+			std::lock_guard<std::mutex> l(g_vsyncMutex);
+			g_vsyncs++;
+			g_vsyncTimes.push_back(os_monotonic_get_ns() + (int64_t)(offset_s * 1e9)); // the declared vsync
+			g_vsyncOffsetsMs.push_back(offset_s * 1e3); // how early it was sent (running start: 2 ms)
+		}
+		g_vsyncCv.notify_all();
 		g_reportedVsyncNs = os_monotonic_get_ns() + (int64_t)(offset_s * 1e9);
 		int64_t p = g_poseForDisplay.exchange(0);
 		if (p != 0) {
@@ -465,16 +488,134 @@ check(bool ok, const char *what)
 	g_fails += ok ? 0 : 1;
 }
 
+/*!
+ * One pose per frame: a frame thread (new display time every 11 ms, as on_frame_start) and a 1 ms pose thread (as the
+ * driver's pose loop) both ask for the current display time's pose while the "prediction" changes on every compute (as
+ * new IMU data refines it). With OvrdFramePose every hand-over for one display time must be the same pose; computing it
+ * each time (the old behaviour, the control) must give different poses, or the check couldn't see the fault.
+ */
+void
+frame_pose_check()
+{
+	for (int cached = 1; cached >= 0; cached--) {
+		OvrdFramePose fp;
+		std::atomic<int64_t> target{1};
+		std::atomic<bool> run{true};
+		std::atomic<int> computes{0};
+		std::mutex m;
+		std::map<int64_t, std::vector<double>> seen;
+		auto pose_for = [&](int64_t t) {
+			auto compute = [&] {
+				vr::DriverPose_t p = {};
+				p.qRotation.x = t * 1000.0 + computes.fetch_add(1); // differs per compute, like a refined prediction
+				return p;
+			};
+			vr::DriverPose_t p = cached ? fp.get(t, compute) : compute();
+			std::lock_guard<std::mutex> l(m);
+			seen[t].push_back(p.qRotation.x);
+		};
+		std::thread pose_thread([&] {
+			while (run) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				pose_for(target.load());
+			}
+		});
+		for (int f = 2; f < 30; f++) {
+			std::this_thread::sleep_for(std::chrono::microseconds(11100));
+			target = f;
+			pose_for(f); // on_frame_start
+		}
+		run = false;
+		pose_thread.join();
+		int frames = 0, mixed = 0;
+		for (auto &kv : seen) {
+			if (kv.second.size() < 2) {
+				continue;
+			}
+			frames++;
+			for (double v : kv.second) {
+				if (v != kv.second[0]) {
+					mixed++;
+					break;
+				}
+			}
+		}
+		printf("frame pose (%s): %d frames with several hand-overs, %d with different poses, %d computes\n",
+		       cached ? "one per frame" : "control, recomputed", frames, mixed, computes.load());
+		if (cached) {
+			check(frames > 20 && mixed == 0 && computes.load() == (int)seen.size(),
+			      "one pose per frame: every hand-over for a display time is the same pose (2 threads racing)");
+		} else {
+			check(mixed > 20, "control: recomputing each time gives different poses within a frame (check sees it)");
+		}
+	}
+}
+
+/*!
+ * The frame recorder must not disturb what it records: a push (the only call on live threads) costs microseconds,
+ * also while the writer is stuck on a slow disk, and every record reaches the file.
+ */
+void
+frame_recorder_check()
+{
+	const char *path = "/tmp/ovrd_frame_recorder_test.csv";
+	for (int slow = 0; slow < 2; slow++) {
+		OvrdFrameRecorder rec;
+		rec.start(path);
+		if (slow) {
+			rec.test_write_delay_ns = 1500000000LL; // the writer stalls 1.5 s per batch
+		}
+		const int n = 20000;
+		std::vector<double> us;
+		us.reserve(n);
+		for (int i = 0; i < n; i++) {
+			OvrdFrameRecorder::Rec r = {};
+			r.kind = 'F';
+			r.t0 = i;
+			const int64_t a = os_monotonic_get_ns();
+			rec.push(r);
+			us.push_back((os_monotonic_get_ns() - a) / 1e3);
+			if (i % 90 == 0) {
+				os_nanosleep(1000000); // spread over time so the writer runs meanwhile
+			}
+		}
+		rec.stop();
+		std::sort(us.begin(), us.end());
+		const double p99 = us[(size_t)(0.99 * (n - 1))], mx = us.back();
+		int rows = 0;
+		FILE *f = fopen(path, "r");
+		char line[256];
+		while (f && fgets(line, sizeof(line), f)) {
+			rows += line[0] == 'F';
+		}
+		if (f) {
+			fclose(f);
+		}
+		printf("frame recorder (%s): push median %.2f us, p99 %.2f us, max %.1f us; %d of %d rows written, %llu "
+		       "dropped\n",
+		       slow ? "writer stalled 1.5 s per batch" : "normal disk", us[n / 2], p99, mx, rows, n,
+		       (unsigned long long)rec.dropped());
+		check(p99 < 5.0 && rows == n && rec.dropped() == 0,
+		      slow ? "frame recorder: a stalled writer doesn't slow the live threads or lose records"
+		           : "frame recorder: a push costs microseconds and every record is written");
+	}
+}
+
 } // namespace
 
 int
 main(int argc, char **argv)
 {
+	frame_pose_check();
+	frame_recorder_check();
+	setenv("OVRD_FRAME_LOG", "/tmp/ovrd_direct_mode_frames.csv", 1);
 	bool window = false;
-	double seconds = 5.0;
+	double seconds = 15.0; // enough frames at the fake's ~15/s for the pose-delay learner to settle
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--window")) {
 			window = true;
+		} else if (!strcmp(argv[i], "--slow-handover")) {
+			g_slowHandover = true;
 		} else if (!strcmp(argv[i], "--debug-image")) {
 		} else {
 			seconds = atof(argv[i]);
@@ -531,6 +672,8 @@ main(int argc, char **argv)
 	int stuck_frames = 0;
 	int target_ok = 0;
 	int64_t last_target = 0;
+	std::vector<double> present_us, post_us; //!< time SteamVR's thread spent in Present / PostPresent
+	std::vector<double> post_vs_vsync_us;    //!< PostPresent's return minus the last declared vsync
 	{
 		OvrdDirectMode dm;
 		OvrdDirectMode::Output out;
@@ -543,8 +686,26 @@ main(int argc, char **argv)
 		dm.setOutput(out);
 		dm.world_to_device = [](const struct xrt_pose &p) { return p; };
 		dm.check_head = head;
-		dm.on_frame_start = [](int64_t display_ns) { g_poseForDisplay = display_ns; };
+		// As the plugin: the frame pose for the display target, handed to SteamVR (and remembered by direct mode).
+		dm.on_frame_start = [&dm, head](int64_t display_ns) {
+			g_poseForDisplay = display_ns;
+			struct xrt_space_relation rel = {};
+			xrt_device_get_tracked_pose(head, XRT_INPUT_GENERIC_HEAD_POSE, display_ns, &rel);
+			DriverPose_t dp = {};
+			dp.qRotation = {rel.pose.orientation.w, rel.pose.orientation.x, rel.pose.orientation.y,
+			                rel.pose.orientation.z};
+			dp.vecPosition[0] = rel.pose.position.x;
+			dp.vecPosition[1] = rel.pose.position.y;
+			dp.vecPosition[2] = rel.pose.position.z;
+			dm.logSubmittedPose(display_ns, dp);
+			std::lock_guard<std::mutex> l(g_vsyncMutex);
+			g_lastFramePose = rel.pose;
+			g_lastFrameTarget = display_ns;
+		};
 		dm.capture_after_s = 0.5; // the frames below have two layers
+		if (g_slowHandover) {
+			dm.test_handover_delay_ns = 20000000; // 40% of the simulated headset's 50 ms frame
+		}
 		dm.start(90.0f, log);
 
 		IVRDriverDirectModeComponent *c = &dm;
@@ -557,11 +718,37 @@ main(int argc, char **argv)
 
 		const int64_t t0 = os_monotonic_get_ns();
 		uint32_t idx[2] = {0, 0};
+		int seen_vsyncs = g_vsyncs.load();
+		bool recreated = false;
 		while (os_monotonic_get_ns() - t0 < (int64_t)(seconds * 1e9)) {
+			if (!recreated && os_monotonic_get_ns() - t0 > (int64_t)(seconds * 0.4e9)) {
+				// SteamVR destroys a set and makes a new one while frames flow (app restart, resolution change).
+				c->DestroySwapTextureSet(set[1].rSharedTextureHandles[0]);
+				c->CreateSwapTextureSet(4242, &desc, &set[1]);
+				recreated = true;
+			}
+			if (recreated) {
+				g_frames_after_recreate++;
+			}
+			// As SteamVR with Prop_DriverDirectModeSendsVsyncEvents: a frame starts on the driver's vsync event.
+			{
+				std::unique_lock<std::mutex> l(g_vsyncMutex);
+				g_vsyncCv.wait_for(l, std::chrono::milliseconds(200), [&] { return g_vsyncs.load() > seen_vsyncs; });
+				seen_vsyncs = g_vsyncs.load();
+			}
+			// The pose target at frame start: the display time of the Monado frame this vsync started.
+			if (dm.displayTarget() > os_monotonic_get_ns() && dm.displayTarget() != last_target) {
+				target_ok++;
+			}
+			last_target = dm.displayTarget();
 			SharedTextureHandle_t hs[2] = {set[0].rSharedTextureHandles[0], set[1].rSharedTextureHandles[0]};
 			c->GetNextSwapTextureSetIndex(hs, &idx);
 			struct xrt_space_relation rel = {};
-			xrt_device_get_tracked_pose(head, XRT_INPUT_GENERIC_HEAD_POSE, os_monotonic_get_ns() + 17000000, &rel);
+			{
+				// As SteamVR (2026-11-18 12:01): the label is the newest frame pose when it composes.
+				std::lock_guard<std::mutex> l(g_vsyncMutex);
+				rel.pose = g_lastFramePose;
+			}
 			IVRDriverDirectModeComponent::SubmitLayerPerEye_t eyes[2] = {};
 			for (int e = 0; e < 2; e++) {
 				eyes[e].hTexture = set[e].rSharedTextureHandles[idx[e]];
@@ -580,7 +767,9 @@ main(int argc, char **argv)
 				m.m[0][3] = rel.pose.position.x;
 				m.m[1][3] = rel.pose.position.y;
 				m.m[2][3] = rel.pose.position.z;
-				eyes[e].flHmdPosePredictionTimeInSecondsFromNow = 0.017f;
+				// the label's own display time (the pose check compares the label with the device's pose then)
+				eyes[e].flHmdPosePredictionTimeInSecondsFromNow =
+				    g_lastFrameTarget != 0 ? (float)((g_lastFrameTarget - (int64_t)os_monotonic_get_ns()) / 1e9) : 0.017f;
 			}
 			// SteamVR draws into the images: its write is submitted now and finishes 6 ms later, i.e. 4 ms after
 			// Present is called; in the last 30 frames it never signals (a stuck GPU write).
@@ -592,24 +781,36 @@ main(int argc, char **argv)
 			c->SubmitLayer(eyes);
 			c->SubmitLayer(eyes); // a second layer (SteamVR's overlay), the same images here
 			os_nanosleep(2000000); // SteamVR's compositor CPU work before Present
+			const int64_t c0 = os_monotonic_get_ns();
 			c->Present(0);
+			const int64_t c1 = os_monotonic_get_ns();
 			IVRDriverDirectModeComponent::Throttling_t thr = {0, 0};
 			c->PostPresent(&thr);
-			// The pose thread's target: the display time of the Monado frame just waited for (in PostPresent).
-			if (dm.displayTarget() > os_monotonic_get_ns() && dm.displayTarget() != last_target) {
-				target_ok++;
+			const int64_t c2 = os_monotonic_get_ns();
+			present_us.push_back((c1 - c0) / 1e3);
+			post_us.push_back((c2 - c1) / 1e3);
+			{
+				// PostPresent should return at the next declared vsync (Valve: block until running start / vsync).
+				std::lock_guard<std::mutex> l(g_vsyncMutex);
+				if (!g_vsyncTimes.empty()) {
+					post_vs_vsync_us.push_back((c2 - g_vsyncTimes.back()) / 1e3);
+				}
 			}
-			last_target = dm.displayTarget();
 			frames++;
 		}
 		const double secs = (os_monotonic_get_ns() - t0) / 1e9;
+		g_delayNs = dm.pipelineDelayNs();
+		os_nanosleep(200000000); // let the last frame be handed over
+		g_outOk = dm.readLastOutputPixel(g_outPixel);
+		g_srcOk = dm.readLastSourcePixel(g_srcPixel);
+		g_recentErrMs = dm.recentDelayErrMs();
 		printf("%d frames in %.2f s (%.1f/s), %d vsync events\n", frames, secs, frames / secs, g_vsyncs.load());
 		dm.stop();
 	}
 
 	// The log: every Present with its Monado frame, and whether it went to the compositor.
 	FILE *f = fopen(log, "r");
-	int presents = 0, submitted = 0, ok_pose = 0, poses = 0;
+	int presents = 0, submitted = 0, ok_pose = 0, poses = 0, replaced = 0;
 	long long last_s_t = 0;
 	double last_pred = 0;
 	std::vector<double> target_err_ms;
@@ -626,6 +827,11 @@ main(int argc, char **argv)
 			int layers, sub;
 			if (sscanf(line, "P,%lld,%lld,%d,%lld,%lld,%d,%lld,%lf,%d", &t, &sync, &layers, &id, &disp, &sub, &terr,
 			           &wait_us, &gsync) == 9) {
+				if (id < 0) { // replaced by a newer frame before the frame thread took it (shown: the newer one)
+					replaced++;
+					presents++;
+					continue;
+				}
 				sync_states[gsync]++;
 				(gsync == 1 ? waits_ok : waits_stuck).push_back(wait_us);
 				if (last_s_t != 0) {
@@ -666,16 +872,145 @@ main(int argc, char **argv)
 	if (f) {
 		fclose(f);
 	}
-	printf("log: %d presents, %d submitted to Monado, Monado frame ids increasing in %d; %d poses, %d within 1 mm\n",
-	       presents, submitted, frame_steps_ok, poses, ok_pose);
-	check(presents == frames && presents > 0, "every Present logged");
-	check(target_ok >= frames - 2, "after each PostPresent the pose target is the new frame's (future) display time");
+	printf("log: %d presents (%d replaced by a newer one), %d submitted to Monado, Monado frame ids increasing in %d; "
+	       "%d poses, %d within 1 mm\n",
+	       presents, replaced, submitted, frame_steps_ok, poses, ok_pose);
+	check(replaced <= 3, "at most the frames around the one capture stall are replaced");
+	check(presents >= frames - 1 && presents > 0, "every Present logged (the last one may still be pending at stop)");
+	{
+		FILE *ff = fopen("/tmp/ovrd_direct_mode_frames.csv", "r");
+		int prows = 0, fsub = 0, frows = 0, rrows = 0, lapp = 0, lfixed = 0, lprev = 0;
+		std::vector<long long> utargets;
+		char l2[512];
+		while (ff && fgets(l2, sizeof(l2), ff)) {
+			if (l2[0] == 'P') {
+				prows++;
+			} else if (l2[0] == 'R') {
+				rrows++;
+			} else if (l2[0] == 'U') {
+				long long t, tg;
+				if (sscanf(l2, "U,%lld,%lld", &t, &tg) == 2) {
+					utargets.push_back(tg);
+				}
+			} else if (l2[0] == 'L') {
+				long long t, lab, used;
+				int layer;
+				unsigned app;
+				if (sscanf(l2, "L,%lld,%d,%lld,%lld,%u", &t, &layer, &lab, &used, &app) == 5 && app && layer == 0) {
+					lapp++;
+					lfixed += used != 0;
+					// the pose given to Monado is the frame pose handed to SteamVR just before the label's
+					for (size_t k = 1; k < utargets.size(); k++) {
+						if (utargets[k] == lab && utargets[k - 1] == used) {
+							lprev++;
+							break;
+						}
+					}
+				}
+			} else if (l2[0] == 'F') {
+				frows++;
+				unsigned flags = 0;
+				long long a, b, c, d, e;
+				int w, sy;
+				if (sscanf(l2, "F,%lld,%lld,%lld,%lld,%lld,%d,%d,%u", &a, &b, &c, &d, &e, &w, &sy, &flags) == 8 &&
+				    (flags & 1)) {
+					fsub++;
+				}
+			}
+		}
+		if (ff) {
+			fclose(ff);
+		}
+		printf("frame log: %d P, %d F (%d submitted), %d R rows; application layers %d, label corrected %d, to the "
+		       "frame pose before the label %d\n",
+		       prows, frows, fsub, rrows, lapp, lfixed, lprev);
+		// the first frames have no earlier frame pose to give (a few, until the second frame pose exists)
+		check(lapp > 20 && lfixed >= lapp - 4 && lprev == lfixed,
+		      "label fix: every application image gets the frame pose before SteamVR's label (SteamVR labels with "
+		      "the newest)");
+		printf("pose target delay learned: %.2f ms (the fake pipeline shows each image one Monado frame after the "
+		       "pose it was drawn with)\n",
+		       g_delayNs / 1e6);
+		printf("Monado's copy of layer 0 (left eye): %s, first pixel %u %u %u %u\n", g_outOk ? "read" : "NOT READ",
+		       g_outPixel[0], g_outPixel[1], g_outPixel[2], g_outPixel[3]);
+		printf("SteamVR's source image of that frame: %s, first pixel %u %u %u %u\n", g_srcOk ? "read" : "NOT READ",
+		       g_srcPixel[0], g_srcPixel[1], g_srcPixel[2], g_srcPixel[3]);
+		check(g_outOk && g_srcOk && memcmp(g_outPixel, g_srcPixel, 4) == 0 && g_outPixel[3] == 255,
+		      "GPU copy: the image Monado was given equals SteamVR's image of that frame (all four channels)");
+		{
+			// SteamVR's clock: declared vsyncs evenly spaced (after the first second), whatever the hand-over does.
+			std::vector<double> dev;
+			std::vector<int64_t> v;
+			{
+				std::lock_guard<std::mutex> l(g_vsyncMutex);
+				v = g_vsyncTimes;
+			}
+			std::vector<double> iv;
+			for (size_t i = 1; i < v.size(); i++) {
+				if (v[i] - v[0] > 1000000000LL) {
+					iv.push_back((v[i] - v[i - 1]) / 1e6);
+				}
+			}
+			std::vector<double> sorted = iv;
+			std::sort(sorted.begin(), sorted.end());
+			const double med = sorted.empty() ? 0 : sorted[sorted.size() / 2];
+			for (double x : iv) {
+				dev.push_back(fabs(x - med));
+			}
+			std::sort(dev.begin(), dev.end());
+			const double p99 = dev.empty() ? 1e9 : dev[(size_t)(0.99 * (dev.size() - 1))];
+			printf("vsync clock%s: %zu intervals, median %.3f ms, deviation p99 %.3f ms, max %.3f ms\n",
+			       g_slowHandover ? " (hand-over slowed by 20 ms per frame)" : "", iv.size(), med, p99,
+			       dev.empty() ? 0.0 : dev.back());
+			check(iv.size() > 50 && p99 < 1.0,
+			      "SteamVR's vsync clock is steady (declared vsyncs evenly spaced, independent of the hand-over)");
+		}
+		printf("shown - pose time of the last frames (median): %.2f ms\n", g_recentErrMs);
+		check(!std::isnan(g_recentErrMs) && fabs(g_recentErrMs) < 2.0,
+		      "pose target delay learned: frames are shown within 2 ms of the time their pose was for");
+		{
+			std::vector<double> off;
+			{
+				std::lock_guard<std::mutex> l(g_vsyncMutex);
+				off = g_vsyncOffsetsMs;
+			}
+			std::sort(off.begin(), off.end());
+			const double lo = off.empty() ? -1 : off[(size_t)(0.01 * (off.size() - 1))];
+			printf("vsync events sent before their declared vsync: p1 %.3f ms, median %.3f ms\n", lo,
+			       off.empty() ? -1.0 : off[off.size() / 2]);
+			check(lo > 1.5, "each vsync event is actually sent at running start (not delayed by the hand-over)");
+		}
+		printf("frames after the set was destroyed and recreated: %d\n", g_frames_after_recreate);
+		check(g_frames_after_recreate > 10, "frames keep flowing after SteamVR destroys and recreates a set");
+		check(prows == frames && fsub == submitted && rrows == replaced,
+		      "frame log: every Present, every submitted frame and every replaced one recorded");
+	}
+	{
+		std::sort(present_us.begin(), present_us.end());
+		std::sort(post_us.begin(), post_us.end());
+		auto at = [](const std::vector<double> &v, double q) { return v.empty() ? -1.0 : v[(size_t)(q * (v.size() - 1))]; };
+		// The one capture frame (capture_after_s, opt-in) blocks Present by design: leave out the slowest call.
+		const double present_2nd = present_us.size() > 1 ? present_us[present_us.size() - 2] : -1.0;
+		printf("SteamVR's thread: Present median %.0f us, slowest but the capture %.0f us; PostPresent median %.0f us, "
+		       "max %.0f us\n", at(present_us, 0.5), present_2nd, at(post_us, 0.5), at(post_us, 1.0));
+		std::sort(post_vs_vsync_us.begin(), post_vs_vsync_us.end());
+		const size_t nv = post_vs_vsync_us.size();
+		const double rel_lo = nv ? post_vs_vsync_us[(size_t)(0.02 * (nv - 1))] : -1e9;
+		const double rel_hi = nv ? post_vs_vsync_us[(size_t)(0.98 * (nv - 1))] : 1e9;
+		printf("PostPresent returns relative to the declared vsync: p2 %+.0f us, p98 %+.0f us\n", rel_lo, rel_hi);
+		check(present_2nd >= 0 && present_2nd < 1000,
+		      "SteamVR's Present returns within 1 ms (the GPU wait and copy are on the hand-over thread)");
+		check(rel_lo > -1000 && rel_hi < 1000,
+		      "PostPresent holds SteamVR until the declared vsync and returns within 1 ms of it (Valve's sequence)");
+	}
+	check(target_ok >= frames - 3, "at each frame start the pose target is the new frame's (future) display time");
 	printf("pose submitted before the vsync event: %d of %d frame vsyncs (pose for a future display time: %d)\n",
 	       g_vsyncAfterFrame.load(), frames, g_vsyncWithPose.load());
 	check(g_vsyncAfterFrame >= frames - 2 && g_vsyncWithPose >= frames - 2,
 	      "every frame's pose (for its display time) is submitted before SteamVR is told about the vsync");
-	check(submitted >= presents - 1, "every frame went to Monado's compositor (imports worked, layers accepted)");
-	check(frame_steps_ok == presents, "each frame is a new Monado frame (SteamVR paced by Monado's frame timing)");
+	check(submitted >= presents - replaced - stuck_frames - 3,
+	      "every frame went to Monado's compositor except the stuck writes (not shown half drawn) and the recreate");
+	check(frame_steps_ok == presents - replaced, "each frame is a new Monado frame (SteamVR paced by Monado's frame timing)");
 	check(ok_pose >= poses * 0.95, "pose check: SteamVR's pose maps back onto the device's own pose");
 	{
 		std::sort(waits_ok.begin(), waits_ok.end());
@@ -685,9 +1020,9 @@ main(int argc, char **argv)
 		       "frames), %d without semaphore, %d errors\n",
 		       sync_states[1], med(waits_ok), sync_states[2], med(waits_stuck), stuck_frames, sync_states[3],
 		       sync_states[4]);
-		check(sync_states[1] >= presents - stuck_frames - 2, "every frame waited until SteamVR's write finished");
-		check(med(waits_ok) > 3000 && med(waits_ok) < 5500,
-		      "Present waited ~4 ms (the write finished 4 ms after Present), not 0 and not a timeout");
+		check(sync_states[1] >= presents - replaced - stuck_frames - 2, "every frame waited until SteamVR's write finished");
+		check(med(waits_ok) >= 0 && med(waits_ok) < 5500,
+		      "the hand-over waited at most until the write finished (no timeouts except the stuck writes)");
 		check(sync_states[2] >= stuck_frames - 2 && med(waits_stuck) < 1.2 * 11.2e3,
 		      "a write that never finishes times out within one frame instead of stalling");
 		check(sync_states[3] == 0 && sync_states[4] == 0, "semaphores found and imported for every image");

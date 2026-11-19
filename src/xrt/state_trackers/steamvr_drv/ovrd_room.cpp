@@ -496,8 +496,16 @@ ovrd_room_chaperone_path(void)
 	return std::string(config_path->valuestring) + "/chaperone_info.vrchap";
 }
 
+//! The driver's own rectangle in universe 2 (not a room drawn in Room Setup).
+static bool
+is_driver_rectangle(cJSON *entry)
+{
+	return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(entry, "monado_rectangle"));
+}
+
 bool
-ovrd_room_prepare_chaperone(const std::string &path, float session_size, bool *out_has_room, std::string *out_error)
+ovrd_room_prepare_chaperone(
+    const std::string &path, float session_size, bool *out_has_room, std::string *out_error, float room_size)
 {
 	auto fail = [&](const char *why) {
 		if (out_error != nullptr) {
@@ -557,15 +565,32 @@ ovrd_room_prepare_chaperone(const std::string &path, float session_size, bool *o
 		changed = true;
 	}
 
-	if (room == nullptr) {
+	const bool drawn = room != nullptr && has_drawn_room(room) && !is_driver_rectangle(room);
+	if (out_has_room != nullptr) {
+		*out_has_room = drawn;
+	}
+	if (room_size > 0.0f && !drawn) {
+		// The driver's rectangle, unless the same one is already there.
+		Json rect = plain_universe("2", room_size);
+		if (!rect || cJSON_AddTrueToObject(rect.get(), "monado_rectangle") == nullptr) {
+			return fail("internal: room rectangle JSON");
+		}
+		if (room == nullptr || !same_universe(room, rect.get())) {
+			bool ok = room != nullptr ? cJSON_ReplaceItemViaPointer(universes, room, rect.get())
+			                          : cJSON_AddItemToArray(universes, rect.get());
+			if (!ok) {
+				return fail("internal: writing the room rectangle");
+			}
+			rect.release();
+			changed = true;
+		}
+	} else if (room == nullptr) {
 		Json seed = plain_universe("2", 0.0f);
 		if (!seed || !cJSON_AddItemToArray(universes, seed.get())) {
 			return fail("internal: seeding universe 2");
 		}
 		seed.release();
 		changed = true;
-	} else if (out_has_room != nullptr) {
-		*out_has_room = has_drawn_room(room);
 	}
 
 	if (!changed) {
