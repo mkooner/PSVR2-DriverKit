@@ -643,10 +643,12 @@ main(int argc, char **argv)
 			hmds += a.cls == TrackedDeviceClass_HMD;
 			controllers += a.cls == TrackedDeviceClass_Controller;
 		}
-		const size_t n_dev = monado ? 1 : 3; // Monado's simulated system has a headset only
-		check(hmds == 1 && controllers == (int)n_dev - 1 && added.size() == n_dev &&
+		// Monado's simulated system has a headset only; real hardware has the headset and whichever controllers are on.
+		const size_t n_dev = real ? added.size() : (monado ? 1 : 3);
+		check(hmds == 1 && controllers == (int)n_dev - 1 && controllers <= 2 && added.size() == n_dev &&
 		          added[0].cls == TrackedDeviceClass_HMD,
-		      monado ? "one headset is registered" : "one headset (first) and two controllers are registered");
+		      real ? "one headset (first) and the connected controllers are registered"
+		           : (monado ? "one headset is registered" : "one headset (first) and two controllers are registered"));
 		bool distinct = !added.empty() && !added[0].serial.empty();
 		for (size_t i = 1; i < added.size(); i++) {
 			distinct = distinct && added[i].serial != added[i - 1].serial;
@@ -678,6 +680,30 @@ main(int argc, char **argv)
 			std::lock_guard<std::mutex> l(g_mutex);
 			check(g_props[1000].count(Prop_DriverProvidedChaperoneJson_String) == 1,
 			      "with the room calibration off a play area is given to SteamVR");
+		}
+		if (monado) {
+			// Sony's icons in the driver's resources (copied by build-driver.sh / linked by launch-steamvr.sh): the
+			// driver finds them next to itself and gives SteamVR the PS VR2 headset icons, without any variable.
+			// Only a real PS VR2 gets them (the Monado mode without --real runs on a simulated headset).
+			std::string so = path, icon, type;
+			const std::string plugin = so.substr(0, so.rfind("/bin/linux64/"));
+			struct stat st;
+			const bool have = stat((plugin + "/resources/icons/playstation_vr2/headset_status_off@2x.png").c_str(), &st) == 0;
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				const auto &b = g_props[1000][Prop_NamedIconPathDeviceOff_String];
+				icon.assign(b.begin(), b.end());
+				icon = icon.c_str();
+				const auto &t = g_props[1000][Prop_ControllerType_String];
+				type.assign(t.begin(), t.end());
+				type = type.c_str();
+			}
+			if (type == "playstation_vr2_hmd") {
+				printf("    headset icon: %s (icons %s in %s/resources)\n", icon.empty() ? "(SteamVR's default)" : icon.c_str(),
+				       have ? "present" : "absent", plugin.c_str());
+				check(have == (icon.find("playstation_vr2/headset_status_off") != std::string::npos),
+				      "the PS VR2 headset icons are used exactly when they're in the driver's resources");
+			}
 		}
 		if (room) {
 			std::string published;
