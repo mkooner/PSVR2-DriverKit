@@ -105,6 +105,16 @@ if(XRT_FEATURE_STEAMVR_PLUGIN)
 	target_include_directories(tests_ovrd_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_drv)
 	target_link_libraries(tests_ovrd_room PRIVATE aux_math xrt-interfaces)
 
+	# Offline check of the native PS VR2 SteamVR driver: loads the built driver as vrserver does, with a fake SteamVR.
+	add_executable(ovrn_driver_harness ovrn_driver_harness.cpp)
+	target_link_libraries(ovrn_driver_harness PRIVATE xrt-external-openvr ${CMAKE_DL_LIBS})
+	add_dependencies(ovrn_driver_harness driver_monado_psvr2)
+	target_compile_definitions(
+		ovrn_driver_harness
+		PRIVATE
+			OVRN_DRIVER_PATH="${PROJECT_BINARY_DIR}/steamvr-monado-psvr2/bin/linux64/driver_monado_psvr2.so"
+		)
+
 	# Offline check of the plugin's driver direct mode with Monado's compositor; needs a GPU, so not a ctest.
 	if(TARGET target_instance AND XRT_HAVE_VULKAN)
 		add_executable(ovrd_direct_mode_harness ovrd_direct_mode_harness.cpp)

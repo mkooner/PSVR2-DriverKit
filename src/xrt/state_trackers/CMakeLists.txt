@@ -18,4 +18,5 @@ add_subdirectory(prober)
 
 if(XRT_FEATURE_STEAMVR_PLUGIN)
 	add_subdirectory(steamvr_drv)
+	add_subdirectory(steamvr_psvr2)
 endif()
