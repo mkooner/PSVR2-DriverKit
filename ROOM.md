@@ -41,9 +41,12 @@ SteamVR's own **Room View** works, in Room Setup or any time.
   SteamVR's internal camera frame queue has a reader (Room View in SteamVR 2.19 never sent StartVideoStream,
   2026-11-18), then goes back to its default mode 2 s after the last reader left. Log: "ovrn: passthrough wanted
   (...)" / "passthrough on" / "passthrough not wanted any more" / "passthrough off (N frames)".
-- **The headset's own button** (under the visor, the PS5's passthrough button) toggles Room View: each press is sent
-  as a double-click of the headset's system button, the gesture of SteamVR's Room View setting "double-click system
-  button". `OVRN_HEAD_BUTTON=system` sends it as a plain system button instead, `off` not at all.
+- **The headset's own button** (under the visor, the PS5's passthrough button) toggles Room View: the driver reports
+  it as the headset's system button, and its compositor binding
+  (`resources/input/vrcompositor_binding_playstation_vr2_hmd.json`, the headset profile's `default_bindings`) maps a
+  press to SteamVR's "Toggle Room View" (as Valve's own Vive Pro binding maps a double press). Without that binding
+  SteamVR ignored the button (2026-11-18). `OVRN_HEAD_BUTTON=off` doesn't report it. The 30 s "Room: devices" log
+  line ends with the number of presses the driver saw.
 - How: `IVRCameraComponent` on the headset (published OpenVR interface; lens model Extended_FTheta fitted to the
   cameras' own calibration, camera-to-head transforms from the headset's calibration), and also SteamVR's internal
   camera frame queue `/lighthouse/camera/raw_frames` when SteamVR offers it (not in Valve's published header; how
@@ -52,6 +55,13 @@ SteamVR's own **Room View** works, in Room Setup or any time.
   fisheye model's coefficients), the published frame path with a fake backend, and a real recorded frame decoded
   (desk, monitor and hands visible, `OVRN_CAMERA_TEST_RECORDING=logs/camera-*.pv2c`). Not checked: SteamVR actually
   showing it, and whether the picture lines up with the room (camera-to-head transforms, lens model).
+
+### Controllers that connect late
+
+A Sense controller that connects after SteamVR started (it wakes a moment later than the other) is added while
+SteamVR runs: every 2 s while one is missing the driver looks for it, creates it, joins it to the headset's LED
+tracking and adds it to SteamVR ("ovrn: left controller connected after the start ... added").
+`OVRN_CONTROLLER_HOTPLUG=0` turns it off. Checked offline with `tests/ovrn_driver_harness --late` (simulated).
 
 ### Using it (manual validation)
 
