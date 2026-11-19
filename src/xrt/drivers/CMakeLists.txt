@@ -257,10 +257,15 @@ if(XRT_BUILD_DRIVER_PSVR2)
 		psvr2/psvr2_pose_filter.h
 		psvr2/psvr2_camera_recorder.c
 		psvr2/psvr2_camera_recorder.h
-		psvr2/psvr2_basalt.c
 		psvr2/psvr2_basalt.h
 		psvr2/psvr2_cam_mount.h
 		)
+	# The Basalt referee needs Monado's SLAM module; without it (the SteamVR plugin's minimal build) stand-ins.
+	if(XRT_FEATURE_SLAM)
+		target_sources(drv_psvr2 PRIVATE psvr2/psvr2_basalt.c)
+	else()
+		target_sources(drv_psvr2 PRIVATE psvr2/psvr2_basalt_none.c)
+	endif()
 	target_link_libraries(
 		drv_psvr2
 		PRIVATE

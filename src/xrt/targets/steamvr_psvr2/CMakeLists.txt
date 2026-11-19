@@ -46,4 +46,26 @@ set_target_properties(
 		   INSTALL_RPATH "$ORIGIN"
 	)
 
+# DT_RPATH (not RUNPATH): the loader also applies it to the bundled libraries' own dependencies (Ceres -> SuiteSparse),
+# so a set bundled next to the plugin resolves as a whole inside Steam's runtime container.
+target_link_options(driver_monado_psvr2 PRIVATE "-Wl,--disable-new-dtags")
+
+# OVRN_BUNDLE_LIBS: copy the libraries Steam's runtime doesn't provide next to the plugin after each build
+# (bundle_libs.py), so SteamVR can load it inside its Steam Linux Runtime container (sniper) and Steam games, which run
+# inside it too, can connect (2026-11-19). OVRN_STEAM_RUNTIME: the runtime's files dir ("auto": the newest sniper
+# platform under ~/.local/share/Steam). Meant for a minimal build (only the PS VR2 drivers, no OpenCV/GStreamer/onnx).
+option(OVRN_BUNDLE_LIBS "Bundle the SteamVR plugin's non-runtime libraries next to it" OFF)
+set(OVRN_STEAM_RUNTIME "auto" CACHE STRING "Steam runtime files dir for OVRN_BUNDLE_LIBS (auto: newest sniper)")
+if(OVRN_BUNDLE_LIBS)
+	find_package(Python3 REQUIRED COMPONENTS Interpreter)
+	add_custom_command(
+		TARGET driver_monado_psvr2
+		POST_BUILD
+		COMMAND ${Python3_EXECUTABLE} -I "${CMAKE_CURRENT_SOURCE_DIR}/bundle_libs.py"
+			$<TARGET_FILE:driver_monado_psvr2> "${OVRN_STEAM_RUNTIME}"
+		COMMENT "Bundling the SteamVR plugin's libraries for Steam's runtime"
+		VERBATIM
+		)
+endif()
+
 install(DIRECTORY "${OVRN_DIR}" DESTINATION "${CMAKE_INSTALL_PREFIX}/share")
