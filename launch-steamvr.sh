@@ -9,9 +9,11 @@
 #   1. Backs up ~/.config/openvr/openvrpaths.vrpath and registers ONLY our build's SteamVR plugin
 #      (build/steamvr-monado-psvr2, driver_monado_psvr2), so Sony's PlayStation VR2 App driver doesn't fight over the
 #      headset.
-#   2. Starts SteamVR with VALVE_SKIP_RUNTIME_SAFETY=1 (Valve's own vrstartup.sh switch), so vrserver runs on
-#      the host instead of inside the Steam Linux Runtime container. Our driver links host libraries
-#      (Ceres, OpenCV, libusb, ...) that don't exist inside the container.
+#   2. Starts SteamVR normally, inside Steam's Linux Runtime container, with the container-ready plugin from
+#      ../trial/build-steamvr (a minimal build with its libraries bundled next to it, OVRN_BUNDLE_LIBS): Steam games
+#      run inside that container too and can only connect to a SteamVR running there (2026-11-19). Without that
+#      build, or with HOST_STEAMVR=1, SteamVR runs on the host (VALVE_SKIP_RUNTIME_SAFETY, the old way: the full
+#      build's libraries aren't in the container) and Steam games can't connect.
 #   3. Enables the PS VR2 / Sense / constellation debug logs.
 #   4. When SteamVR exits (or on Ctrl+C), restores the original config and copies + summarizes the logs.
 #
@@ -20,7 +22,19 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Where DriverKit's Compile Driver tab (build-driver.sh) put the driver: used unless MONADO_BUILD is given.
+DK_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/PSVR2-DriverKit/driver.env"
+if [ -z "${MONADO_BUILD:-}" ] && [ -f "$DK_ENV" ]; then
+	MONADO_BUILD="$(. "$DK_ENV" && printf '%s' "${MONADO_BUILD:-}")"
+	[ -n "$MONADO_BUILD" ] && [ -d "$MONADO_BUILD" ] || unset MONADO_BUILD
+fi
 BUILD="${MONADO_BUILD:-$HERE/../trial/build}"
+# The container-ready plugin (build-steamvr: cmake -S trial -B trial/build-steamvr with only the PS VR2 drivers and
+# -DOVRN_BUNDLE_LIBS=ON, see ROOM.md / README): preferred unless MONADO_BUILD is given.
+STEAMVR_BUILD="${STEAMVR_BUILD:-$HERE/../trial/build-steamvr}"
+if [ "${IN_CONTAINER:-0}" = 1 ] && [ -z "${MONADO_BUILD:-}" ] && [ -f "$STEAMVR_BUILD/steamvr-monado-psvr2/bin/linux64/libceres.so.4" ]; then
+	BUILD="$STEAMVR_BUILD"
+fi
 # The PS VR2 SteamVR driver (trial/src/xrt/state_trackers/steamvr_psvr2): SteamVR owns the display. The previous plugin
 # (steamvr_drv, driver_monado) was removed on 2026-11-18.
 PLUGIN="$BUILD/steamvr-monado-psvr2"
@@ -272,7 +286,19 @@ if [ "${RECORD_IMAGES:-0}" = 1 ]; then
 	echo "  RECORD_IMAGES=1: camera images to $PSVR2_RECORD_IMAGES"
 fi
 
-export VALVE_SKIP_RUNTIME_SAFETY=1
+# Inside Steam's container (the normal way, what Steam games need) when the plugin carries its libraries; otherwise,
+# or with HOST_STEAMVR=1, on the host as before.
+# Default: on the host (2026-11-19: inside the container SteamVR started slowly, didn't find the headset and reported
+# "Shared IPC Compositor Init Failed"). IN_CONTAINER=1 tries the container start with the build-steamvr plugin.
+if [ "${IN_CONTAINER:-0}" = 1 ] && [ "${HOST_STEAMVR:-0}" != 1 ] && [ -f "$PLUGIN/bin/linux64/libceres.so.4" ]; then
+	IN_CONTAINER=1
+	unset VALVE_SKIP_RUNTIME_SAFETY
+	echo "  SteamVR inside Steam's runtime container (Steam games can connect); plugin $PLUGIN"
+else
+	IN_CONTAINER=0
+	export VALVE_SKIP_RUNTIME_SAFETY=1
+	echo "  SteamVR on the host (IN_CONTAINER=1: inside Steam's container, experimental)"
+fi
 # Log level, the same default as launch-openxr.sh (info). LOG_LEVEL=debug: the full debug logs (controller tracking,
 # sensor fusion with a solver report per solve: ~12000 reports / 900k lines a minute in vrserver, 2026-11-18 audit).
 LOG_LEVEL="${LOG_LEVEL:-info}"
@@ -344,7 +370,11 @@ fi
 echo
 echo "== Starting SteamVR (close SteamVR or press Ctrl+C here when done)"
 echo "   Hold both Sense controllers in front of the headset after it shows up."
-"$STEAMVR/bin/vrstartup.sh" --valve-skip-runtime-safety >"$LOG" 2>&1 &
+if [ "$IN_CONTAINER" = 1 ]; then
+	"$STEAMVR/bin/vrstartup.sh" >"$LOG" 2>&1 &
+else
+	"$STEAMVR/bin/vrstartup.sh" --valve-skip-runtime-safety >"$LOG" 2>&1 &
+fi
 
 # Wait for vrserver to appear, then for it to exit.
 for _ in $(seq 1 60); do

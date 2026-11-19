@@ -29,6 +29,31 @@ What the driver does with SteamVR's room (chaperone), why, and what has been che
 - **When Room Setup starts before the room is anchored**, the left controller buzzes three times and the log says
   how to anchor first (a room drawn in the session universe is gone at the next start).
 
+### SteamVR inside Steam's container (Steam games) (2026-11-19)
+
+Steam runs games inside its Steam Linux Runtime container, and they can only connect to a SteamVR running there too.
+The full Monado build's plugin needs 293 libraries (190 not in Steam's runtime), so SteamVR used to run on the host
+(`VALVE_SKIP_RUNTIME_SAFETY`) and Steam games failed at their first VR call (Hellsweeper: `xrCreateInstance failed`,
+then fine once it started its own SteamVR). The container-ready plugin is a separate minimal build (only the PS VR2,
+Sense and simulated drivers; no OpenCV/GStreamer/onnxruntime/SDL/SLAM; 25 libraries) with the 13 the runtime lacks
+(Ceres, SuiteSparse, glog, gflags, jsoncpp, libjpeg, openvr_api) bundled next to it (`bundle_libs.py`, DT_RPATH
+`$ORIGIN`):
+
+```
+cmake -S trial -B trial/build-steamvr -DOVRN_BUNDLE_LIBS=ON \
+  $(for d in $(grep -oE '^XRT_BUILD_DRIVER_[A-Z0-9_]+' trial/build/CMakeCache.txt | sort -u); do \
+    case $d in XRT_BUILD_DRIVER_PSVR2|XRT_BUILD_DRIVER_PSSENSE|XRT_BUILD_DRIVER_SIMULATED) ;; *) echo -D$d=OFF;; esac; done) \
+  -DXRT_HAVE_GST=OFF -DXRT_HAVE_ONNXRUNTIME=OFF -DXRT_HAVE_SDL2=OFF -DXRT_FEATURE_DEBUG_GUI=OFF -DXRT_HAVE_OPENCV=OFF \
+  -DXRT_FEATURE_SLAM=OFF -DXRT_FEATURE_SERVICE=OFF -DXRT_FEATURE_RENDERDOC=OFF -DXRT_HAVE_BLUETOOTH=OFF -DXRT_HAVE_HIDAPI=OFF
+ninja -C trial/build-steamvr driver_monado_psvr2 ovrn_driver_harness
+```
+
+`launch-steamvr.sh` (and so the DriverKit) uses it when it's there and starts SteamVR normally, inside the
+container; `HOST_STEAMVR=1` (or no build-steamvr) is the old host start. Check without SteamVR:
+`~/.local/share/Steam/steamapps/common/SteamLinuxRuntime_sniper/run -- trial/build-steamvr/tests/ovrn_driver_harness`
+(all modes pass inside the container; the full build's plugin fails there at `libgstapp-1.0.so.0`). The Basalt referee
+is off in this build (it needs the SLAM module).
+
 ### Default and custom play area (2026-11-19)
 
 SteamVR gets the DriverKit's default play area (Settings > SteamVR > "Default play area", `PLAY_AREA`, a square, 2 m
