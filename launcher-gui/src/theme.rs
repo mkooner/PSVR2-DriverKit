@@ -187,7 +187,8 @@ pub fn note(ui: &mut egui::Ui, text: &str) {
 }
 
 /// One device: its picture above its name and state. The picture's ring glows light-bar blue when connected.
-pub fn device(ui: &mut egui::Ui, picture: Option<&egui::TextureHandle>, on: Option<bool>, label: &str) {
+/// `width`: the tile's outer width (the header shares its space evenly between the three).
+pub fn device(ui: &mut egui::Ui, width: f32, picture: Option<&egui::TextureHandle>, on: Option<bool>, label: &str) {
     let lit = on == Some(true);
     let state = match on {
         Some(true) => "Connected",
@@ -200,7 +201,8 @@ pub fn device(ui: &mut egui::Ui, picture: Option<&egui::TextureHandle>, on: Opti
         .corner_radius(CornerRadius::same(12))
         .inner_margin(Margin::symmetric(14, 10))
         .show(ui, |ui| {
-            ui.set_width(124.0);
+            // inner width: outer minus the 14 px margins and the 1 px border on each side
+            ui.set_width((width - 30.0).max(110.0));
             ui.vertical_centered(|ui| {
                 let size = 64.0;
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(size + 10.0, size + 10.0), egui::Sense::hover());

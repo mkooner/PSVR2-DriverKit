@@ -1177,9 +1177,12 @@ impl eframe::App for Launcher {
                         ui.label(egui::RichText::new("PlayStation VR2 on Linux").color(theme::SLATE).size(13.0));
                     });
                     ui.add_space(24.0);
-                    theme::device(ui, self.pictures[0].as_ref(), Some(st.headset), "Headset");
-                    theme::device(ui, self.pictures[1].as_ref(), st.left, "Left controller");
-                    theme::device(ui, self.pictures[2].as_ref(), st.right, "Right controller");
+                    // The three tiles share the rest of the row evenly.
+                    let gap = ui.spacing().item_spacing.x;
+                    let w = ((ui.available_width() - 2.0 * gap) / 3.0).floor();
+                    theme::device(ui, w, self.pictures[0].as_ref(), Some(st.headset), "Headset");
+                    theme::device(ui, w, self.pictures[1].as_ref(), st.left, "Left controller");
+                    theme::device(ui, w, self.pictures[2].as_ref(), st.right, "Right controller");
                 });
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
