@@ -46,3 +46,11 @@ tools/vrtestscene
 tools/xr_frame_log/libxr_frame_log.so
 tools/xr_frame_log/layer_test_client
 directmode/dm_harness
+tools/vrlaunch
+tools/vrprobe
+tools/vrdisplaydump
+tools/vrframetiming
+tools/vrposelog
+tools/vrposeprobe
+tools/vrtestscene
+launcher-gui/target/

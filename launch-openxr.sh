@@ -16,6 +16,12 @@
 # Native Linux OpenXR apps only; Windows apps run through Proton/SteamVR instead.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Where DriverKit's Compile Driver tab (build-driver.sh) put the driver: used unless MONADO_BUILD is given.
+DK_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/PSVR2-DriverKit/driver.env"
+if [ -z "${MONADO_BUILD:-}" ] && [ -f "$DK_ENV" ]; then
+	MONADO_BUILD="$(. "$DK_ENV" && printf '%s' "${MONADO_BUILD:-}")"
+	[ -n "$MONADO_BUILD" ] && [ -d "$MONADO_BUILD" ] || unset MONADO_BUILD
+fi
 BUILD="${MONADO_BUILD:-$HERE/../trial/build}"
 SERVICE="$BUILD/src/xrt/targets/service/monado-service"
 MANIFEST="$BUILD/openxr_monado-dev.json"
