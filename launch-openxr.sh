@@ -92,6 +92,14 @@ fi
 export PSVR2_RECORD_FILE="${PSVR2_RECORD_FILE:-$LOGDIR/record-$STAMP-openxr.csv}"
 rm -f "$SOCKET" # a stale socket from a crashed service would block the new one
 export XRT_LOG="${XRT_LOG:-info}"
+# TRACKING=1: what Monado's compositor shows per displayed frame (re-warp pose, the game's layer pose, presents,
+# vblanks) and the head's pose every 2 ms (analysis/compare_paths.py). OFF by default: with it on, the 2026-11-18 11:41
+# session's game frame work doubled (4.1 -> 10.8 ms) and half the frames missed their refresh; the OpenXR path stays
+# as it was unless this is asked for.
+if [ "${TRACKING:-0}" = 1 ]; then
+	export XRT_COMPOSITOR_FRAME_LOG="${XRT_COMPOSITOR_FRAME_LOG:-$LOGDIR/compframes-$STAMP-openxr.csv}"
+	echo "  tracking: $XRT_COMPOSITOR_FRAME_LOG"
+fi
 export PSVR2_LOG="${PSVR2_LOG:-info}"
 
 # JITTER_CHECK=1: Monado's app pacer decisions in the log (U_PACING_APP_LOG=debug: when the app is woken from

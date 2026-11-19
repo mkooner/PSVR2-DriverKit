@@ -1,12 +1,12 @@
 // Copyright 2026, Mehrab Kooner
 // SPDX-License-Identifier: BSL-1.0
-// Replays a recorded run through the driver's own room capture code (ovrd_room.cpp, OvrdRoomCapture) with Create
+// Replays a recorded run through the driver's own room capture code (trial steamvr_psvr2/ovrn_room.cpp, OvrdRoomCapture) with Create
 // held all the time (the worst case): every FINAL left-controller pose from the combined log, the head from the
 // record's SLAM poses, SLAM resets detected as psvr2.c does. Raw frame = logged poses + the 1.6 m tracking origin
 // offset, as the SteamVR driver sees them.
 //
 // Usage: capture_replay <combined.log> <record.csv> <outline.csv> [hand L|R]
-#include "ovrd_room.hpp"
+#include "ovrn_room.hpp"
 
 #include <cmath>
 #include <cstdio>
