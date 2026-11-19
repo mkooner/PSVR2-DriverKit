@@ -236,7 +236,7 @@ fi
 #   OVRD_ROOM=0    the previous behaviour: a fixed 2 m play area handed to SteamVR, nothing saved
 #   PLAY_AREA=<m>  side of the square play area the driver gives SteamVR (default 2). With NATIVE=1 the saved room gets
 #                  it too, so SteamVR's Room Setup isn't needed (a room drawn there is kept).
-#   SCALE=<%>      per-eye render size as a percentage of the panel's eye size (NATIVE=1, the default: 100 = 2000x2040; 170 = Sony's 3400x3468)
+#   SCALE=<%>      per-eye render size as a percentage of the panel's eye size (NATIVE=1, the default: 140 = 2800x2856 as Monado renders for OpenXR; 100 = the panel's 2000x2040; 170 = Sony's 3400x3468)
 [ -n "${PLAY_AREA:-}" ] && export OVRD_PLAY_AREA_SIZE="$PLAY_AREA" && echo "  PLAY_AREA=$PLAY_AREA m"
 [ -n "${SCALE:-}" ] && export XRT_COMPOSITOR_SCALE_PERCENTAGE="$SCALE" && echo "  SCALE=$SCALE%: per-eye render size"
 #   SONY_PROPS=<groups>  (NATIVE=1, the default) report Sony's display properties: "all", or a comma list of throttle, framerate,

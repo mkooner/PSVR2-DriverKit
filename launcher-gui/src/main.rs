@@ -132,7 +132,7 @@ fn default_settings() -> Vec<Setting> {
         toggle("LINUX_FIXES", "SteamVRLinuxFixes layer",
                "Off (default): the plugin switches the layer off for SteamVR's compositor (on SteamVR 2.19.3 it patches the compositor with offsets from an older build: more judder). On: keep it.", false).steamvr(),
         value("XRT_COMPOSITOR_SCALE_PERCENTAGE", "Render size per eye (%)",
-              "Of the panel's 2000x2040 per eye (100, the default; 170 = 3400x3468 as Sony's driver, heavier).", "100", true).steamvr(),
+              "Of the panel's 2000x2040 per eye (140 = 2800x2856, the default, as Monado renders for OpenXR; 100 = the panel's size; 170 = 3400x3468 as Sony's driver, heavier).", "140", true).steamvr(),
         value("PLAY_AREA", "Play area (m)",
               "Side of the square play area the plugin gives SteamVR (no Room Setup needed).", "2", true).steamvr(),
         value("OVRN_DISTORTION_MESH_RES", "Distortion mesh",
@@ -149,7 +149,7 @@ fn default_settings() -> Vec<Setting> {
     v.extend(headset_settings(Target::SteamVR, true));
     // OpenXR (monado-service)
     v.push(value("OXR_VIEWPORT_SCALE_PERCENTAGE", "Render size (%)",
-                 "Recommended render size for apps on monado-service (100, the default).", "100", true).monado());
+                 "Recommended render size for apps on monado-service, on top of Monado's own 140% (100, the default: 2800x2856 per eye).", "100", true).monado());
     v.extend(headset_settings(Target::Monado, false));
     v
 }
@@ -170,7 +170,7 @@ struct Config {
     version: u32,
 }
 
-const CONFIG_VERSION: u32 = 7;
+const CONFIG_VERSION: u32 = 8;
 
 impl Default for Config {
     fn default() -> Self {
@@ -276,6 +276,16 @@ fn load_config() -> Config {
             if let Kind::Value { value } = &s.kind {
                 if s.enabled && value.trim() == "5" {
                     s.enabled = false;
+                }
+            }
+        }
+    }
+    if cfg.version < 8 {
+        // 2026-11-18: SteamVR renders 140% by default, the size Monado's compositor gives OpenXR apps (2800x2856).
+        for s in cfg.settings.iter_mut().filter(|s| s.key == "XRT_COMPOSITOR_SCALE_PERCENTAGE") {
+            if let Kind::Value { value } = &mut s.kind {
+                if value.trim() == "100" {
+                    *value = "140".into();
                 }
             }
         }
