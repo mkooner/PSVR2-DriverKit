@@ -26,6 +26,26 @@ enum Kind {
     Value { value: String },
 }
 
+/// Which launches a setting goes to: some only mean something to one runtime (e.g. XRT_COMPOSITOR_SCALE_PERCENTAGE is
+/// the SteamVR driver's render size but Monado's compositor scale in monado-service).
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+enum Target {
+    #[default]
+    Both,
+    SteamVR,
+    Monado,
+}
+
+impl Target {
+    fn label(self) -> &'static str {
+        match self {
+            Target::Both => "SteamVR + Monado",
+            Target::SteamVR => "SteamVR",
+            Target::Monado => "Monado",
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Setting {
     key: String,
@@ -33,6 +53,20 @@ struct Setting {
     help: String,
     kind: Kind,
     enabled: bool,
+    /// Always taken from this version's defaults (not the saved file).
+    #[serde(default)]
+    target: Target,
+}
+
+impl Setting {
+    fn steamvr(mut self) -> Self {
+        self.target = Target::SteamVR;
+        self
+    }
+    fn monado(mut self) -> Self {
+        self.target = Target::Monado;
+        self
+    }
 }
 
 fn toggle(key: &str, label: &str, help: &str, enabled: bool) -> Setting {
@@ -42,57 +76,82 @@ fn toggle(key: &str, label: &str, help: &str, enabled: bool) -> Setting {
         help: help.into(),
         kind: Kind::Toggle { on: "1".into(), off: "0".into() },
         enabled,
+        target: Target::Both,
     }
 }
 
-fn value(key: &str, label: &str, help: &str, v: &str, enabled: bool) -> Setting {
-    Setting { key: key.into(), label: label.into(), help: help.into(), kind: Kind::Value { value: v.into() }, enabled }
+fn toggle_values(key: &str, label: &str, help: &str, on: &str, off: &str, enabled: bool) -> Setting {
+    Setting { kind: Kind::Toggle { on: on.into(), off: off.into() }, ..toggle(key, label, help, enabled) }
 }
 
-/// The options we use, with their defaults (as in the driver and the launch scripts).
-fn default_settings() -> Vec<Setting> {
+fn value(key: &str, label: &str, help: &str, v: &str, enabled: bool) -> Setting {
+    Setting {
+        key: key.into(),
+        label: label.into(),
+        help: help.into(),
+        kind: Kind::Value { value: v.into() },
+        enabled,
+        target: Target::Both,
+    }
+}
+
+/// The headset driver's settings (Monado's psvr2 driver), one copy per runtime so each can differ: `accel` is whether
+/// accelerometer-aided position is on by default (the SteamVR plugin turns it on; OpenXR mode runs without it).
+fn headset_settings(target: Target, accel: bool) -> Vec<Setting> {
+    let t = |s: Setting| Setting { target, ..s };
     vec![
-        toggle("PSVR2_ACCEL_FUSION", "Accelerometer-aided head position",
-               "Head position between SLAM poses from the 2 kHz accelerometer (smoother turning).", true),
-        value("PSVR2_GYRO_BIAS_TAU", "Gyro bias correction (s)",
-              "Learns the headset gyro's offset (~0.8 deg/s) with this time constant.", "5", true),
-        value("PSVR2_POSE_BLEND_MS", "Position correction blend (ms)",
-              "Spreads each position correction over this long (100: less jitter, no added latency).", "100", true),
-        value("PSVR2_GRAVITY_PAUSE_DEG", "Gravity estimate pause (deg/s)",
-              "With accelerometer fusion: don't update the gravity estimate while turning faster than this.", "30", true),
-        value("PSVR2_REFRESH_HZ", "Display refresh (Hz)",
-              "89.91 or 119.88. SteamVR and Monado direct both pick the matching display mode.", "89.91", true),
-        value("XRT_COMPOSITOR_SCALE_PERCENTAGE", "SteamVR render scale (%)",
-              "Per-eye render size for SteamVR games (170 = 3400x3468, as Sony's driver; lower is lighter).", "170", true),
-        value("OXR_VIEWPORT_SCALE_PERCENTAGE", "OpenXR render scale (%)",
-              "Recommended render size for apps on monado-service.", "100", true),
-        toggle("PSVR2_BASALT", "Basalt referee",
-               "Basalt visual-inertial tracking catches the headset's position jumps in fast turns (~2 CPU cores).", false),
-        value("VIT_SYSTEM_LIBRARY_PATH", "Basalt library",
-              "libbasalt.so for the Basalt referee.", "", true),
-        toggle("PSVR2_SONY_LD_CONFIG", "Sony's LED detector settings",
-               "Send Sony's LED detector settings to the headset (controller tracking in bright rooms).", true),
-        toggle("PSVR2_SLAM_CARRY", "Carry position over SLAM resets",
-               "Keeps the head position continuous when the headset's tracking re-originates.", true),
-        toggle("OVRD_HIDDEN_AREA", "Hidden-area mesh (SteamVR)",
-               "Experimental: our distortion doesn't model the lens edge yet, so it hides almost nothing.", false),
-        toggle("ASYNC", "Force SteamVR async reprojection",
-               "Off: SteamVR's own default (off on NVIDIA under Linux, as with Sony's driver). On: forced on.", false),
-        value("PSVR2_SMOOTH_CORRECTION_MS", "Smooth SLAM corrections (ms)",
-              "Corrections ramp in smoothly and the velocity includes them (better SteamVR prediction offline). 0 turns it off.", "30", true),
-        value("OVRD_ANGVEL_AVG_MS", "SteamVR angular velocity average (ms)",
-              "Mean of the last N ms instead of the newest gyro sample (slightly worse offline). Off by default.", "5", false),
-        value("OVRD_POSE_MODE", "SteamVR headset pose mode",
-              "steamvr (default): now + velocities. measured: measurement-time poses (Valve lighthouse). novelocity: no velocities. display: predicted to display time (ALVR).", "steamvr", true),
-        value("OVRD_DISTORTION_MESH_RES", "SteamVR distortion mesh",
-              "Grid SteamVR samples the lens distortion on (80 as Sony's driver; SteamVR's own 49 wobbles while turning).", "80", true),
-        toggle("RECORD_DATASET", "Record controller dataset", "SteamVR launcher: record LED tracking data.", false),
-        toggle("RECORD_SLAM", "Record headset SLAM", "SteamVR launcher: record the headset's raw SLAM stream.", false),
-        toggle("RECORD_CAMERA", "Record camera images", "SteamVR launcher: record camera transfers (~2 GB/min).", false),
-        toggle("HAND_TRACKING", "Optical hand tracking", "SteamVR launcher: hands from the bottom cameras.", false),
-        toggle("JITTER_CHECK", "Jitter check (SteamVR)",
-               "Records submitted poses and frame timing, then labels each jitter moment as tracking, frame timing or prediction (logs/steamvr-jitter-*.txt).", false),
+        t(toggle("PSVR2_ACCEL_FUSION", "Accelerometer-aided head position",
+                 "Head position between SLAM poses from the 2 kHz accelerometer. On by default for the SteamVR plugin (it turns it on itself), off for OpenXR (as launch-openxr.sh runs).", accel)),
+        t(value("PSVR2_SMOOTH_CORRECTION_MS", "Smooth SLAM corrections (ms)",
+                "Corrections ramp in smoothly and the velocity includes them. 0 turns it off.", "30", true)),
+        t(value("PSVR2_POSE_BLEND_MS", "Position correction blend (ms)",
+                "Spreads each position correction over this long.", "100", true)),
+        t(value("PSVR2_GRAVITY_PAUSE_DEG", "Gravity estimate pause (deg/s)",
+                "With accelerometer fusion: don't update the gravity estimate while turning faster than this.", "30", true)),
+        t(value("PSVR2_GYRO_BIAS_TAU", "Gyro bias correction (s)",
+                "Learns the headset gyro's offset with this time constant. Off by default (the driver's default).", "5", false)),
+        t(value("PSVR2_REFRESH_HZ", "Display refresh (Hz)",
+                "89.91 or 119.88; the matching display mode is picked.", "89.91", true)),
+        t(toggle("PSVR2_SLAM_CARRY", "Carry position over SLAM resets",
+                 "Keeps the head position continuous when the headset's tracking re-originates (after its first 20 s).", true)),
+        t(toggle("PSVR2_SONY_LD_CONFIG", "Sony's LED detector settings",
+                 "Send Sony's LED detector settings to the headset (controller tracking in bright rooms).", true)),
+        t(toggle("PSVR2_BASALT", "Basalt referee",
+                 "Basalt visual-inertial tracking checks the headset's position jumps in fast turns (~2 CPU cores).", false)),
+        t(value("VIT_SYSTEM_LIBRARY_PATH", "Basalt library", "libbasalt.so for the Basalt referee.", "", true)),
     ]
+}
+
+/// The options we use, with their defaults (as in the drivers and the launch scripts), in two sections: the SteamVR
+/// plugin (driver_monado_psvr2, launched through launch-steamvr.sh) and OpenXR (monado-service and its apps).
+fn default_settings() -> Vec<Setting> {
+    let mut v = vec![
+        // SteamVR plugin (driver_monado_psvr2)
+        toggle("ASYNC", "SteamVR async reprojection",
+               "On (default): the plugin asks SteamVR for it for the session; late frames are moved to the new head pose instead of shown again. Off: SteamVR's own default (off on NVIDIA under Linux).", true).steamvr(),
+        toggle("LINUX_FIXES", "SteamVRLinuxFixes layer",
+               "Off (default): the plugin switches the layer off for SteamVR's compositor (on SteamVR 2.19.3 it patches the compositor with offsets from an older build: more judder). On: keep it.", false).steamvr(),
+        value("XRT_COMPOSITOR_SCALE_PERCENTAGE", "Render size per eye (%)",
+              "Of the panel's 2000x2040 per eye (100, the default; 170 = 3400x3468 as Sony's driver, heavier).", "100", true).steamvr(),
+        value("PLAY_AREA", "Play area (m)",
+              "Side of the square play area the plugin gives SteamVR (no Room Setup needed).", "2", true).steamvr(),
+        value("OVRN_DISTORTION_MESH_RES", "Distortion mesh",
+              "Grid SteamVR samples the lens distortion on (80, as Sony's driver).", "80", true).steamvr(),
+        toggle_values("OVRN_POSE_MODEL", "Driver-predicted head pose (ALVR model)",
+                      "Off (default): the pose for now with velocities, SteamVR predicts. On: the plugin predicts and sends no velocity (worse with games that ask for the pose more than once a frame).",
+                      "predicted", "", false).steamvr(),
+        value("OVRN_SONY_PROPS", "Sony's extra display properties",
+              "Report Sony's display properties too: all, or a list of throttle, framerate, syslayer, texindex, supersample, dsc, edid, display, mask. Off by default (no help measured).", "all", false).steamvr(),
+        toggle("RECORD_DATASET", "Record controller dataset", "Record LED tracking data (logs/).", false).steamvr(),
+        toggle("RECORD_SLAM", "Record headset SLAM", "Record the headset's raw SLAM stream (logs/).", false).steamvr(),
+        toggle("RECORD_CAMERA", "Record camera images", "Record camera transfers (~2 GB/min, logs/).", false).steamvr(),
+    ];
+    v.extend(headset_settings(Target::SteamVR, true));
+    // OpenXR (monado-service)
+    v.push(value("OXR_VIEWPORT_SCALE_PERCENTAGE", "Render size (%)",
+                 "Recommended render size for apps on monado-service (100, the default).", "100", true).monado());
+    v.extend(headset_settings(Target::Monado, false));
+    v
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -111,7 +170,7 @@ struct Config {
     version: u32,
 }
 
-const CONFIG_VERSION: u32 = 4;
+const CONFIG_VERSION: u32 = 7;
 
 impl Default for Config {
     fn default() -> Self {
@@ -153,28 +212,36 @@ fn load_config() -> Config {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     let defaults = Config::default().settings;
-    // Settings added since the file was written get their defaults; names and help always come from this version.
+    // The list, names, help and kinds always come from this version; saved choices (on/off, values) are kept. A setting
+    // is its key and its runtime; files before version 7 had one entry per key for both runtimes: their choice goes to
+    // both copies (except accelerometer fusion, which was never meant for OpenXR mode).
+    let saved = std::mem::take(&mut cfg.settings);
     for d in &defaults {
-        match cfg.settings.iter_mut().find(|s| s.key == d.key) {
-            Some(s) => {
-                s.label = d.label.clone();
-                s.help = d.help.clone();
-                if std::mem::discriminant(&s.kind) != std::mem::discriminant(&d.kind) {
-                    s.kind = d.kind.clone();
-                }
+        let found = saved.iter().find(|s| s.key == d.key && s.target == d.target).or_else(|| {
+            if cfg.version >= 7 || (d.target == Target::Monado && d.key == "PSVR2_ACCEL_FUSION") {
+                None
+            } else {
+                saved.iter().find(|s| s.key == d.key && (s.target == Target::Both || s.target == d.target))
             }
-            None => cfg.settings.push(d.clone()),
+        });
+        let mut n = d.clone();
+        if let Some(s) = found {
+            n.enabled = s.enabled;
+            if let (Kind::Value { value: nv }, Kind::Value { value: sv }) = (&mut n.kind, &s.kind) {
+                *nv = sv.clone();
+            }
         }
+        cfg.settings.push(n);
     }
     if cfg.version < 2 {
         // Version 1 forced async reprojection on by default; SteamVR's own default (off on NVIDIA/Linux) now.
-        if let Some(s) = cfg.settings.iter_mut().find(|s| s.key == "ASYNC") {
+        for s in cfg.settings.iter_mut().filter(|s| s.key == "ASYNC") {
             s.enabled = false;
         }
     }
     if cfg.version < 3 {
         // Version 2 sent 140; Sony's driver renders 170% (3400x3468 per eye).
-        if let Some(s) = cfg.settings.iter_mut().find(|s| s.key == "XRT_COMPOSITOR_SCALE_PERCENTAGE") {
+        for s in cfg.settings.iter_mut().filter(|s| s.key == "XRT_COMPOSITOR_SCALE_PERCENTAGE") {
             if let Kind::Value { value } = &mut s.kind {
                 if value.trim() == "140" {
                     *value = "170".into();
@@ -183,8 +250,34 @@ fn load_config() -> Config {
         }
     }
     if cfg.version < 4 {
-        if let Some(s) = cfg.settings.iter_mut().find(|s| s.key == "PSVR2_SMOOTH_CORRECTION_MS") {
+        for s in cfg.settings.iter_mut().filter(|s| s.key == "PSVR2_SMOOTH_CORRECTION_MS") {
             s.enabled = true;
+        }
+    }
+    if cfg.version < 5 {
+        // 2026-11-18, the best run: async reprojection on, SteamVRLinuxFixes off, the panel's render size.
+        for s in cfg.settings.iter_mut().filter(|s| s.key == "ASYNC") {
+            s.enabled = true;
+        }
+        for s in cfg.settings.iter_mut().filter(|s| s.key == "LINUX_FIXES") {
+            s.enabled = false;
+        }
+        for s in cfg.settings.iter_mut().filter(|s| s.key == "XRT_COMPOSITOR_SCALE_PERCENTAGE") {
+            if let Kind::Value { value } = &mut s.kind {
+                if value.trim() == "170" {
+                    *value = "100".into();
+                }
+            }
+        }
+    }
+    if cfg.version < 6 {
+        // The gyro bias correction was on (5 s) by default, which no tested launch used: off unless it was changed.
+        for s in cfg.settings.iter_mut().filter(|s| s.key == "PSVR2_GYRO_BIAS_TAU") {
+            if let Kind::Value { value } = &s.kind {
+                if s.enabled && value.trim() == "5" {
+                    s.enabled = false;
+                }
+            }
         }
     }
     cfg.version = CONFIG_VERSION;
@@ -200,10 +293,10 @@ fn save_config(cfg: &Config) -> Result<(), String> {
 }
 
 impl Config {
-    /// Environment for the launches from the settings.
-    fn env(&self) -> Vec<(String, String)> {
+    /// Environment for a launch (SteamVR or Monado) from the settings: only the settings meant for it.
+    fn env(&self, launch: Target) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for s in &self.settings {
+        for s in self.settings.iter().filter(|s| s.target == Target::Both || s.target == launch) {
             match (&s.kind, s.enabled) {
                 (Kind::Toggle { on, .. }, true) => out.push((s.key.clone(), on.clone())),
                 (Kind::Toggle { off, .. }, false) if !off.is_empty() => out.push((s.key.clone(), off.clone())),
@@ -214,7 +307,7 @@ impl Config {
             }
         }
         // The SteamVR launcher knows the Basalt and refresh options by their short names too.
-        if self.settings.iter().any(|s| s.key == "PSVR2_BASALT" && s.enabled) {
+        if self.settings.iter().any(|s| s.key == "PSVR2_BASALT" && s.enabled && (s.target == launch || s.target == Target::Both)) {
             out.push(("BASALT".into(), "1".into()));
         }
         out
@@ -418,7 +511,7 @@ impl Launcher {
         };
         let f2 = f.try_clone().ok();
         let mut cmd = Command::new("bash");
-        cmd.arg(&script).envs(self.cfg.env()).stdin(Stdio::null()).stdout(f);
+        cmd.arg(&script).envs(self.cfg.env(Target::SteamVR)).stdin(Stdio::null()).stdout(f);
         if !self.cfg.steam_root.is_empty() {
             cmd.env("STEAM_ROOT", &self.cfg.steam_root);
         }
@@ -467,7 +560,7 @@ impl Launcher {
         let _ = fs::remove_file(Path::new(&runtime).join("monado_comp_ipc")); // a stale socket blocks a new service
         let f2 = f.try_clone().ok();
         let mut cmd = Command::new(&bin);
-        cmd.envs(self.cfg.env()).env("XRT_LOG", "info").stdin(Stdio::piped()).stdout(f);
+        cmd.envs(self.cfg.env(Target::Monado)).env("XRT_LOG", "info").stdin(Stdio::piped()).stdout(f);
         if let Some(f2) = f2 {
             cmd.stderr(f2);
         }
@@ -757,23 +850,37 @@ impl Launcher {
             ui.end_row();
         });
         ui.separator();
-        ui.heading("Driver and launcher settings");
-        ui.label("Applied to SteamVR, monado-service and app launches started from here.");
-        egui::Grid::new("settings").num_columns(3).striped(true).show(ui, |ui| {
-            for s in self.cfg.settings.iter_mut() {
-                ui.checkbox(&mut s.enabled, &s.label).on_hover_text(format!("{}\n\n{}", s.help, s.key));
-                match &mut s.kind {
-                    Kind::Value { value } => {
-                        ui.add_enabled(s.enabled, egui::TextEdit::singleline(value).desired_width(260.0));
+        ui.label("Saved with Save and used by every launch from here. Each section goes only to its own runtime.");
+        let sections = [
+            (Target::SteamVR, "SteamVR plugin (driver_monado_psvr2)",
+             "SteamVR started from here (launch-steamvr.sh), and the games you then start from Steam."),
+            (Target::Monado, "OpenXR (monado-service)",
+             "monado-service started from here, and the OpenXR apps on it (from here or with the variables on the Launcher tab)."),
+        ];
+        for (target, title, what) in sections {
+            ui.separator();
+            ui.heading(title);
+            ui.label(egui::RichText::new(what).small());
+            egui::Grid::new(title).num_columns(3).striped(true).show(ui, |ui| {
+                for s in self.cfg.settings.iter_mut().filter(|s| s.target == target) {
+                    ui.checkbox(&mut s.enabled, &s.label).on_hover_text(format!("{}\n\n{}", s.help, s.key));
+                    match &mut s.kind {
+                        Kind::Value { value } => {
+                            ui.add_enabled(s.enabled, egui::TextEdit::singleline(value).desired_width(260.0));
+                        }
+                        Kind::Toggle { on, off } => {
+                            let v = if s.enabled { on.as_str() } else { off.as_str() };
+                            ui.label(if v.is_empty() { format!("{} unset", s.key) } else { format!("{}={}", s.key, v) });
+                        }
                     }
-                    Kind::Toggle { on, off } => {
-                        ui.label(format!("{}={}", s.key, if s.enabled { on.as_str() } else { off.as_str() }));
-                    }
+                    ui.label(egui::RichText::new(&s.help).small());
+                    ui.end_row();
                 }
-                ui.label(egui::RichText::new(&s.help).small());
-                ui.end_row();
-            }
-        });
+            });
+            ui.label("Environment this section gives:");
+            let env: Vec<String> = self.cfg.env(target).iter().map(|(k, v)| format!("{k}={v}")).collect();
+            copy_row(ui, &env.join(" "));
+        }
         ui.separator();
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
@@ -791,9 +898,6 @@ impl Launcher {
                 self.message = "Defaults restored (Save to keep them).".into();
             }
         });
-        ui.label("Environment these settings give:");
-        let env: Vec<String> = self.cfg.env().iter().map(|(k, v)| format!("{k}={v}")).collect();
-        copy_row(ui, &env.join(" "));
     }
 }
 
@@ -813,8 +917,10 @@ fn main() -> eframe::Result<()> {
         println!("SteamVR running: {}, monado-service running: {}", st.steamvr, st.service);
         println!("XR_RUNTIME_JSON={}", cfg.manifest().display());
         println!("Steam detection: {}", detect_steam().2);
-        let env: Vec<String> = cfg.env().iter().map(|(k, v)| format!("{k}={v}")).collect();
-        println!("settings environment: {}", env.join(" "));
+        for launch in [Target::SteamVR, Target::Monado] {
+            let env: Vec<String> = cfg.env(launch).iter().map(|(k, v)| format!("{k}={v}")).collect();
+            println!("settings environment for {}: {}", launch.label(), env.join(" "));
+        }
         return Ok(());
     }
     let options = eframe::NativeOptions {

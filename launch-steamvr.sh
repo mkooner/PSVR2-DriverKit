@@ -40,9 +40,12 @@ if [ "$NATIVE" = 1 ]; then
 	DRIVER=driver_monado_psvr2
 	[ "${DIRECT_MODE:-0}" = 1 ] && { echo "NATIVE=1 has no direct mode (SteamVR owns the display)"; exit 1; }
 	# Defaults for the rebuilt driver, the user's best run (2026-11-18 17:44): SteamVR's async reprojection on and the
-	# SteamVRLinuxFixes layer off. ASYNC=0 / LINUX_FIXES=1 give the old behaviour.
+	# SteamVRLinuxFixes layer off. The driver applies them itself however SteamVR is started (ovrn_provider.cpp
+	# applyCompositorDefaults); ASYNC=0 / LINUX_FIXES=1 here tell it not to (OVRN_ASYNC / OVRN_LINUX_FIXES).
 	export ASYNC="${ASYNC:-1}"
 	LINUX_FIXES="${LINUX_FIXES:-0}"
+	[ "$ASYNC" = 0 ] && export OVRN_ASYNC=0
+	[ "$LINUX_FIXES" = 1 ] && export OVRN_LINUX_FIXES=1
 fi
 VRPATH="$HOME/.config/openvr/openvrpaths.vrpath"
 BACKUP="$VRPATH.psvr2-test-backup"
@@ -169,7 +172,7 @@ mkdir -p "$LOGDIR"
 VRSETTINGS="$STEAM_ROOT/config/steamvr.vrsettings"
 if [ -f "$VRSETTINGS" ]; then
 	cp -f "$VRSETTINGS" "$LOGDIR/steamvr.vrsettings.backup-$STAMP"
-	ASYNC_MARK="$ASYNC_MARK" python3 -I - "$VRSETTINGS" "$DRIVER" <<'EOF'
+	NATIVE="$NATIVE" ASYNC_MARK="$ASYNC_MARK" python3 -I - "$VRSETTINGS" "$DRIVER" <<'EOF'
 import json, sys
 path = sys.argv[1]
 with open(path) as f:
@@ -180,11 +183,16 @@ if drv.get("blocked_by_safe_mode"):
 drv["blocked_by_safe_mode"] = False
 drv["enable"] = True
 # Async reprojection: SteamVR's own default on NVIDIA under Linux is off ("Async: Automatically disabled as default
-# based on the detected Vulkan environment" in vrcompositor.txt, RTX 5080). ASYNC=1 (the default with NATIVE=1) forces
-# it on for this session; async_restore takes the setting out again when SteamVR closes.
+# based on the detected Vulkan environment" in vrcompositor.txt, RTX 5080). With NATIVE=1 the driver asks SteamVR for
+# it itself (IVRSettings, ovrn_provider.cpp applyCompositorDefaults) and takes it out again at shutdown; ASYNC=0
+# reaches it as OVRN_ASYNC=0. For the old plugin (NATIVE=0), ASYNC=1 forces it here for this session, and
+# async_restore takes the setting out again when SteamVR closes.
 import os
 sv = cfg.setdefault("steamvr", {})
-if os.environ.get("ASYNC", "0") == "1":
+if os.environ.get("NATIVE") == "1":
+    print("  async reprojection: " + ("asked for by the driver" if os.environ.get("ASYNC", "1") == "1"
+                                      else "SteamVR default (ASYNC=0)"))
+elif os.environ.get("ASYNC", "0") == "1":
     sv["enableLinuxVulkanAsync"] = True
     print("  async reprojection forced on for this session (ASYNC=1; ASYNC=0 for SteamVR's default)")
     with open(os.environ["ASYNC_MARK"], "w") as f:
@@ -221,7 +229,9 @@ fi
 # Room calibration (see ROOM.md): the driver keeps SteamVR's universe 3 for an unanchored session (a 2 m square around
 # where you started) and switches to universe 2, your saved room, after a floor capture (left controller on the floor,
 # crouch next to it, hold Create 2.5 s). Draw the room in SteamVR's Room Setup once you're in universe 2.
-#   ROOM_SETUP=1   no 2 m square in universe 3 either (SteamVR's Room Setup then starts on its own)
+#   ROOM_SETUP=1   open SteamVR's Room Setup for you once the room is anchored: start SteamVR, do the floor capture
+#                  (left controller on its floor mark, crouch, hold Create until the short buzz), and Room Setup opens
+#                  (tools/vrlaunch, through SteamVR). No temporary square in the session universe meanwhile.
 #   ROOM_FORGET=1  delete the saved room anchor before starting (to set the room up again)
 #   OVRD_ROOM=0    the previous behaviour: a fixed 2 m play area handed to SteamVR, nothing saved
 #   PLAY_AREA=<m>  side of the square play area the driver gives SteamVR (default 2). With NATIVE=1 the saved room gets
@@ -234,7 +244,7 @@ fi
 [ -n "${SONY_PROPS:-}" ] && export OVRN_SONY_PROPS="$SONY_PROPS" && echo "  SONY_PROPS=$SONY_PROPS: Sony's display properties reported"
 if [ "${ROOM_SETUP:-0}" = 1 ]; then
 	export OVRD_PLAY_AREA_SIZE=0
-	echo "  ROOM_SETUP=1: no play area in the session universe, SteamVR room setup will run"
+	echo "  ROOM_SETUP=1: Room Setup opens after the floor capture (left controller on its mark, hold Create)"
 fi
 if [ "${ROOM_FORGET:-0}" = 1 ]; then
 	rm -f "$HOME/.config/monado/ovrd_room.json" && echo "  ROOM_FORGET=1: deleted the saved room anchor"
@@ -452,7 +462,41 @@ else
 		fi
 		GAME_PID=$!
 	fi
+	# ROOM_SETUP=1: wait for the driver to anchor the room (its "Room: SteamVR universe ... (the saved room)" line in
+	# vrserver.txt, after the floor capture), then ask SteamVR to open Room Setup. Room Setup first would draw the room
+	# in the session universe, which is gone at the next start.
+	ROOM_SETUP_PID=""
+	if [ "${ROOM_SETUP:-0}" = 1 ]; then
+		if [ -x "$HERE/tools/vrlaunch" ]; then
+			(
+				for _ in $(seq 1 60); do pgrep -x vrcompositor >/dev/null && break; sleep 1; done
+				echo "  ROOM_SETUP=1: waiting for the floor capture (left controller on its mark, crouch, hold Create)"
+				# Poll the log's new part once a second (a tail -F pipeline kept running after the match, 2026-11-18).
+				from=$(stat -c %s "$STEAM_LOGS/vrserver.txt" 2>/dev/null || echo 0)
+				found=0
+				for _ in $(seq 1 1200); do
+					if tail -c +$((from + 1)) "$STEAM_LOGS/vrserver.txt" 2>/dev/null | grep -q "(the saved room)"; then
+						found=1
+						break
+					fi
+					pgrep -x vrserver >/dev/null || break
+					sleep 1
+				done
+				if [ "$found" = 1 ]; then
+					sleep 2
+					echo "  ROOM_SETUP=1: room anchored, opening Room Setup"
+					"$HERE/tools/vrlaunch" openvr.tool.steamvr_room_setup 2>&1 | grep -v -i breakpad | sed 's/^/  /'
+				else
+					echo "  ROOM_SETUP=1: no floor capture within 20 min; open Room Setup later with tools/vrlaunch"
+				fi
+			) &
+			ROOM_SETUP_PID=$!
+		else
+			echo "  ROOM_SETUP=1: tools/vrlaunch isn't built (see its Build: line); open Room Setup from SteamVR"
+		fi
+	fi
 	while pgrep -x vrserver >/dev/null; do sleep 2; done
+	[ -n "$ROOM_SETUP_PID" ] && kill "$ROOM_SETUP_PID" 2>/dev/null
 	echo "  SteamVR exited."
 	if [ -n "$GAME_PID" ]; then
 		wait "$GAME_PID" 2>/dev/null

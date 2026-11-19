@@ -1,6 +1,96 @@
 # Room setup and playspace for the PS VR2 (SteamVR driver)
 
-What the driver does with SteamVR's room (chaperone), why, and what has been checked where.
+What the driver does with SteamVR's room (chaperone), why, and what has been checked where. The audit behind the
+2026-11-18 changes, with the OpenVR sources, is in `docs/room-setup-audit-2026-11-18.md`.
+
+## How the PS VR2 driver (driver_monado_psvr2) gives SteamVR its tracking and room (2026-11-18)
+
+- **Devices.** One HMD (`TrackedDeviceClass_HMD`) and two controllers (`TrackedDeviceClass_Controller`, role hints
+  LeftHand / RightHand), all with `Prop_TrackingSystemName_String` "monado_psvr2". The HMD reports
+  `Prop_HmdTrackingStyle_Int32` = InsideOutCameras (officially only UI wording) and the universe
+  (`Prop_CurrentUniverseId_Uint64`).
+- **One tracking space.** The headset's SLAM, carried across its tracking restarts by the headset driver, is the
+  driver space for all three devices; the controllers are tracked relative to the headset. The room transform
+  (`T_room_raw`, below) goes into every device's `qWorldFromDriver`, the same value for all, so SteamVR's "raw"
+  space is the room and the devices can't separate.
+- **The driver's own chaperone file** (as Sony's driver keeps `playstation_vr2/chaperone_info.vrchap`):
+  `<SteamVR config>/monado_psvr2/chaperone_info.vrchap`, published as `Prop_DriverProvidedChaperonePath_String`.
+  SteamVR's Room Setup writes the rooms drawn there; SteamVR's own file is no longer touched by this driver.
+  - Universe **5023**: this session (the headset starts a new tracking world at every start: all 26 recordings of
+    2026-11-18 began at 0 0 0). Reset every start, with a temporary square around the start position (`PLAY_AREA`,
+    default 2 m; `PLAY_AREA=0`: none). Not your room.
+  - Universe **5022**: the saved room. Active once a floor capture anchors the room in this session. It only ever
+    holds a room drawn in Room Setup: the driver never makes up bounds for it.
+- **Room Setup input.** Room Setup is a legacy-input app; our legacy binding gives it the controllers' poses
+  (`/pose/raw`), the trigger and haptics (the missing poses were why tracing didn't work before).
+- **Tracking restarts** are carried from the start of the session (before: only after 20 s), and the room is never
+  dropped any more: a restart or a jump is logged, and the room stays where it was (give or take the carry's error,
+  cm); a new capture on the mark refines it.
+- **When Room Setup starts before the room is anchored**, the left controller buzzes three times and the log says
+  how to anchor first (a room drawn in the session universe is gone at the next start).
+
+### Passthrough (seeing the room through the headset)
+
+The driver gives SteamVR the headset's bottom camera pair, the same cameras and images Sony's driver shows, so
+SteamVR's own **Room View** works, in Room Setup or any time.
+- SteamVR > Settings > Camera: turn **Enable Camera** on (once). Then Room View from the dashboard's camera button
+  (or the "double-click system button" option in the same settings page).
+- Greyscale, side by side stereo, brightened (`OVRN_CAMERA_GAMMA`, default 0.5; lower is brighter).
+  `OVRN_CAMERA=0` turns the cameras off for SteamVR.
+- The headset streams these images (camera mode 0x10) only while SteamVR wants them: on StartVideoStream, or while
+  SteamVR's internal camera frame queue has a reader (Room View in SteamVR 2.19 never sent StartVideoStream,
+  2026-11-18), then goes back to its default mode 2 s after the last reader left. Log: "ovrn: passthrough wanted
+  (...)" / "passthrough on" / "passthrough not wanted any more" / "passthrough off (N frames)".
+- **The headset's own button** (under the visor, the PS5's passthrough button) toggles Room View: each press is sent
+  as a double-click of the headset's system button, the gesture of SteamVR's Room View setting "double-click system
+  button". `OVRN_HEAD_BUTTON=system` sends it as a plain system button instead, `off` not at all.
+- How: `IVRCameraComponent` on the headset (published OpenVR interface; lens model Extended_FTheta fitted to the
+  cameras' own calibration, camera-to-head transforms from the headset's calibration), and also SteamVR's internal
+  camera frame queue `/lighthouse/camera/raw_frames` when SteamVR offers it (not in Valve's published header; how
+  PSVR2Toolkit gets the picture shown with SteamVR 2.x). Code: `steamvr_psvr2/ovrn_camera.hpp`.
+- Checked offline (`tests/tests_ovrn_camera`): the BC4 decode (layout, crop, brightening), the lens fit (recovers a
+  fisheye model's coefficients), the published frame path with a fake backend, and a real recorded frame decoded
+  (desk, monitor and hands visible, `OVRN_CAMERA_TEST_RECORDING=logs/camera-*.pv2c`). Not checked: SteamVR actually
+  showing it, and whether the picture lines up with the room (camera-to-head transforms, lens model).
+
+### Using it (manual validation)
+
+1. Start SteamVR with the driver (`./launch-steamvr.sh` or the DriverKit launcher).
+2. **Anchor the room** (each session): put the left controller on its floor mark, the same way round as always,
+   crouch next to it and hold Create for 2.5 s. Short buzz: done (log: `Room: captured ...`, then `Room: SteamVR
+   universe 5022 (the saved room)`). Long buzz: rejected, the reason is in the log.
+3. **First time only: draw the room.** SteamVR > Room Setup > Room-scale. The controllers should show as ready;
+   calibrate the floor; trace the room holding the trigger; accept. Log: `Room: Room Setup committed: universe 5022:
+   ... N walls ... geometry valid` (or the problems found).
+4. **Play:** walk towards a wall: SteamVR draws its boundary. It must stay in place while turning, walking, covering
+   a controller, and after the headset's tracking restarts.
+5. **Restart SteamVR:** repeat step 2 on the same mark; the boundary is back where it was.
+
+### Diagnostics (all `Room:` lines in vrserver's log)
+
+`chaperone file ... prepared`, `at start` / `now active` / `SteamVR changed the chaperone file` / `Room Setup
+committed` (universe, play area, walls, perimeter, floor area, winding, standing origin, problems), `state` every 30 s
+(universe, anchor, room transform, head raw -> world), `devices in the world frame` every 30 s (head and controllers),
+captures, tracking restarts and jumps.
+
+### Automated checks
+
+- `tests/tests_ovrd_room.cpp` (14 cases): transforms and captures (below), the driver-owned file with its own
+  universes (folder created, no made-up room bounds, a drawn room kept), and the boundary checker
+  (`ovrd_room_check_universe`): SteamVR's own rectangle and a traced L-shaped room valid in both directions; an open
+  boundary, crossing walls, a repeated corner, a play area outside the room, a wall off the floor, a slanted quad, a
+  short quad and a missing standing origin reported.
+- `tests/tests_psvr2_slam_carry.cpp`: tracking restarts carried from the start, including a burst like the 17:24 run
+  (no step bigger than walking).
+- `ovrn_driver_harness --room`: the whole start-up against a scratch SteamVR config folder: the published file path,
+  both universes in it, the session universe active, SteamVR's own file untouched, inside-out tracking style.
+- Replay (`pose-sim/steamvr_sim`) of three 2026-11-18 recordings: the largest start-up position step is 4-5 mm (a
+  4.7 m restart at 6.7 s in the 16:18 run is carried).
+
+Not checked offline: SteamVR's Room Setup itself (needs the headset): tracing, the commit into our file, the
+boundary in games, Room Setup's events reaching the driver (the file watch logs the commit either way).
+
+## The old plugin (driver_monado) and the original design
 
 ## Coordinate frames
 
@@ -64,7 +154,7 @@ Rejections:
 - The headset's tracking re-originated within the last 5 s.
 - At a later capture, the saved heading axis is within 30° of vertical.
 
-## The room is dropped (back to universe 3) when
+## Tracking restarts and jumps (old text: the room used to be dropped; since 2026-11-18 it is kept and logged)
 
 - The headset's SLAM re-originates and the driver can't carry the position over. A reset is a jump of at least 5 cm landing within 1 cm of the origin. After the first 20 s, and at least 1 s after the previous reset, the driver carries the position across it (`psvr2_slam_carry_push`) and the room stays. Resets during startup or in a reset loop replace the tracking world; the driver counts those in `psvr2_get_slam_reset_count`, and the room is dropped.
 - The head moves more than 0.3 m within 50 ms (tracking runaway).
