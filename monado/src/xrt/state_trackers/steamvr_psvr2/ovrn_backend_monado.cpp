@@ -59,9 +59,11 @@ DEBUG_GET_ONCE_NUM_OPTION(ovrn_scale_percentage, "XRT_COMPOSITOR_SCALE_PERCENTAG
 DEBUG_GET_ONCE_FLOAT_OPTION(ovrn_vsync_to_photons_s, "OVRN_VSYNC_TO_PHOTONS_S", -1.0f)
 // The PS VR2's display properties and hidden-area mask as Sony's driver reports them (see headInfo), by group, to find
 // which one makes SteamVR pace the game as with Sony's driver: "all", or a comma list of throttle, framerate, syslayer,
-// texindex, supersample, dsc, edid, display, mask. Empty (default): none. Tried all at once 2026-11-18 16:43 together
-// with Sony's 3400x3468 render size: worse; never at our 2000x2040. OVRN_HIDDEN_AREA_FILE: another mask file.
-DEBUG_GET_ONCE_OPTION(ovrn_sony_props, "OVRN_SONY_PROPS", "")
+// texindex, supersample, dsc, edid, display, mask; "none": none. Tried all at once 2026-11-18 16:43 together with
+// Sony's 3400x3468 render size: worse; 17:30 at 2000x2040: "first 20 s good, extended play bugs came back" (the
+// game-side pacing problem fixed later). Default "all" since 2026-11-19: everything Sony's driver and PSVR2Toolkit
+// report for the headset, so games see the same headset as with Sony's driver. OVRN_HIDDEN_AREA_FILE: another mask.
+DEBUG_GET_ONCE_OPTION(ovrn_sony_props, "OVRN_SONY_PROPS", "all")
 DEBUG_GET_ONCE_OPTION(ovrn_hidden_area_file, "OVRN_HIDDEN_AREA_FILE", NULL)
 DEBUG_GET_ONCE_FLOAT_OPTION(ovrn_photons_to_vblank_s, "OVRN_PHOTONS_TO_VBLANK_S", -1.0f)
 DEBUG_GET_ONCE_NUM_OPTION(ovrn_distortion_mesh_res, "OVRN_DISTORTION_MESH_RES", 80)
@@ -150,14 +152,17 @@ public:
 		 * playstation_vr2/chaperone_info.vrchap), published to SteamVR as Prop_DriverProvidedChaperonePath_String;
 		 * SteamVR's Room Setup writes the rooms drawn there. Universe kSessionUniverse is this session's frame (the
 		 * headset starts a new tracking world at every start: all 26 recordings of 2026-11-18 began at 0 0 0), with
-		 * a temporary square play area around the start (PLAY_AREA, 0: none); kRoomUniverse is the saved room,
-		 * active once a floor capture anchors it, and only ever holds a room drawn in Room Setup (no made-up bounds).
+		 * a square play area around the start (PLAY_AREA, the DriverKit's default play area; 0: none);
+		 * kRoomUniverse is the saved room, active once a floor capture anchors it: the same default square until a
+		 * room is drawn in Room Setup, which then replaces it and is kept (the default play area as ALVR sets one;
+		 * the DriverKit's "Set Default Play Area" takes the drawn room out again, 2026-11-19).
 		 */
 		const std::string global = ovrd_room_chaperone_path();
 		if (!global.empty()) {
 			m_chaperonePath = global.substr(0, global.rfind('/')) + "/monado_psvr2/chaperone_info.vrchap";
 		}
-		m_room.init(debug_get_float_option_ovrn_play_area_size(), 0.0f, m_chaperonePath, kRoomUniverse,
+		const float play_area = debug_get_float_option_ovrn_play_area_size();
+		m_room.init(play_area, play_area, m_chaperonePath, kRoomUniverse,
 		            kSessionUniverse);
 		if (m_room.chaperone_path().empty()) {
 			m_chaperonePath.clear(); // the room code is off or couldn't prepare the file: SteamVR's own file
@@ -318,7 +323,7 @@ public:
 					d.hidden_area_file = std::string(home) + "/.config/monado/psvr2-hidden-area.txt";
 				}
 			}
-			if (groups != ",,") {
+			if (groups != ",," && groups != ",none,") {
 				ovrd_log("ovrn: Sony display properties (OVRN_SONY_PROPS): %s, %zu set\n", debug_get_option_ovrn_sony_props(),
 				         d.bool_props.size() + d.int_props.size() + d.float_props.size() +
 				             (d.hidden_area_file.empty() ? 0 : 1));
@@ -566,6 +571,18 @@ public:
 		return m_headButton;
 	}
 
+	bool
+	hasProximity() override
+	{
+		return m_head != NULL && m_head->name == XRT_DEVICE_PSVR2;
+	}
+
+	bool
+	headWorn() override
+	{
+		return m_headWorn;
+	}
+
 	std::string
 	chaperoneJson() override
 	{
@@ -612,6 +629,8 @@ public:
 			for (uint32_t k = 0; k < m_head->input_count; k++) {
 				if (m_head->inputs[k].name == XRT_INPUT_PSVR2_SYSTEM_CLICK) {
 					m_headButton = m_head->inputs[k].value.boolean;
+				} else if (m_head->inputs[k].name == XRT_INPUT_GENERIC_HEAD_DETECT) {
+					m_headWorn = m_head->inputs[k].value.boolean;
 				}
 			}
 		}
@@ -646,10 +665,15 @@ public:
 		}
 		struct t_camera_calibration cams[2];
 		struct xrt_pose poses[2];
-		if (!psvr2_get_bottom_cameras(m_head, cams, poses)) {
+		// OVRN_CAMERA_POSES=tracker: the controller tracker's camera poses for the picture, to compare (2026-11-19);
+		// default: the cameras' measured placement. Either way the controller tracker itself is untouched.
+		const char *which = getenv("OVRN_CAMERA_POSES");
+		const bool tracker = which != nullptr && strcmp(which, "tracker") == 0;
+		if (!psvr2_get_bottom_cameras(m_head, cams, poses, tracker)) {
 			return false;
 		}
 		CameraInfo info;
+		info.tracker_poses = tracker;
 		info.width = cams[0].image_size_pixels.w;
 		info.height = cams[0].image_size_pixels.h;
 		for (int c = 0; c < 2; c++) {
@@ -879,6 +903,7 @@ private:
 	int m_promptPulses = 0;
 	int64_t m_promptNextNs = 0;
 	bool m_headButton = false; //!< RunFrame thread
+	bool m_headWorn = false;   //!< RunFrame thread: the headset's wear sensor
 	uint32_t m_headPresses = 0; //!< headset button presses (in the 30 s device line)
 	int64_t m_lastDeviceLogNs = 0;
 

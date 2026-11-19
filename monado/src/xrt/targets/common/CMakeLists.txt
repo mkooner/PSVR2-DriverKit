@@ -164,6 +164,9 @@ endif()
 
 if(XRT_BUILD_DRIVER_PSVR2)
 	target_link_libraries(target_lists PRIVATE drv_psvr2)
+	# target_builder_psvr2.c includes psvr2.h, which includes libusb.h (a minimal build with only the PS VR2
+	# drivers had no other target providing the path, 2026-11-19).
+	target_include_directories(target_lists PRIVATE ${LIBUSB1_INCLUDE_DIRS})
 endif()
 
 if(XRT_BUILD_DRIVER_REALSENSE)

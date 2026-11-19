@@ -151,6 +151,8 @@ struct FakeProperties : IVRProperties
 
 //! Boolean settings the driver wrote ("section/key"), as SteamVR's settings file would hold them.
 std::map<std::string, bool> g_bools;
+//! Integer settings the driver wrote ("section/key").
+std::map<std::string, int32_t> g_ints;
 
 struct FakeSettings : IVRSettings
 {
@@ -161,7 +163,12 @@ struct FakeSettings : IVRSettings
 		std::lock_guard<std::mutex> l(g_mutex);
 		g_bools[std::string(section) + "/" + key] = value;
 	}
-	void SetInt32(const char *, const char *, int32_t, EVRSettingsError *) override {}
+	void
+	SetInt32(const char *section, const char *key, int32_t value, EVRSettingsError *) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_ints[std::string(section) + "/" + key] = value;
+	}
 	void SetFloat(const char *, const char *, float, EVRSettingsError *) override {}
 	void SetString(const char *, const char *, const char *, EVRSettingsError *) override {}
 	bool
@@ -175,12 +182,14 @@ struct FakeSettings : IVRSettings
 		return it != g_bools.end() && it->second;
 	}
 	int32_t
-	GetInt32(const char *, const char *, EVRSettingsError *e) override
+	GetInt32(const char *section, const char *key, EVRSettingsError *e) override
 	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		auto it = g_ints.find(std::string(section) + "/" + key);
 		if (e != nullptr) {
-			*e = VRSettingsError_UnsetSettingHasNoDefault;
+			*e = it != g_ints.end() ? VRSettingsError_None : VRSettingsError_UnsetSettingHasNoDefault;
 		}
-		return 0;
+		return it != g_ints.end() ? it->second : 0;
 	}
 	float
 	GetFloat(const char *, const char *, EVRSettingsError *e) override
@@ -206,6 +215,7 @@ struct FakeSettings : IVRSettings
 	{
 		std::lock_guard<std::mutex> l(g_mutex);
 		g_bools.erase(std::string(section) + "/" + key);
+		g_ints.erase(std::string(section) + "/" + key);
 	}
 };
 
@@ -234,6 +244,37 @@ struct Component
 };
 std::vector<Component> g_components; //!< handle = index + 1
 
+//! A skeleton component: its updates per motion range, and the first problem seen in a pose (empty: all valid).
+struct Skeleton
+{
+	PropertyContainerHandle_t container;
+	std::string path, skeleton_path;
+	int with_controller = 0, without_controller = 0;
+	std::string problem;
+};
+std::vector<Skeleton> g_skeletons; //!< handle = 100000 + index
+
+std::string
+bone_problem(const VRBoneTransform_t *t, uint32_t n)
+{
+	if (n != 31) {
+		return "bone count " + std::to_string(n);
+	}
+	for (uint32_t i = 0; i < n; i++) {
+		const float q = t[i].orientation.w * t[i].orientation.w + t[i].orientation.x * t[i].orientation.x +
+		                t[i].orientation.y * t[i].orientation.y + t[i].orientation.z * t[i].orientation.z;
+		if (!std::isfinite(q) || std::fabs(q - 1.0f) > 2e-3f) {
+			return "bone " + std::to_string(i) + " rotation";
+		}
+		for (int k = 0; k < 3; k++) {
+			if (!std::isfinite(t[i].position.v[k]) || std::fabs(t[i].position.v[k]) > 0.25f) {
+				return "bone " + std::to_string(i) + " position";
+			}
+		}
+	}
+	return {};
+}
+
 struct FakeInput : IVRDriverInput
 {
 	EVRInputError
@@ -260,8 +301,28 @@ struct FakeInput : IVRDriverInput
 	EVRInputError CreateScalarComponent(PropertyContainerHandle_t c, const char *n, VRInputComponentHandle_t *h, EVRScalarType, EVRScalarUnits) override { return add(c, n, 1, h); }
 	EVRInputError UpdateScalarComponent(VRInputComponentHandle_t h, float v, double) override { return set(h, v); }
 	EVRInputError CreateHapticComponent(PropertyContainerHandle_t c, const char *n, VRInputComponentHandle_t *h) override { return add(c, n, 2, h); }
-	EVRInputError CreateSkeletonComponent(PropertyContainerHandle_t, const char *, const char *, const char *, EVRSkeletalTrackingLevel, const VRBoneTransform_t *, uint32_t, VRInputComponentHandle_t *) override { return VRInputError_None; }
-	EVRInputError UpdateSkeletonComponent(VRInputComponentHandle_t, EVRSkeletalMotionRange, const VRBoneTransform_t *, uint32_t) override { return VRInputError_None; }
+	EVRInputError
+	CreateSkeletonComponent(PropertyContainerHandle_t c, const char *name, const char *skeleton, const char *, EVRSkeletalTrackingLevel, const VRBoneTransform_t *, uint32_t, VRInputComponentHandle_t *h) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_skeletons.push_back({c, name, skeleton});
+		*h = 100000 + g_skeletons.size() - 1;
+		return VRInputError_None;
+	}
+	EVRInputError
+	UpdateSkeletonComponent(VRInputComponentHandle_t h, EVRSkeletalMotionRange range, const VRBoneTransform_t *t, uint32_t n) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		if (h < 100000 || h - 100000 >= g_skeletons.size()) {
+			return VRInputError_InvalidHandle;
+		}
+		Skeleton &s = g_skeletons[h - 100000];
+		(range == VRSkeletalMotionRange_WithController ? s.with_controller : s.without_controller)++;
+		if (s.problem.empty()) {
+			s.problem = bone_problem(t, n);
+		}
+		return VRInputError_None;
+	}
 	EVRInputError CreatePoseComponent(PropertyContainerHandle_t, const char *, VRInputComponentHandle_t *) override { return VRInputError_None; }
 	EVRInputError UpdatePoseComponent(VRInputComponentHandle_t, const HmdMatrix34_t *, double) override { return VRInputError_None; }
 	EVRInputError CreateEyeTrackingComponent(PropertyContainerHandle_t, const char *, VRInputComponentHandle_t *) override { return VRInputError_None; }
@@ -428,6 +489,67 @@ main(int argc, char **argv)
 	}
 	FakeContext context;
 
+	// --see-through: Sony-style see-through. The user's camera settings (style 2 "Colored Ghosts", camera on, no
+	// roomView key) are saved and the opaque view set for the session; SteamVR's Room View shown / hidden events turn
+	// the game pause and reduced rendering on / off; Cleanup puts the user's settings back exactly.
+	if (argc > 1 && !strcmp(argv[1], "--see-through")) {
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			g_ints["camera/roomViewStyle"] = 2;
+			g_bools["camera/enableCamera"] = true;
+		}
+		check(provider->Init(&context) == VRInitError_None, "Init succeeds");
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_ints["camera/roomViewStyle"] == 4 && g_bools["camera/enableCamera"] && g_ints.count("camera/roomView") &&
+			          g_ints["camera/roomView"] == 1,
+			      "see-through: SteamVR's camera on with the opaque view for the session");
+			check(g_bools["driver_monado_psvr2/seeThroughSettingsSet"], "see-through: noted in the driver's own section");
+		}
+		std::vector<Added> added;
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			added = g_added;
+		}
+		for (uint32_t i = 0; i < added.size(); i++) {
+			added[i].driver->Activate(i);
+		}
+		bool pause = true, reduced = true;
+		check(!prop(0, Prop_DriverRequestsApplicationPause_Bool, &pause) || !pause, "see-through: no pause at the start");
+		for (int type : {(int)VREvent_RoomViewShown, (int)VREvent_RoomViewHidden}) {
+			VREvent_t ev = {};
+			ev.eventType = (uint32_t)type;
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				g_events.push_back(ev);
+			}
+			provider->RunFrame();
+			const bool want = type == VREvent_RoomViewShown;
+			check(prop(0, Prop_DriverRequestsApplicationPause_Bool, &pause) && pause == want &&
+			          prop(0, Prop_DriverRequestsReducedRendering_Bool, &reduced) && reduced == want,
+			      want ? "see-through on: SteamVR asked to pause the game and render less"
+			           : "see-through off: the game runs again at full rendering");
+		}
+		provider->Cleanup();
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_ints.count("camera/roomViewStyle") && g_ints["camera/roomViewStyle"] == 2 && g_bools["camera/enableCamera"] &&
+			          !g_ints.count("camera/roomView"),
+			      "see-through: the user's camera settings put back exactly at Cleanup");
+			bool notes = false;
+			for (auto &kv : g_bools) {
+				notes = notes || kv.first.find("driver_monado_psvr2/seeThrough") == 0;
+			}
+			for (auto &kv : g_ints) {
+				notes = notes || kv.first.find("driver_monado_psvr2/seeThrough") == 0;
+			}
+			check(!notes, "see-through: the driver's notes taken out again");
+		}
+		check(dlclose(lib) == 0, "the driver unloads");
+		printf("%s\n", g_fails ? "FAILED" : "all checks passed");
+		return g_fails ? 1 : 0;
+	}
+
 	// --late: the simulated left controller appears only after the start (a Sense controller connecting late):
 	// the driver adds it to SteamVR from RunFrame, and its poses flow once SteamVR activates it.
 	if (argc > 1 && !strcmp(argv[1], "--late")) {
@@ -497,6 +619,7 @@ main(int argc, char **argv)
 			g_props.clear();
 			g_eyeToHead.clear();
 			g_components.clear();
+			g_skeletons.clear();
 			g_events.clear();
 		}
 		unsetenv("DISABLE_STEAMVR_LINUX_FIXES");
@@ -735,6 +858,23 @@ main(int argc, char **argv)
 			}
 			check(n_inputs[0] == 3 && n_inputs[1] == 3 && n_haptic[0] == 1 && n_haptic[1] == 1,
 			      "each controller has its input components and a haptic component");
+			{
+				std::lock_guard<std::mutex> l(g_mutex);
+				bool paths = g_skeletons.size() == 2, valid = true, every_frame = true;
+				for (const Skeleton &k : g_skeletons) {
+					const bool left = k.container == 1001;
+					paths = paths && k.path == (left ? "/input/skeleton/left" : "/input/skeleton/right") &&
+					        k.skeleton_path == (left ? "/skeleton/hand/left" : "/skeleton/hand/right");
+					valid = valid && k.problem.empty();
+					every_frame = every_frame && k.with_controller >= 41 && k.without_controller >= 41;
+					if (!k.problem.empty()) {
+						printf("    skeleton %s: %s\n", k.path.c_str(), k.problem.c_str());
+					}
+				}
+				check(paths, "each controller has a hand skeleton (/input/skeleton/left|right, as Sony's driver)");
+				check(valid, "every skeleton pose SteamVR gets has 31 valid bones");
+				check(every_frame, "both skeleton motion ranges are set at activation and every frame after");
+			}
 			check(trigger == 0.5f && trigger_updates >= 40 && stick_l == -1.0f && stick_r == 1.0f,
 			      "input values reach SteamVR every frame, per hand");
 			uint64_t universe1 = 0, universe_c = 0;

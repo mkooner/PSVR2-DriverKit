@@ -84,14 +84,17 @@ struct xrt_pose;
 
 /*!
  * The bottom cameras' calibration (2 entries: left, right of the headset's own lens model) and their poses in the
- * head frame (OpenXR axes: x right, y up, looking along -z; hand tracking converts them to OpenCV axes itself), from
- * the headset's calibration. False until it has
- * been received.
+ * head frame (OpenXR axes: x right, y up, looking along -z), from the headset's calibration. The poses: with
+ * @p tracker_poses the controller tracker's camera chain (as hand tracking uses them), otherwise the cameras' measured
+ * placement (psvr2_bottom_cameras_in_head). False until the calibration has been received.
  *
  * @ingroup drv_psvr2
  */
 bool
-psvr2_get_bottom_cameras(struct xrt_device *xdev, struct t_camera_calibration *out_cams, struct xrt_pose *out_poses);
+psvr2_get_bottom_cameras(struct xrt_device *xdev,
+                         struct t_camera_calibration *out_cams,
+                         struct xrt_pose *out_poses,
+                         bool tracker_poses);
 
 
 struct t_timing_event_source *

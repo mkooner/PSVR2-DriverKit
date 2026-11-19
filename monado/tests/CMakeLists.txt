@@ -58,6 +58,7 @@ if(XRT_BUILD_DRIVER_HANDTRACKING)
 endif()
 if(XRT_FEATURE_STEAMVR_PLUGIN)
 	list(APPEND tests tests_ovrn_room)
+	list(APPEND tests tests_ovrn_skeleton)
 	if(XRT_BUILD_DRIVER_PSVR2)
 		list(APPEND tests tests_ovrn_camera)
 	endif()
@@ -107,9 +108,12 @@ if(XRT_FEATURE_STEAMVR_PLUGIN)
 	target_sources(tests_ovrn_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2/ovrn_room.cpp)
 	target_include_directories(tests_ovrn_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2)
 	target_link_libraries(tests_ovrn_room PRIVATE aux_math xrt-interfaces)
+	target_include_directories(tests_ovrn_skeleton PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2)
+	target_link_libraries(tests_ovrn_skeleton PRIVATE xrt-external-openvr)
 	if(XRT_BUILD_DRIVER_PSVR2)
 		target_include_directories(
 			tests_ovrn_camera PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2
+			${PROJECT_SOURCE_DIR}/src/xrt/drivers
 			)
 		target_link_libraries(
 			tests_ovrn_camera PRIVATE xrt-external-openvr xrt-external-bcdec aux_tracking aux_util aux_math

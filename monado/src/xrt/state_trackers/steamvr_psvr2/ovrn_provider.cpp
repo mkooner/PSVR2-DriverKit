@@ -39,6 +39,7 @@ public:
 	{
 		VR_INIT_SERVER_DRIVER_CONTEXT(context);
 		applyCompositorDefaults();
+		applySeeThroughSettings();
 		// OVRN_BACKEND=sim: the simulated headset (tests); otherwise Monado's devices.
 		const char *which = getenv("OVRN_BACKEND");
 		m_backend = (which != nullptr && strcmp(which, "sim") == 0) ? make_sim_backend() : make_monado_backend();
@@ -80,6 +81,7 @@ public:
 			m_backend.reset();
 		}
 		restoreCompositorDefaults();
+		restoreSeeThroughSettings();
 		VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 	}
 
@@ -126,6 +128,14 @@ public:
 			if (event.eventType == vr::VREvent_ChaperoneRoomSetupStarting ||
 			    event.eventType == vr::VREvent_ChaperoneRoomSetupCommitted) {
 				m_backend->roomSetupEvent(event.eventType);
+				continue;
+			}
+			if (event.eventType == vr::VREvent_RoomViewShown || event.eventType == vr::VREvent_RoomViewHidden) {
+				const bool on = event.eventType == vr::VREvent_RoomViewShown;
+				if (m_hmd) {
+					m_hmd->setSeeThrough(on);
+				}
+				log("ovrn: see-through %s\n", on ? "on (game paused, SteamVR renders less)" : "off");
 				continue;
 			}
 			if (event.eventType != vr::VREvent_Input_HapticVibration) {
@@ -218,6 +228,95 @@ private:
 	}
 
 	bool m_asyncSet = false;
+
+	/*
+	 * See-through, as on Sony's driver (its see-through mode, 2026-11-19): the headset's function button shows the
+	 * whole camera picture, and pressing it again goes back to the game. Drawn by SteamVR, which owns the display here:
+	 * the button is bound to SteamVR's Toggle Room View (resources/input/vrcompositor_binding_playstation_vr2_hmd.json)
+	 * and, for the session, SteamVR's camera view is the opaque picture (camera/roomViewStyle 4) with no edge or ghost
+	 * styles, and the camera on. The user's own camera settings are noted in our section and put back at Cleanup
+	 * (also after a crash, by the next start). OVRN_SEE_THROUGH=0 leaves SteamVR's camera settings alone.
+	 */
+	struct CameraSetting
+	{
+		const char *key;
+		bool is_bool;
+		int32_t ours;
+	};
+	// (as openvr_driver.h's k_pch_Camera_* names, written out: those aren't constant expressions)
+	static constexpr CameraSetting kSeeThroughSettings[] = {
+	    {"enableCamera", true, 1},
+	    {"roomViewStyle", false, vr::CAMERA_ROOMVIEW_STYLE_VIDEO_OPAQUE},
+	    {"roomView", false, 1}, // on (2D): SteamVR's camera view may be opened
+	};
+	static constexpr const char *kSeeThroughNoteKey = "seeThroughSettingsSet";
+
+	static std::string
+	savedKey(const char *key, const char *what)
+	{
+		return std::string("seeThroughUser_") + key + what;
+	}
+
+	void
+	applySeeThroughSettings()
+	{
+		const char *e = getenv("OVRN_SEE_THROUGH");
+		vr::IVRSettings *settings = vr::VRSettings();
+		if ((e != nullptr && strcmp(e, "0") == 0) || settings == nullptr) {
+			return;
+		}
+		vr::EVRSettingsError err = vr::VRSettingsError_None;
+		const bool noted = settings->GetBool(kOwnSection, kSeeThroughNoteKey, &err) && err == vr::VRSettingsError_None;
+		for (const CameraSetting &c : kSeeThroughSettings) {
+			// The user's value, unless a previous session (ended without Cleanup) already noted it.
+			if (!noted) {
+				err = vr::VRSettingsError_None;
+				const int32_t v = c.is_bool ? (int32_t)settings->GetBool(vr::k_pch_Camera_Section, c.key, &err)
+				                            : settings->GetInt32(vr::k_pch_Camera_Section, c.key, &err);
+				const bool present = err == vr::VRSettingsError_None;
+				settings->SetBool(kOwnSection, savedKey(c.key, "_present").c_str(), present);
+				settings->SetInt32(kOwnSection, savedKey(c.key, "_value").c_str(), present ? v : 0);
+			}
+			if (c.is_bool) {
+				settings->SetBool(vr::k_pch_Camera_Section, c.key, c.ours != 0);
+			} else {
+				settings->SetInt32(vr::k_pch_Camera_Section, c.key, c.ours);
+			}
+		}
+		settings->SetBool(kOwnSection, kSeeThroughNoteKey, true);
+		m_seeThroughSet = true;
+		log("ovrn: see-through: the headset button shows the whole camera picture (SteamVR camera on, opaque view; "
+		    "your camera settings come back at shutdown; OVRN_SEE_THROUGH=0 leaves them alone)\n");
+	}
+
+	void
+	restoreSeeThroughSettings()
+	{
+		vr::IVRSettings *settings = vr::VRSettings();
+		if (!m_seeThroughSet || settings == nullptr) {
+			return;
+		}
+		for (const CameraSetting &c : kSeeThroughSettings) {
+			vr::EVRSettingsError err = vr::VRSettingsError_None;
+			const bool present = settings->GetBool(kOwnSection, savedKey(c.key, "_present").c_str(), &err);
+			err = vr::VRSettingsError_None;
+			const int32_t v = settings->GetInt32(kOwnSection, savedKey(c.key, "_value").c_str(), &err);
+			if (!present) {
+				settings->RemoveKeyInSection(vr::k_pch_Camera_Section, c.key);
+			} else if (c.is_bool) {
+				settings->SetBool(vr::k_pch_Camera_Section, c.key, v != 0);
+			} else {
+				settings->SetInt32(vr::k_pch_Camera_Section, c.key, v);
+			}
+			settings->RemoveKeyInSection(kOwnSection, savedKey(c.key, "_present").c_str());
+			settings->RemoveKeyInSection(kOwnSection, savedKey(c.key, "_value").c_str());
+		}
+		settings->RemoveKeyInSection(kOwnSection, kSeeThroughNoteKey);
+		m_seeThroughSet = false;
+		log("ovrn: see-through: your SteamVR camera settings put back\n");
+	}
+
+	bool m_seeThroughSet = false;
 
 	/*!
 	 * One thread hands every device's pose to SteamVR on a steady 1 ms grid of absolute deadlines (no drift from the

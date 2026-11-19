@@ -27,6 +27,15 @@
         0,
         0
       ]
+    },
+    "/proximity": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        106,
+        67
+      ]
     }
-  }
+  },
+  "legacy_binding": "{monado}/input/legacy_binding_playstation_vr2.json"
 }

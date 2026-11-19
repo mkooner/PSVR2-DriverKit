@@ -1,0 +1,20 @@
+{
+  "bindings": {
+    "/actions/legacy": {
+      "sources": [
+        {
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/head_proximity"
+            }
+          },
+          "mode": "button",
+          "path": "/user/head/proximity"
+        }
+      ]
+    }
+  },
+  "controller_type": "playstation_vr2_hmd",
+  "description": "Headset worn sensor for legacy (OpenVR 1.0) apps, as Sony's driver",
+  "name": "Legacy Bindings for PS VR2 Headset"
+}
