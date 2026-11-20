@@ -179,17 +179,13 @@ const CONFIG_VERSION: u32 = 8;
 
 impl Default for Config {
     fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let kit = format!("{home}/Documents/Claude/Monado/psvr2-test");
-        let mut settings = default_settings();
-        for s in settings.iter_mut() {
-            if s.key == "VIT_SYSTEM_LIBRARY_PATH" {
-                s.kind = Kind::Value { value: format!("{home}/Documents/Claude/Monado/basalt-install/lib/libbasalt.so") };
-            }
-        }
+        // A fresh install: everything in the Compile Driver tab's default folder (the commands and launches stay empty
+        // until a compile puts a build there; driver.env then names the real folders, see load_config).
+        let install = default_install_dir();
+        let settings = default_settings();
         Config {
-            test_kit: kit,
-            monado_build: format!("{home}/Documents/Claude/Monado/trial/build"),
+            test_kit: format!("{install}/kit"),
+            monado_build: format!("{install}/build"),
             settings,
             steam_root: String::new(),
             steamvr_dir: String::new(),
@@ -457,7 +453,7 @@ fn bt_controllers() -> (Option<bool>, Option<bool>) {
     (left, right)
 }
 
-/// The driver's chaperone file without a room drawn in Room Setup in the saved-room universe (5022): Some(new text),
+/// SteamVR's chaperone file without a room drawn in Room Setup in the saved-room universe (5022): Some(new text),
 /// or None if there is none (the driver's default square, marked monado_rectangle, and other universes are kept).
 fn without_drawn_room(text: &str) -> Result<Option<String>, String> {
     let mut doc: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -654,6 +650,8 @@ struct Launcher {
     app_path: String,
     app_args: String,
     message: String,
+    /// Set Custom Play Area: the "put on your headset" prompt, while shown.
+    headset_prompt: bool,
     saved_at: Option<Instant>,
     build: Arc<Mutex<BuildState>>,
     /// The Compile tab's Check: is the installed build the latest on GitHub?
@@ -700,6 +698,7 @@ impl Launcher {
             app_path: String::new(),
             app_args: String::new(),
             message: String::new(),
+            headset_prompt: false,
             saved_at: None,
             build: Arc::new(Mutex::new(BuildState::default())),
             check: Arc::new(Mutex::new(CheckState::default())),
@@ -759,8 +758,9 @@ impl Launcher {
         }
     }
 
-    /// The driver's own chaperone file (driver_monado_psvr2: <SteamVR config>/monado_psvr2/chaperone_info.vrchap),
-    /// SteamVR's config folder from ~/.config/openvr/openvrpaths.vrpath as the driver finds it.
+    /// SteamVR's chaperone file (<SteamVR config>/chaperone_info.vrchap), where the driver keeps its rooms (universes
+    /// 5022 and 5023) since 2026-11-19: SteamVR couldn't save into the driver's own file (monado_psvr2/...), which the
+    /// driver moves over once. SteamVR's config folder from ~/.config/openvr/openvrpaths.vrpath as the driver finds it.
     fn chaperone_file(&self) -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_default();
         let vrpath = Path::new(&home).join(".config/openvr/openvrpaths.vrpath");
@@ -776,7 +776,7 @@ impl Launcher {
             };
             root.join("config")
         });
-        config.join("monado_psvr2/chaperone_info.vrchap")
+        config.join("chaperone_info.vrchap")
     }
 
     /// Set Default Play Area: take a room drawn in Room Setup out of the driver's saved-room universe (5022,
@@ -826,9 +826,24 @@ impl Launcher {
         }
     }
 
-    /// Set Custom Play Area: SteamVR's Room Setup, to draw your own room. SteamVR running: asked to open it
-    /// (tools/vrlaunch, a background client); not running: started with Room Setup opening (ROOM_SETUP=1).
+    /// Set Custom Play Area: SteamVR's in-headset Room Setup (as on Steam Frame: floor, then trace the play area).
+    /// Only SteamVR's dashboard can start it (vrcmd --resetroomsetup only reset and recommitted the room, 2026-11-19
+    /// 22:05), so the player gets the steps to open it there; SteamVR is started first if it isn't running.
     fn set_custom_play_area(&mut self, steamvr_running: bool) {
+        self.headset_prompt = true;
+        if !steamvr_running {
+            self.start_steamvr_with(&[]);
+            if self.steamvr.is_some() {
+                self.message = "SteamVR starting; then open Room Setup in the headset (steps on screen).".into();
+            }
+        } else {
+            self.message = "Open Room Setup in the headset (steps on screen).".into();
+        }
+    }
+
+    /// Set Custom Play Area (legacy): SteamVR's desktop Room Setup tool. SteamVR running: asked to open it
+    /// (tools/vrlaunch, a background client); not running: started with Room Setup opening (ROOM_SETUP=1).
+    fn set_custom_play_area_legacy(&mut self, steamvr_running: bool) {
         if !steamvr_running {
             self.start_steamvr_with(&[("ROOM_SETUP", "1")]);
             if self.steamvr.is_some() {
@@ -1325,6 +1340,21 @@ const PACKAGES: [(&str, &str); 3] = [
 ];
 
 /// A command or environment line to paste into a terminal, with its Copy button.
+/// This user's runtime folder: XDG_RUNTIME_DIR, else /run/user/<their user id> (from /proc/self/status).
+fn runtime_dir() -> String {
+    if let Ok(d) = std::env::var("XDG_RUNTIME_DIR") {
+        if !d.is_empty() {
+            return d;
+        }
+    }
+    let uid = fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| t.lines().find(|l| l.starts_with("Uid:")).and_then(|l| l.split_whitespace().nth(1).map(String::from)))
+        .unwrap_or_else(|| "0".into());
+    format!("/run/user/{uid}")
+}
+
+/// A command with a Copy button; an empty command shows a blank row (nothing compiled yet).
 fn copy_row(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new()
         .fill(theme::FIELD)
@@ -1333,7 +1363,12 @@ fn copy_row(ui: &mut egui::Ui, text: &str) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                if ui.button("Copy").on_hover_text("Copy to the clipboard").clicked() {
+                if ui
+                    .add_enabled(!text.is_empty(), egui::Button::new("Copy"))
+                    .on_hover_text("Copy to the clipboard")
+                    .on_disabled_hover_text("Compile the driver first (Compile Driver tab): the command appears once it's built.")
+                    .clicked()
+                {
                     ui.ctx().copy_text(text.to_string());
                 }
                 ui.add(egui::Label::new(egui::RichText::new(text).monospace().color(theme::GRAPHITE)).wrap());
@@ -1347,6 +1382,34 @@ impl eframe::App for Launcher {
         self.take_screenshot(ui.ctx());
         theme::paint_background(ui);
         let st = self.status.lock().unwrap().clone();
+        if self.headset_prompt {
+            let mut open = true;
+            egui::Window::new("Put on your headset")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    ui.label(egui::RichText::new("Open Room Setup in the headset").font(theme::bold(16.0)).color(theme::GRAPHITE));
+                    ui.add_space(6.0);
+                    for step in [
+                        "1. Put on your headset and pick up both controllers.",
+                        "2. Press the PS button to open the SteamVR dashboard.",
+                        "3. Select the Playspace button, right of the ☰ menu at the bottom.",
+                        "4. Choose Playspace Setup, then follow the steps: set the floor, then trace the edge of your play area.",
+                    ] {
+                        ui.label(step);
+                    }
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Only the floor height? Choose Adjust Floor Height in step 4 instead.").color(theme::SLATE).size(12.0));
+                    ui.add_space(10.0);
+                    if ui.add(theme::primary("OK")).clicked() {
+                        open = false;
+                    }
+                });
+            if !open {
+                self.headset_prompt = false;
+            }
+        }
         egui::Panel::top("header")
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(20, 16)))
             .show_inside(ui, |ui| {
@@ -1484,11 +1547,19 @@ impl Launcher {
                 }
                 if ui
                     .add_enabled(!st.service, egui::Button::new("Set Custom Play Area"))
-                    .on_hover_text("Opens SteamVR's Room Setup to draw your own room (starts SteamVR if needed).")
+                    .on_hover_text("How to open SteamVR's Room Setup in the headset: set the floor, then trace your play area (starts SteamVR if needed).")
                     .on_disabled_hover_text("Stop monado-service first: SteamVR needs the headset.")
                     .clicked()
                 {
                     self.set_custom_play_area(steamvr);
+                }
+                if ui
+                    .add_enabled(!st.service, egui::Button::new("Set Custom Play Area (legacy)"))
+                    .on_hover_text("SteamVR's older desktop Room Setup tool (starts SteamVR if needed).")
+                    .on_disabled_hover_text("Stop monado-service first: SteamVR needs the headset.")
+                    .clicked()
+                {
+                    self.set_custom_play_area_legacy(steamvr);
                 }
             });
         });
@@ -1533,13 +1604,15 @@ impl Launcher {
             });
             ui.add_space(6.0);
             theme::note(ui, "Native OpenXR apps started elsewhere (monado-service must be running):");
-            let manifest = self.cfg.manifest().display().to_string();
-            let xr = format!("XR_RUNTIME_JSON={manifest}");
-            copy_row(ui, &xr);
+            // Only real paths: blank until a compiled build (Monado's OpenXR runtime file) is found on this PC.
+            let manifest = self.cfg.manifest();
+            let built = manifest.is_file();
+            let xr = format!("XR_RUNTIME_JSON={}", manifest.display());
+            copy_row(ui, if built { &xr } else { "" });
             theme::note(ui, "Steam games on Monado (Properties > Launch Options):");
-            let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
-            let pv = format!("PRESSURE_VESSEL_FILESYSTEMS_RW={runtime}/monado_comp_ipc");
-            copy_row(ui, &format!("{xr} {pv} %command%"));
+            let pv = format!("PRESSURE_VESSEL_FILESYSTEMS_RW={}/monado_comp_ipc", runtime_dir());
+            let steam = format!("{xr} {pv} %command%");
+            copy_row(ui, if built { &steam } else { "" });
         });
     }
 

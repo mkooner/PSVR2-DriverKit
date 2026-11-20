@@ -1,0 +1,23 @@
+#!/bin/sh
+# Copyright 2026, Mehrab Kooner
+# SPDX-License-Identifier: BSL-1.0
+#
+# PSVR2-DriverKit AppImage entry. Once the player has compiled the kit locally (Compile Driver tab), driver.env records
+# where (PSVR2_KIT): that DriverKit is then the one that runs, so games launch from the player's own build and its
+# Compile tab keeps it up to date. Before that (or with PSVR2_DRIVERKIT_BUNDLED=1), the DriverKit inside this AppImage
+# runs, to compile and install everything.
+HERE="$(dirname "$(readlink -f "$0")")"
+BUNDLED="$HERE/usr/bin/PSVR2-DriverKit"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/PSVR2-DriverKit/driver.env"
+
+if [ "${PSVR2_DRIVERKIT_BUNDLED:-0}" != 1 ] && [ -f "$CONF" ]; then
+	KIT="$(sed -n 's/^PSVR2_KIT="\(.*\)"[[:space:]]*$/\1/p' "$CONF" | tail -n 1)"
+	LOCAL="$KIT/PSVR2-DriverKit"
+	# Only a real local build: never this AppImage itself or its mounted copy.
+	if [ -n "$KIT" ] && [ -x "$LOCAL" ] && [ "$(readlink -f "$LOCAL")" != "$(readlink -f "${APPIMAGE:-/nonexistent}")" ] &&
+		[ "$(readlink -f "$LOCAL")" != "$(readlink -f "$BUNDLED")" ]; then
+		export PSVR2_DRIVERKIT_FROM_APPIMAGE="${APPIMAGE:-1}"
+		exec "$LOCAL" "$@"
+	fi
+fi
+exec "$BUNDLED" "$@"
