@@ -20,6 +20,7 @@ namespace skel {
 struct Gestures
 {
 	float pinch = 0.0f;    //!< thumb tip on the index fingertip
+	float finger_pinch[4] = {}; //!< thumb tip on the index, middle, ring, little fingertip (pinch = finger_pinch[0])
 	float grab = 0.0f;     //!< middle, ring and little fingers closed
 	float curl[5] = {};    //!< each finger's bend: 0 straight, 1 fully closed (thumb..little)
 	float pinch_distance_m = 1.0f; //!< between the thumb and index fingertips' surfaces
@@ -56,15 +57,34 @@ gestures(const Joints &j, const float radius[kJointCount])
 {
 	using namespace detail;
 	Gestures g;
-	const float r = radius != nullptr ? radius[5] + radius[10] : 0.0f;
-	g.pinch_distance_m = len(j.pos[5] - j.pos[10]) - r;
-	g.pinch = 1.0f - clamp01((g.pinch_distance_m - 0.005f) / 0.035f);
+	for (int f = 1; f < 5; f++) {
+		const int tip = kTip[f];
+		const float r = radius != nullptr ? radius[5] + radius[tip] : 0.0f;
+		const float d = len(j.pos[5] - j.pos[tip]) - r;
+		g.finger_pinch[f - 1] = 1.0f - clamp01((d - 0.005f) / 0.035f);
+		if (f == 1) {
+			g.pinch_distance_m = d;
+		}
+	}
+	g.pinch = g.finger_pinch[0];
 	for (int f = 0; f < 5; f++) {
 		g.curl[f] = clamp01((finger_bend(j, kFingerFirst[f], kTip[f]) - 0.5f) / 3.5f);
 	}
 	const float closed = (g.curl[2] + g.curl[3] + g.curl[4]) / 3.0f;
 	g.grab = clamp01((closed - 0.3f) / 0.5f);
 	return g;
+}
+
+/*!
+ * Whether the palm faces @p eye (the head): its inner side (OpenXR's palm joint -Y) within ~50 degrees of the
+ * direction to it. @p palm_pos / @p palm_rot: the palm joint, @p eye in the same frame.
+ */
+inline bool
+palm_faces(detail::V palm_pos, detail::Q palm_rot, detail::V eye)
+{
+	using namespace detail;
+	const V inner = rotate(palm_rot, V{0, -1, 0});
+	return dot(inner, unit(eye - palm_pos)) > 0.65f;
 }
 
 //! A click from a value, with hysteresis (on above 0.85, off below 0.65).

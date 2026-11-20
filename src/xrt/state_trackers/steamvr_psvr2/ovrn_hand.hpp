@@ -14,6 +14,12 @@
  * Its pose is OpenXR's palm joint (-Z along the fingers, +Y out of the back of the hand: as a controller held pointing
  * forward), the skeleton's root. Poses come from the backend's hand tracking, which answers from its latest result:
  * nothing here waits for a camera frame.
+ *
+ * It presents itself as SteamVR's own tracked hands do (Valve's vrlink driver, svl_hand_interaction_augmented): hand
+ * priority -1 in the profile, the hand tracking status icons (from SteamVR's vrlink resources, referenced in place),
+ * /pose/raw, /pose/grip and /pose/tip made by the driver (tip: the dashboard's laser, from the index knuckle along the
+ * hand), per-finger pinches, and a system button on each hand: the palm toward the face with an index pinch, which
+ * the dashboard binding uses to open and close the dashboard (Valve's has it on the left hand only).
  * @ingroup st_ovrn
  */
 
@@ -44,7 +50,7 @@ public:
 	bool
 	inUse() const
 	{
-		return m_backend->hasHandTracking() && !m_backend->hasController(m_hand);
+		return m_backend->hasHandTracking() && !m_backend->controllerConnected(m_hand);
 	}
 
 	//! The palm's pose (pose thread). No velocities: SteamVR then shows the hand where it was last tracked.
@@ -98,7 +104,23 @@ public:
 			log("ovrn: %s hand tracked\n", m_hand == Hand::Left ? "left" : "right");
 		}
 		m_tracked = true;
-		setGestures(skel::gestures(in_root, j.radius));
+		const skel::Gestures g = skel::gestures(in_root, j.radius);
+		setGestures(g);
+		updateTip(in_root);
+		// The system gesture (either hand): palm toward the face and an index pinch.
+		bool system = false;
+		TrackedPose head;
+		if (m_backend->headPose(now_ns, &head) && head.position_valid) {
+			using namespace skel::detail;
+			const Pose &palm = j.joint[0];
+			const V eye{(float)head.pose.position.x, (float)head.pose.position.y, (float)head.pose.position.z};
+			system = skel::palm_faces(V{(float)palm.position.x, (float)palm.position.y, (float)palm.position.z},
+			                          Q{(float)palm.orientation.w, (float)palm.orientation.x,
+			                            (float)palm.orientation.y, (float)palm.orientation.z},
+			                          eye);
+		}
+		m_systemOn = skel::click(system ? g.pinch : 0.0f, m_systemOn);
+		vr::VRDriverInput()->UpdateBooleanComponent(m_system, m_systemOn, 0.0);
 	}
 
 	//! How many skeletons SteamVR got (for the tests and the log).
@@ -123,6 +145,21 @@ protected:
 		in->CreateScalarComponent(m_container, "/input/grip/value", &m_grip, vr::VRScalarType_Absolute,
 		                          vr::VRScalarUnits_NormalizedOneSided);
 		in->CreateBooleanComponent(m_container, "/input/grip/click", &m_gripClick);
+		static const char *const kPinch[4] = {"/input/index_pinch/value", "/input/middle_pinch/value",
+		                                      "/input/ring_pinch/value", "/input/pinky_pinch/value"};
+		for (int f = 0; f < 4; f++) {
+			in->CreateScalarComponent(m_container, kPinch[f], &m_pinch[f], vr::VRScalarType_Absolute,
+			                          vr::VRScalarUnits_NormalizedOneSided);
+		}
+		in->CreateBooleanComponent(m_container, "/input/system/click", &m_system);
+		// The poses apps and the dashboard bind (no render model gives them): raw and grip at the palm, tip ahead.
+		in->CreatePoseComponent(m_container, "/pose/raw", &m_poseRaw);
+		in->CreatePoseComponent(m_container, "/pose/grip", &m_poseGrip);
+		in->CreatePoseComponent(m_container, "/pose/tip", &m_poseTip);
+		const vr::HmdMatrix34_t identity = {{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
+		in->UpdatePoseComponent(m_poseRaw, &identity, 0.0);
+		in->UpdatePoseComponent(m_poseGrip, &identity, 0.0);
+		setTip({0.0f, 0.0f, -0.08f}); // until the hand is seen: 8 cm ahead of the palm, about the index knuckle
 		const bool left = m_hand == Hand::Left;
 		const vr::EVRInputError err = in->CreateSkeletonComponent(
 		    m_container, left ? "/input/skeleton/left" : "/input/skeleton/right",
@@ -160,6 +197,23 @@ private:
 		d.serial = m_serial;
 		d.controller_type = "playstation_vr2_hand";
 		d.input_profile = "{monado_psvr2}/input/playstation_vr2_hand_profile.json";
+		/*
+		 * The model SteamVR's own tracked hands use: a small pointer marker at /pose/tip (vrlink's shuttlecock).
+		 * SteamVR draws the hand itself from the skeleton; without a model it drew a generic controller (2026-11-20).
+		 */
+		d.render_model = "{vrlink}/rendermodels/shuttlecock";
+		// SteamVR's own hand tracking icons (its vrlink driver's resources, part of every SteamVR install).
+		const std::string icon = std::string("{vrlink}/icons/") + (m_hand == Hand::Left ? "left" : "right") + "_handtracking_";
+		d.string_props = {
+		    {vr::Prop_NamedIconPathDeviceOff_String, icon + "off.png"},
+		    {vr::Prop_NamedIconPathDeviceSearching_String, icon + "searching.gif"},
+		    {vr::Prop_NamedIconPathDeviceSearchingAlert_String, icon + "searching.gif"},
+		    {vr::Prop_NamedIconPathDeviceReady_String, icon + "ready.png"},
+		    {vr::Prop_NamedIconPathDeviceReadyAlert_String, icon + "ready_info.png"},
+		    {vr::Prop_NamedIconPathDeviceNotReady_String, icon + "off.png"},
+		    {vr::Prop_NamedIconPathDeviceStandby_String, icon + "off.png"},
+		    {vr::Prop_NamedIconPathDeviceAlertLow_String, icon + "ready_info.png"},
+		};
 		return d;
 	}
 
@@ -182,6 +236,30 @@ private:
 		return out;
 	}
 
+	/*!
+	 * The tip pose (the dashboard's laser) follows the index knuckle in the palm's frame, smoothed (0.1 s) so the
+	 * laser's origin doesn't shake with the joints; it keeps the palm's direction (along the hand).
+	 */
+	void
+	updateTip(const skel::Joints &in_palm)
+	{
+		using namespace skel::detail;
+		if (!in_palm.valid[7]) {
+			return;
+		}
+		const float a = 0.1f; // per frame at ~90 Hz: about 0.1 s
+		m_tipPos = m_tipPos + (in_palm.pos[7] - m_tipPos) * a;
+		setTip(m_tipPos);
+	}
+
+	void
+	setTip(skel::detail::V p)
+	{
+		m_tipPos = p;
+		const vr::HmdMatrix34_t m = {{{1, 0, 0, p.x}, {0, 1, 0, p.y}, {0, 0, 1, p.z}}};
+		vr::VRDriverInput()->UpdatePoseComponent(m_poseTip, &m, 0.0);
+	}
+
 	void
 	setGestures(const skel::Gestures &g)
 	{
@@ -192,6 +270,9 @@ private:
 		in->UpdateBooleanComponent(m_triggerClick, m_triggerOn, 0.0);
 		in->UpdateScalarComponent(m_grip, g.grab, 0.0);
 		in->UpdateBooleanComponent(m_gripClick, m_gripOn, 0.0);
+		for (int f = 0; f < 4; f++) {
+			in->UpdateScalarComponent(m_pinch[f], g.finger_pinch[f], 0.0);
+		}
 	}
 
 	Backend *const m_backend;
@@ -203,7 +284,14 @@ private:
 	vr::VRInputComponentHandle_t m_triggerClick = vr::k_ulInvalidInputComponentHandle;
 	vr::VRInputComponentHandle_t m_grip = vr::k_ulInvalidInputComponentHandle;
 	vr::VRInputComponentHandle_t m_gripClick = vr::k_ulInvalidInputComponentHandle;
-	bool m_triggerOn = false, m_gripOn = false, m_tracked = false;
+	vr::VRInputComponentHandle_t m_pinch[4] = {vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle,
+	                                           vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle};
+	vr::VRInputComponentHandle_t m_system = vr::k_ulInvalidInputComponentHandle;
+	vr::VRInputComponentHandle_t m_poseRaw = vr::k_ulInvalidInputComponentHandle;
+	vr::VRInputComponentHandle_t m_poseGrip = vr::k_ulInvalidInputComponentHandle;
+	vr::VRInputComponentHandle_t m_poseTip = vr::k_ulInvalidInputComponentHandle;
+	skel::detail::V m_tipPos{0.0f, 0.0f, -0.08f};
+	bool m_triggerOn = false, m_gripOn = false, m_tracked = false, m_systemOn = false;
 	uint64_t m_updates = 0;
 };
 

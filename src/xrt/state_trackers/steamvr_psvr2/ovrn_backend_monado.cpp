@@ -30,6 +30,7 @@
 #ifdef XRT_BUILD_DRIVER_PSVR2
 #include "ovrn_camera_fit.hpp"
 #include "psvr2/psvr2_interface.h"
+#include "psvr2/psvr2_hand_tracking.h"
 #endif
 
 #if defined(XRT_BUILD_DRIVER_PSVR2) && defined(XRT_BUILD_DRIVER_PSSENSE)
@@ -236,6 +237,13 @@ public:
 		const float play_area = debug_get_float_option_ovrn_play_area_size();
 		// Empty path: the room code uses SteamVR's own file (openvrpaths.vrpath's config folder).
 		m_room.init(play_area, play_area, std::string(), kRoomUniverse, kSessionUniverse);
+		m_handTrackingWanted = driverkitSetting("HAND_TRACKING") == "1";
+#ifdef XRT_BUILD_DRIVER_PSVR2
+		psvr2_hand_tracking_want(m_handTrackingWanted);
+#endif
+		ovrd_log("ovrn: hand tracking %s (DriverKit's setting, %s)\n",
+		         m_handTrackingWanted ? "on: the cameras track bare hands while a controller is off" : "off",
+		         driverkitSettingsPath().c_str());
 		if (xrt_instance_create(NULL, &m_xinst) != XRT_SUCCESS) {
 			*why = "xrt_instance_create failed";
 			return false;
@@ -505,6 +513,22 @@ public:
 		return m_hand[(int)hand] != NULL;
 	}
 
+	//! A Sense controller that was there but whose connection ended (turned off, out of range) isn't connected.
+	bool
+	controllerConnected(Hand hand) override
+	{
+		struct xrt_device *xdev = m_hand[(int)hand];
+		if (xdev == NULL) {
+			return false;
+		}
+#ifdef XRT_BUILD_DRIVER_PSSENSE
+		if (xdev->name == XRT_DEVICE_PSSENSE && pssense_is_disconnected(xdev)) {
+			return false;
+		}
+#endif
+		return true;
+	}
+
 	/*!
 	 * The Sense controllers as Sony's driver presents them, so SteamVR and apps recognise them: controller type
 	 * playstation_vr2_sense, Sony's input names, and a remapping in the profile that lets apps with only Touch, Index,
@@ -563,6 +587,68 @@ public:
 		}
 		*out = root_from_grip(grip, gripInRoot(hand));
 		return true;
+	}
+
+	/*!
+	 * DriverKit's settings file ($XDG_CONFIG_HOME/PSVR2-DriverKit/settings.conf, KEY=VALUE lines), read by the driver
+	 * itself so a setting applies however SteamVR is started (from Steam too, not only from DriverKit).
+	 */
+	static std::string
+	driverkitSettingsPath()
+	{
+		const char *xdg = getenv("XDG_CONFIG_HOME");
+		const char *home = getenv("HOME");
+		const std::string base = xdg != NULL && *xdg != '\0' ? std::string(xdg)
+		                         : home != NULL           ? std::string(home) + "/.config"
+		                                                  : std::string();
+		return base.empty() ? std::string() : base + "/PSVR2-DriverKit/settings.conf";
+	}
+
+	static std::string
+	driverkitSetting(const char *key)
+	{
+		const std::string path = driverkitSettingsPath();
+		FILE *f = path.empty() ? NULL : fopen(path.c_str(), "r");
+		if (f == NULL) {
+			return {};
+		}
+		std::string value;
+		char line[512];
+		const size_t n = strlen(key);
+		while (fgets(line, sizeof(line), f) != NULL) {
+			if (strncmp(line, key, n) == 0 && line[n] == '=') {
+				value = line + n + 1;
+				while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ')) {
+					value.pop_back();
+				}
+			}
+		}
+		fclose(f);
+		return value;
+	}
+
+	/*!
+	 * Hands are tracked while a controller is off (never connected, turned off, out of range), so the cameras and
+	 * Mercury only work when hands can be used; both controllers on switches it off again (RunFrame thread).
+	 */
+	void
+	switchHandTracking()
+	{
+#ifdef XRT_BUILD_DRIVER_PSVR2
+		if (!m_handTrackingWanted || m_head == NULL || m_head->name != XRT_DEVICE_PSVR2) {
+			return;
+		}
+		struct xrt_device *ht = psvr2_hmd_get_hand_tracker(m_head);
+		if (ht == NULL) {
+			return;
+		}
+		const bool on = !controllerConnected(Hand::Left) || !controllerConnected(Hand::Right);
+		if (on != m_handTrackingOn) {
+			m_handTrackingOn = on;
+			psvr2_hand_tracking_set_active(ht, on);
+			ovrd_log("ovrn: hand tracking %s\n", on ? "on (a controller is off)" : "off (both controllers are on)");
+		}
+#endif
 	}
 
 	//! The hand tracking device for a hand (optical hand tracking from the headset's cameras), or NULL.
@@ -819,6 +905,7 @@ public:
 				xrt_device_update_inputs(m_hand[i]);
 			}
 		}
+		switchHandTracking();
 		const bool was_down = m_headButton;
 		m_headButton = false;
 		if (m_head != NULL && m_head->name == XRT_DEVICE_PSVR2 && xrt_device_update_inputs(m_head) == XRT_SUCCESS) {
@@ -1245,6 +1332,8 @@ private:
 	struct xrt_device *m_head = NULL;
 	//! RunFrame and pose threads read them; set at start, or by runFrame when a late controller is ready.
 	std::atomic<struct xrt_device *> m_hand[2] = {{NULL}, {NULL}};
+	bool m_handTrackingWanted = false; //!< DriverKit's setting
+	bool m_handTrackingOn = false;     //!< RunFrame thread
 #ifdef OVRN_CONTROLLER_HOTPLUG
 	std::atomic<struct xrt_device *> m_late[2] = {{NULL}, {NULL}}; //!< made by the hotplug thread
 	struct xrt_frame_context m_lateFctx = {};

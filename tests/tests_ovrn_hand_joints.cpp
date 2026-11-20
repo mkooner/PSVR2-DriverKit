@@ -297,3 +297,18 @@ TEST_CASE("hand gestures: open hand, fist and pinch from the joints")
 		CHECK_FALSE(click(0.6f, true));
 	}
 }
+
+TEST_CASE("hand gestures: per-finger pinches and the palm facing the head")
+{
+	JointSkeleton js(builtin_rest(true), true);
+	const float radius[kJointCount] = {};
+	Joints j = js.openxr_frames_at_rest();
+	j.pos[5] = j.pos[20]; // thumb on the ring fingertip
+	const Gestures g = gestures(j, radius);
+	CHECK(g.finger_pinch[2] > 0.99f);
+	CHECK(g.finger_pinch[0] < 0.5f);
+	// a palm whose inner side (-Y) points at the eye, and one turned away
+	const Q up{}; // identity: the palm's inner side faces -Y (down)
+	CHECK(palm_faces(V{0, 1.0f, 0}, up, V{0, 0.5f, 0}));
+	CHECK_FALSE(palm_faces(V{0, 1.0f, 0}, up, V{0, 1.5f, 0}));
+}

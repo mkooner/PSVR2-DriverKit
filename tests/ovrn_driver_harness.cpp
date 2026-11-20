@@ -12,6 +12,7 @@
 #include "openvr_driver.h"
 
 #include <algorithm>
+#include <unistd.h>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -68,12 +69,15 @@ HmdMatrix34_t g_eyeMatrix[2] = {};
 const char *g_dumpPath = nullptr; //!< --real --dump <file>: the display as the driver describes it (vrdisplaydump format)
 std::map<uint64_t, std::map<int, std::vector<uint8_t>>> g_props; //!< container -> property -> bytes
 
+std::string g_logText; //!< everything the driver logged
+
 struct FakeLog : IVRDriverLog
 {
 	void
 	Log(const char *m) override
 	{
 		fputs(m, stdout);
+		g_logText += m;
 	}
 };
 
@@ -338,8 +342,16 @@ struct FakeInput : IVRDriverInput
 		}
 		return VRInputError_None;
 	}
-	EVRInputError CreatePoseComponent(PropertyContainerHandle_t, const char *, VRInputComponentHandle_t *) override { return VRInputError_None; }
-	EVRInputError UpdatePoseComponent(VRInputComponentHandle_t, const HmdMatrix34_t *, double) override { return VRInputError_None; }
+	EVRInputError
+	CreatePoseComponent(PropertyContainerHandle_t c, const char *n, VRInputComponentHandle_t *h) override
+	{
+		return add(c, n, 3, h);
+	}
+	EVRInputError
+	UpdatePoseComponent(VRInputComponentHandle_t h, const HmdMatrix34_t *m, double) override
+	{
+		return set(h, m != nullptr ? m->m[2][3] : 0.0f); // the offset's z (tip: ahead of the palm, negative)
+	}
 	EVRInputError
 	CreateEyeTrackingComponent(PropertyContainerHandle_t c, const char *name, VRInputComponentHandle_t *h) override
 	{
@@ -503,6 +515,11 @@ main(int argc, char **argv)
 		room_steam_config = room_dir + "/steamconfig";
 		mkdir((room_dir + "/openvr").c_str(), 0755);
 		mkdir(room_steam_config.c_str(), 0755);
+		// DriverKit's settings file, which the driver reads itself (hand tracking switched on there).
+		mkdir((room_dir + "/PSVR2-DriverKit").c_str(), 0755);
+		FILE *settings = fopen((room_dir + "/PSVR2-DriverKit/settings.conf").c_str(), "w");
+		fprintf(settings, "# test\nHAND_TRACKING=1\n");
+		fclose(settings);
 		FILE *f = fopen((room_dir + "/openvr/openvrpaths.vrpath").c_str(), "w");
 		fprintf(f, "{\"config\":[\"%s\"],\"version\":1}\n", room_steam_config.c_str());
 		fclose(f);
@@ -658,6 +675,11 @@ main(int argc, char **argv)
 		      "hands: their own device type and input profile (not another controller's)");
 		check(added[1].serial != added[2].serial && added[1].serial.find("-hand-left") != std::string::npos,
 		      "hands: their own serials");
+		check(sprop(1, Prop_NamedIconPathDeviceReady_String) == "{vrlink}/icons/left_handtracking_ready.png" &&
+		          sprop(2, Prop_NamedIconPathDeviceOff_String) == "{vrlink}/icons/right_handtracking_off.png",
+		      "hands: SteamVR's hand tracking icons, not a controller's");
+		check(sprop(1, Prop_RenderModelName_String) == "{vrlink}/rendermodels/shuttlecock",
+		      "hands: the render model SteamVR's own tracked hands use (a pointer marker, no controller drawn)");
 		DriverPose_t first = {};
 		for (int i = 0; i < 40; i++) {
 			provider->RunFrame();
@@ -702,6 +724,35 @@ main(int argc, char **argv)
 			}
 			check(pinch_min < 0.1f && pinch_max > 0.99f && click_max == 1.0f,
 			      "hands: a pinch (thumb tip on the index tip) pulls the trigger, open it is released");
+			// As SteamVR's own tracked hands (vrlink): per-finger pinches, a system button, the driver's poses.
+			auto has = [&](uint64_t container, const char *path, int kind) {
+				for (const Component &c : g_components) {
+					if (c.container == container && c.path == path && c.kind == kind) {
+						return true;
+					}
+				}
+				return false;
+			};
+			bool inputs = true, poses = true;
+			for (uint64_t c : {1001ull, 1002ull}) {
+				for (const char *p : {"/input/index_pinch/value", "/input/middle_pinch/value", "/input/ring_pinch/value",
+				                      "/input/pinky_pinch/value", "/input/grip/value"}) {
+					inputs = inputs && has(c, p, 1);
+				}
+				inputs = inputs && has(c, "/input/system/click", 0);
+				for (const char *p : {"/pose/raw", "/pose/grip", "/pose/tip"}) {
+					poses = poses && has(c, p, 3);
+				}
+			}
+			check(inputs, "hands: per-finger pinches, the grip and a system button, as SteamVR's own tracked hands");
+			check(poses, "hands: the driver gives /pose/raw, /pose/grip and /pose/tip (the dashboard's laser)");
+			float tip_z = 0.0f;
+			for (const Component &c : g_components) {
+				if (c.container == 1001 && c.path == "/pose/tip") {
+					tip_z = c.value;
+				}
+			}
+			check(tip_z < -0.01f, "hands: the tip pose is ahead of the palm, along the hand");
 			const DriverPose_t &last = g_poses[1].last;
 			check(last.poseIsValid && last.deviceIsConnected && last.vecPosition[0] < 0.0 &&
 			          std::fabs(last.vecPosition[1] - 1.2) < 0.15,
@@ -800,6 +851,15 @@ main(int argc, char **argv)
 			      "the SteamVRLinuxFixes layer is switched off for the compositor (environment it inherits)");
 			check(g_bools.count("steamvr/enableLinuxVulkanAsync") && g_bools["steamvr/enableLinuxVulkanAsync"],
 			      "SteamVR's async reprojection is switched on before the compositor starts");
+		}
+		if (room) {
+			check(g_logText.find("hand tracking on: the cameras track bare hands") != std::string::npos,
+			      "DriverKit's settings file reaches the driver however SteamVR starts (hand tracking on)");
+		} else if (monado && getenv("XDG_CONFIG_HOME") == nullptr &&
+		           access((std::string(getenv("HOME") ? getenv("HOME") : "") + "/.config/PSVR2-DriverKit/settings.conf").c_str(), F_OK) != 0) {
+			// (only without a real DriverKit settings file in the user's config)
+			check(g_logText.find("ovrn: hand tracking off") != std::string::npos,
+			      "without DriverKit's setting hand tracking stays off");
 		}
 		check(provider->GetInterfaceVersions() != nullptr, "interface versions are reported");
 		std::vector<Added> added;

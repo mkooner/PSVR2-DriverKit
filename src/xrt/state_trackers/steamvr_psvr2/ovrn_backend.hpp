@@ -254,6 +254,13 @@ public:
 	virtual void
 	haptic(Hand hand, float duration_s, float frequency_hz, float amplitude) = 0;
 
+	//! Whether the controller is connected now (it may have been once and be off now). Default: hasController.
+	virtual bool
+	controllerConnected(Hand hand)
+	{
+		return hasController(hand);
+	}
+
 	//! Whether the backend can track bare hands (optical hand tracking).
 	virtual bool
 	hasHandTracking()

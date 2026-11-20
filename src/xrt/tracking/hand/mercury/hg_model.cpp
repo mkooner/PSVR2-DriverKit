@@ -10,6 +10,7 @@
 // Many C api things were stolen from here (MIT license):
 // https://github.com/microsoft/onnxruntime-inference-examples/blob/main/c_cxx/fns_candy_style_transfer/fns_candy_style_transfer.c
 #include "hg_sync.hpp"
+#include <atomic>
 #include "hg_image_math.inl"
 #include "hg_numerics_checker.hpp"
 
@@ -305,52 +306,45 @@ init_hand_detection(HandTracking *hgt, onnx_state *wrap)
 }
 
 
+/*!
+ * One detector pass on @p img (a whole view, or a crop of one): each hand's confidence, and its centre and size in
+ * @p img's pixels. @p binned_out: the detector's input image, if wanted.
+ */
 static void
-run_hand_detection_unsafe(hand_detection_run_info *info)
+detect_in(HandTracking *hgt,
+          onnx_state *state,
+          const cv::Mat &img,
+          enum t_camera_orientation rot,
+          float out_conf[2],
+          xrt_vec2 out_center[2],
+          float out_size[2],
+          cv::Mat *binned_out,
+          bool mirror_pass)
 {
-	ht_view *view = info->view;
-	HandTracking *hgt = view->hgt;
-	onnx_state *state = &view->detection;
 	OnnxWrapper &wrap = *state->wrap;
 
-	cv::Mat &orig_data = view->run_model_on_this;
-
 	cv::Mat binned_uint8;
-
 	xrt_size desired_bin_size;
 	desired_bin_size.h = kDetectionInputSize;
 	desired_bin_size.w = kDetectionInputSize;
+	cv::Matx23f go_back = blackbar(img, rot, binned_uint8, desired_bin_size);
 
-	cv::Matx23f go_back = blackbar(orig_data, view->camera_info.camera_orientation, binned_uint8, desired_bin_size);
-
-	cv::Mat binned_float_wrapper_mat(cv::Size(kDetectionInputSize, kDetectionInputSize),
-	                                 CV_32FC1,             //
-	                                 state->wraps[0].data, //
-	                                 kDetectionInputSize * sizeof(float));
-
+	cv::Mat binned_float_wrapper_mat(cv::Size(kDetectionInputSize, kDetectionInputSize), CV_32FC1, //
+	                                 state->wraps[0].data, kDetectionInputSize * sizeof(float));
 	normalizeGrayscaleImage(binned_uint8, binned_float_wrapper_mat);
 
 	const OrtValue *inputs[] = {state->wraps[0].tensor};
 	const char *input_names[] = {state->wraps[0].name};
-
 	OrtValue *output_tensors[] = {nullptr, nullptr, nullptr, nullptr};
 	const char *output_names[] = {"hand_exists", "cx", "cy", "size"};
-
-	// Actually run the inference step
 	{
 		XRT_TRACE_IDENT(model);
 		static_assert(ARRAY_SIZE(input_names) == ARRAY_SIZE(inputs));
 		static_assert(ARRAY_SIZE(output_names) == ARRAY_SIZE(output_tensors));
-		// TODO ignoring errors, leaks OrtStatus on error
 		ORT_SAFE(wrap, Run(wrap.session, nullptr, input_names, inputs, ARRAY_SIZE(input_names), output_names,
 		                   ARRAY_SIZE(output_names), output_tensors));
 	}
-
-	float *hand_exists = nullptr;
-	float *cx = nullptr;
-	float *cy = nullptr;
-	float *sizee = nullptr;
-
+	float *hand_exists = nullptr, *cx = nullptr, *cy = nullptr, *sizee = nullptr;
 	ORT_SAFE(wrap, GetTensorMutableData(output_tensors[0], (void **)&hand_exists));
 	ORT_SAFE(wrap, GetTensorMutableData(output_tensors[1], (void **)&cx));
 	ORT_SAFE(wrap, GetTensorMutableData(output_tensors[2], (void **)&cy));
@@ -362,7 +356,7 @@ run_hand_detection_unsafe(hand_detection_run_info *info)
 	float cy_local[2] = {cy[0], cy[1]};
 	float size_local[2] = {sizee[0], sizee[1]};
 
-	if (hgt->tuneable_values.detection_mirror_left) {
+	if (mirror_pass && hgt->tuneable_values.detection_mirror_left) {
 		// Same image mirrored: its right hand is our left hand, at the mirrored x (outputs are in [-1, 1]).
 		cv::Mat mirrored;
 		cv::flip(binned_uint8, mirrored, 1);
@@ -385,65 +379,125 @@ run_hand_detection_unsafe(hand_detection_run_info *info)
 			wrap.api->ReleaseValue(m_out[i]);
 		}
 	}
-	hand_exists = e_local;
-	cx = cx_local;
-	cy = cy_local;
-	sizee = size_local;
 
-	// transform the output from the way the model returns it, to something useful to us.
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
-		hand_region_of_interest &output = info->outputs[hand_idx];
-
-		output.found = hand_exists[hand_idx] > hgt->tuneable_values.min_detection_confidence.val;
-
-		if (output.found) {
-			output.hand_detection_confidence = hand_exists[hand_idx];
-
-			// remap from [-1, 1] to [0, 1] for location
-			xrt_vec2 _pt = {};
-			_pt.x = math_map_ranges(cx[hand_idx], -1, 1, 0, kDetectionInputSize);
-			_pt.y = math_map_ranges(cy[hand_idx], -1, 1, 0, kDetectionInputSize);
-
-			// remap size up to "pixels in input image"
-			float size = sizee[hand_idx];
-
-
-
-			constexpr float fac = 2.0f;
-			size *= kDetectionInputSize * fac;
-			size *= m_vec2_len({go_back(0, 0), go_back(0, 1)});
-
-
-			cv::Mat &debug_frame = view->debug_out_to_this;
-
-			// further transform location from [0, 1] to pixel in input image
-			_pt = transformVecBy2x3(_pt, go_back);
-
-			output.center_px = _pt;
-			output.size_px = size;
-
-			if (hgt->debug_scribble) {
-				handSquare(debug_frame, output.center_px, output.size_px, PINK);
-			}
-		}
-
-		if (hgt->debug_scribble) {
-			// note: this will multiply the model outputs by 255, don't do anything with them after this.
-			int top_of_rect_y = kVisSpacerSize; // 8 + 128 + 8 + 128 + 8;
-			int left_of_rect_x = kVisSpacerSize + ((kKeypointInputSize + kVisSpacerSize) * 4);
-			int start_y = top_of_rect_y + ((kDetectionInputSize + kVisSpacerSize) * view->view);
-			cv::Rect p = cv::Rect(left_of_rect_x, start_y, kDetectionInputSize, kDetectionInputSize);
-
-			binned_uint8.copyTo(hgt->visualizers.mat(p));
-		}
+		out_conf[hand_idx] = e_local[hand_idx];
+		// [-1, 1] -> detector input pixels -> pixels of img
+		xrt_vec2 pt = {};
+		pt.x = math_map_ranges(cx_local[hand_idx], -1, 1, 0, kDetectionInputSize);
+		pt.y = math_map_ranges(cy_local[hand_idx], -1, 1, 0, kDetectionInputSize);
+		constexpr float fac = 2.0f;
+		float size = size_local[hand_idx] * kDetectionInputSize * fac;
+		size *= m_vec2_len({go_back(0, 0), go_back(0, 1)});
+		out_center[hand_idx] = transformVecBy2x3(pt, go_back);
+		out_size[hand_idx] = size;
 	}
-
-	// Free output values allocated during Run()
 	for (size_t i = 0; i < ARRAY_SIZE(output_tensors); i++) {
 		wrap.api->ReleaseValue(output_tensors[i]);
 	}
+	if (binned_out != nullptr) {
+		*binned_out = binned_uint8;
+	}
 }
 
+static void
+run_hand_detection_unsafe(hand_detection_run_info *info)
+{
+	ht_view *view = info->view;
+	HandTracking *hgt = view->hgt;
+	onnx_state *state = &view->detection;
+	cv::Mat &orig_data = view->run_model_on_this;
+	const enum t_camera_orientation rot = view->camera_info.camera_orientation;
+
+	float conf[2];
+	xrt_vec2 center[2];
+	float size[2];
+	cv::Mat binned_uint8;
+	detect_in(hgt, state, orig_data, rot, conf, center, size, &binned_uint8, true);
+
+	// Offline diagnosis: MERCURY_DUMP_DIR saves every 30th detector input per view (PGM, as the model gets it).
+	{
+		static const char *dump = getenv("MERCURY_DUMP_DIR");
+		static std::atomic<uint32_t> count[2];
+		const int vi = view == &hgt->views[0] ? 0 : 1;
+		const uint32_t c = count[vi]++;
+		if (dump != nullptr && c % 30 == 0) {
+			char path[1024];
+			snprintf(path, sizeof(path), "%s/det_%05u_view%d.pgm", dump, c, vi);
+			FILE *f = fopen(path, "wb");
+			if (f != nullptr) {
+				fprintf(f, "P5\n%d %d\n255\n", binned_uint8.cols, binned_uint8.rows);
+				for (int y = 0; y < binned_uint8.rows; y++) {
+					fwrite(binned_uint8.ptr(y), 1, binned_uint8.cols, f);
+				}
+				fclose(f);
+			}
+		}
+	}
+
+	/*
+	 * Zoomed-in tiles: the whole view shrunk to the detector's 160x160 leaves a hand at arm's length only ~20 pixels
+	 * across, too small to be found (2026-11-20 PS VR2 recording: only the hand nearest a camera, the right hand in
+	 * the right camera, was ever found). When a hand isn't confidently found in the whole view, the detector also
+	 * looks at overlapping crops (detection_tiles per side, each crop detection_tile_fraction of the view), and the
+	 * most confident result per hand is kept, mapped back into the whole view. Only detection_tiles_per_frame crops a
+	 * frame, cycling: all nine every frame took ~40 ms instead of ~8 (a third of the frames skipped); spread out, a
+	 * missing hand is searched in full every nine frames (0.15 s at 60 Hz) for one or two more detector runs a frame.
+	 */
+	const int tiles = hgt->tuneable_values.detection_tiles;
+	if (tiles >= 2 && (conf[0] < hgt->tuneable_values.acquire_confidence ||
+	                   conf[1] < hgt->tuneable_values.acquire_confidence)) {
+		const int W = orig_data.cols, H = orig_data.rows;
+		const int tw = (int)(W * hgt->tuneable_values.detection_tile_fraction);
+		const int th = (int)(H * hgt->tuneable_values.detection_tile_fraction);
+		const int per_frame = hgt->tuneable_values.detection_tiles_per_frame > 0
+		                          ? hgt->tuneable_values.detection_tiles_per_frame
+		                          : tiles * tiles;
+		for (int k = 0; k < per_frame && k < tiles * tiles; k++) {
+			const int t = (int)(view->tile_cursor++ % (uint32_t)(tiles * tiles));
+			const int ix = t % tiles, iy = t / tiles;
+			{
+				const int x0 = (W - tw) * ix / (tiles - 1), y0 = (H - th) * iy / (tiles - 1);
+				cv::Mat crop = orig_data(cv::Rect(x0, y0, tw, th));
+				float tconf[2];
+				xrt_vec2 tcenter[2];
+				float tsize[2];
+				// No mirrored pass on the crops: the left hand wasn't missed for being a left hand (mirrored, it
+				// wasn't found as a right hand either), only for being small; it halves their cost.
+				detect_in(hgt, state, crop, rot, tconf, tcenter, tsize, nullptr,
+				          hgt->tuneable_values.detection_tile_mirror);
+				for (int h = 0; h < 2; h++) {
+					if (tconf[h] > conf[h]) {
+						conf[h] = tconf[h];
+						center[h] = {tcenter[h].x + x0, tcenter[h].y + y0};
+						size[h] = tsize[h];
+					}
+				}
+			}
+		}
+	}
+
+	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
+		hand_region_of_interest &output = info->outputs[hand_idx];
+		output.found = conf[hand_idx] > hgt->tuneable_values.min_detection_confidence.val;
+		if (output.found) {
+			output.hand_detection_confidence = conf[hand_idx];
+			output.center_px = center[hand_idx];
+			output.size_px = size[hand_idx];
+			if (hgt->debug_scribble) {
+				handSquare(view->debug_out_to_this, output.center_px, output.size_px, PINK);
+			}
+		}
+		if (hgt->debug_scribble) {
+			// note: this will multiply the model outputs by 255, don't do anything with them after this.
+			int top_of_rect_y = kVisSpacerSize;
+			int left_of_rect_x = kVisSpacerSize + ((kKeypointInputSize + kVisSpacerSize) * 4);
+			int start_y = top_of_rect_y + ((kDetectionInputSize + kVisSpacerSize) * view->view);
+			cv::Rect p = cv::Rect(left_of_rect_x, start_y, kDetectionInputSize, kDetectionInputSize);
+			binned_uint8.copyTo(hgt->visualizers.mat(p));
+		}
+	}
+}
 void
 run_hand_detection(void *ptr)
 {

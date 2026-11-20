@@ -53,6 +53,8 @@ struct psvr2_builder
 	struct t_constellation_tracker *constellation_tracker;
 #endif
 	enum u_logging_level log_level;
+	//! Sense controllers were connected at the start (Monado's clients then get no hands).
+	bool have_sense;
 };
 
 static struct psvr2_builder *
@@ -166,11 +168,13 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 		             u_builder_find_prober_device(xpdevs, xpdev_count, PSSENSE_VID, PSSENSE_PID_RIGHT,
 		                                          XRT_BUS_TYPE_ANY) != NULL;
 #endif
-		psvr2_hand_tracking_set_allowed(!have_sense);
-		if (have_sense && getenv("PSVR2_HAND_TRACKING") != NULL) {
-			U_LOG_IFL_I(pb->log_level,
-			            "Sense controllers connected: hand tracking stays off (turn them off to use hands)");
-		}
+		/*
+		 * The hand tracker is made whenever hand tracking is asked for; it only tracks while switched on. Here
+		 * (Monado's own clients) that's when no Sense controller is connected at the start, as before; the SteamVR
+		 * driver switches it itself as controllers go off and on.
+		 */
+		psvr2_hand_tracking_set_allowed(true);
+		pb->have_sense = have_sense;
 		head_xdev = psvr2_hmd_create(head_xpdev);
 		if (head_xdev == NULL) {
 			PSVR2_ERROR(psvr2_builder(xb), "PSVR2 HMD device creation failed");
@@ -194,6 +198,7 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 		struct xrt_device *two_hands[2] = {NULL, NULL};
 		if (ht != NULL && cemu_devices_create(head_xdev, ht, two_hands) == 2) {
 			psvr2_hmd_attach_hand_tracking(head_xdev, ht);
+			psvr2_hand_tracking_set_active(ht, !pb->have_sense);
 			left_ht = two_hands[0];
 			right_ht = two_hands[1];
 			xsysd->static_xdevs[xsysd->static_xdev_count++] = left_ht;

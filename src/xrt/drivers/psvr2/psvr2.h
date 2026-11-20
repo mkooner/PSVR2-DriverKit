@@ -224,6 +224,9 @@ struct psvr2_hmd
 	//! Carries the position across mid-session SLAM resets; its world_changes are psvr2_get_slam_reset_count.
 	struct psvr2_slam_carry slam_carry;
 
+	//! The LED detector's gain and exposure the headset last echoed (LD header), to log changes. LD thread.
+	float ld_echo_gain, ld_echo_exposure;
+
 	//! Optical hand tracking device (psvr2_hand_tracking.h), or NULL. Set once by the builder, under data_lock.
 	struct xrt_device *hand_tracker;
 	//! Bottom pair (cameras 0, 1) calibration and poses in the head frame, for hand tracking; under data_lock.

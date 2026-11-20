@@ -7,6 +7,7 @@
  */
 
 #include "psvr2_hand_tracking.h"
+#include "psvr2_interface.h"
 
 #include "xrt/xrt_frame.h"
 #include "os/os_threading.h"
@@ -35,12 +36,20 @@
 #include <string.h>
 
 DEBUG_GET_ONCE_LOG_OPTION(psvr2_ht_log, "PSVR2_HT_LOG", U_LOGGING_INFO)
-//! Field of view of the unwarped pinhole views (deg). 80 was best of 60-120 on the recordings.
-DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_fov, "PSVR2_HT_FOV", 80.0f)
+/*!
+ * Field of view of the unwarped pinhole views (deg). 120: on the 2026-11-20 recording (hands over a desk, Sony's
+ * shorter LED exposure) the left hand was found 17% of the time and the right 49%, against 3% and 30% at 80 (best of
+ * 60-120 on the 2026-11-16 recordings) and 5% / 49% at 100: hands take less of the picture, which Mercury's
+ * detector copes with better here.
+ */
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_fov, "PSVR2_HT_FOV", 120.0f)
 //! Brightening, out = 255 * (in/255)^gamma. 0.5 was best of 0.35-1 on the recordings (frames average ~25/255).
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_gamma, "PSVR2_HT_GAMMA", 0.5f)
 //! Unwarped image size (square).
 DEBUG_GET_ONCE_NUM_OPTION(psvr2_ht_size, "PSVR2_HT_SIZE", 640)
+//! Offline diagnosis: a folder to save every 30th pair of images Mercury gets (raw and unwarped, PGM). Off when unset.
+DEBUG_GET_ONCE_OPTION(psvr2_ht_dump, "PSVR2_HT_DUMP", NULL)
+
 
 #define HT_TRACE(h, ...) U_LOG_IFL_T(h->log_level, __VA_ARGS__)
 #define HT_DEBUG(h, ...) U_LOG_IFL_D(h->log_level, __VA_ARGS__)
@@ -82,6 +91,10 @@ struct psvr2_hand_tracking
 	uint8_t lut[256];
 	uint8_t *decoded[2];        // CAM_W x CAM_H each
 	uint64_t processed;
+	//! Worker thread: brightness of the images Mercury gets (unwarped view 0, before the brightening), per 5 s.
+	uint32_t bright_hist[256];
+	uint64_t bright_frames;
+	int64_t bright_since_ns;
 	int64_t last_report_ns;
 
 	// Status report every 5 s from get_hand_tracking (under pose_lock): how often each hand is found and where.
@@ -93,6 +106,11 @@ struct psvr2_hand_tracking
 	struct os_mutex pose_lock;
 	struct xrt_pose cam0_in_head;
 	volatile bool running;
+	/*!
+	 * Whether hands are wanted now (psvr2_hand_tracking_set_active): only then are the bottom cameras asked for and
+	 * their frames processed. Under the worker's lock.
+	 */
+	bool active;
 };
 
 static inline struct psvr2_hand_tracking *
@@ -212,8 +230,15 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 	 * Keep a view only while the keypoint model is 98% sure it's a hand (Mercury: 97%). A right hand raised quickly
 	 * out of the top of the view left its joints on dark furniture for half a second at 0.93-0.98 (real hands: median
 	 * 0.9992, 95% above 0.986); 0.98 dropped it at once and cost 0-7 points of tracked time on the recordings.
+	 * (2026-11-20, scored against frames labelled by hand: 0.92 tracked exactly the same, so it stays.)
 	 */
 	setenv("MERCURY_KEYPOINT_HAND_CONFIDENCE", "0.98", 0);
+	/*
+	 * Mercury's zoomed-in detection tiles (MERCURY_DETECTION_TILES) stay off for now. Scored against the 2026-11-20
+	 * recording's frames labelled by hand (hands over the desk 2-35 s, no hands 37-43 s; found / ghosts): no tiles
+	 * left 26% right 74%, one 3x3 tile a frame 27% / 77%, three 29% / 74%, all nine every frame 41% / 76% but ~20 ms a
+	 * frame (too slow for the 60 Hz stream); no ghosts in any. Next: run the nine in parallel.
+	 */
 	struct t_hand_tracking_sync *sync = t_hand_tracking_sync_mercury_create(stereo, info, models);
 	t_stereo_camera_calibration_reference(&stereo, NULL);
 	if (sync == NULL) {
@@ -227,6 +252,50 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 	os_mutex_unlock(&h->pose_lock);
 	h->running = true;
 	HT_INFO(h, "Hand tracking running");
+}
+
+/*!
+ * Every 5 s: how bright the camera images are that Mercury looks for hands in, before and after the brightening
+ * (mean, median, 95th and 99th percentile of the unwarped view 0, 0-255). A dark picture is the first suspect when
+ * hands aren't found (the cameras expose for the controllers' LEDs).
+ */
+static void
+log_brightness(struct psvr2_hand_tracking *h, int64_t ts)
+{
+	h->bright_frames++;
+	if (h->bright_since_ns == 0) {
+		h->bright_since_ns = ts;
+		return;
+	}
+	if (ts - h->bright_since_ns < 5 * U_TIME_1S_IN_NS) {
+		return;
+	}
+	uint64_t total = 0, sum = 0, sum_out = 0;
+	for (int i = 0; i < 256; i++) {
+		total += h->bright_hist[i];
+		sum += (uint64_t)i * h->bright_hist[i];
+		sum_out += (uint64_t)h->lut[i] * h->bright_hist[i];
+	}
+	int pct[3] = {0, 0, 0};
+	const double want[3] = {0.5, 0.95, 0.99};
+	uint64_t run = 0;
+	int k = 0;
+	for (int i = 0; i < 256 && k < 3; i++) {
+		run += h->bright_hist[i];
+		while (k < 3 && total > 0 && (double)run >= want[k] * (double)total) {
+			pct[k++] = i;
+		}
+	}
+	if (total > 0) {
+		HT_INFO(h,
+		        "Camera brightness (5 s, %llu frames): mean %.1f, median %d, 95%% %d, 99%% %d of 255; after the "
+		        "brightening mean %.1f, 95%% %d, 99%% %d",
+		        (unsigned long long)h->bright_frames, (double)sum / (double)total, pct[0], pct[1], pct[2],
+		        (double)sum_out / (double)total, h->lut[pct[1]], h->lut[pct[2]]);
+	}
+	memset(h->bright_hist, 0, sizeof(h->bright_hist));
+	h->bright_frames = 0;
+	h->bright_since_ns = ts;
 }
 
 static void
@@ -262,6 +331,32 @@ decode_and_push(struct psvr2_hand_tracking *h, const uint8_t *transfer, int64_t 
 					val = (uint8_t)(top + (bot - top) * fy + 0.5f);
 				}
 				row[x] = h->lut[val];
+				if (v == 0 && ((x | y) & 3) == 0 && mx[i] >= 0) {
+					h->bright_hist[val]++;
+				}
+			}
+		}
+	}
+	log_brightness(h, ts);
+	const char *dump = debug_get_option_psvr2_ht_dump();
+	if (dump != NULL && h->processed % 30 == 0) {
+		for (int v = 0; v < 2; v++) {
+			char path[1024];
+			snprintf(path, sizeof(path), "%s/f%05llu_view%d_raw.pgm", dump, (unsigned long long)h->processed, v);
+			FILE *f = fopen(path, "wb");
+			if (f != NULL) {
+				fprintf(f, "P5\n%d %d\n255\n", CAM_W, CAM_H);
+				fwrite(h->decoded[v], 1, (size_t)CAM_W * CAM_H, f);
+				fclose(f);
+			}
+			snprintf(path, sizeof(path), "%s/f%05llu_view%d_unwarped.pgm", dump, (unsigned long long)h->processed, v);
+			f = fopen(path, "wb");
+			if (f != NULL) {
+				fprintf(f, "P5\n%d %d\n255\n", out[v]->width, out[v]->height);
+				for (uint32_t y = 0; y < out[v]->height; y++) {
+					fwrite(out[v]->data + (size_t)y * out[v]->stride, 1, out[v]->width, f);
+				}
+				fclose(f);
 			}
 		}
 	}
@@ -361,7 +456,10 @@ psvr2_ht_get_hand_tracking(struct xrt_device *xdev,
 		}
 		os_mutex_unlock(&h->pose_lock);
 	}
-	if (!h->running) {
+	os_thread_helper_lock(&h->worker);
+	const bool active = h->active;
+	os_thread_helper_unlock(&h->worker);
+	if (!h->running || !active) {
 		memset(out_value, 0, sizeof(*out_value));
 		out_value->is_active = false;
 		*out_timestamp_ns = at_timestamp_ns;
@@ -512,6 +610,11 @@ psvr2_hand_tracking_push_transfer(struct xrt_device *xdev, const uint8_t *data, 
 		return;
 	}
 	os_thread_helper_lock(&h->worker);
+	if (!h->active) {
+		// The frames are someone else's (Room View): no hands wanted now, no work.
+		os_thread_helper_unlock(&h->worker);
+		return;
+	}
 	h->offered++;
 	if (!h->have_transfer) {
 		// One copy under the lock (~1 MB); the worker copies it out before decoding, so this never waits long.
@@ -522,4 +625,21 @@ psvr2_hand_tracking_push_transfer(struct xrt_device *xdev, const uint8_t *data, 
 		os_thread_helper_signal_locked(&h->worker);
 	}
 	os_thread_helper_unlock(&h->worker);
+}
+
+void
+psvr2_hand_tracking_set_active(struct xrt_device *xdev, bool active)
+{
+	struct psvr2_hand_tracking *h = psvr2_ht(xdev);
+	os_thread_helper_lock(&h->worker);
+	const bool changed = h->active != active;
+	h->active = active;
+	os_thread_helper_unlock(&h->worker);
+	if (!changed) {
+		return;
+	}
+	// The bottom cameras' images (camera mode 0x10) while hands are wanted, shared with Room View's requests.
+	psvr2_request_bottom_camera_images(h->head, active);
+	HT_INFO(h, "Hand tracking %s", active ? "on (a controller is off): the bottom cameras stream to Mercury"
+	                                       : "off (both controllers are on)");
 }

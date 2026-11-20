@@ -40,6 +40,13 @@ psvr2_hand_tracking_set_cameras(struct xrt_device *xdev,
                                 const struct t_camera_calibration cams[2],
                                 const struct xrt_pose cam_in_head[2]);
 
+/*!
+ * Track hands now or not (any thread; cheap when unchanged). Active, the bottom cameras are asked for (shared with
+ * other clients) and their frames go to Mercury; inactive, frames are ignored and hands report inactive. Starts off.
+ */
+void
+psvr2_hand_tracking_set_active(struct xrt_device *xdev, bool active);
+
 //! Offer one camera mode 0x10 transfer (USB thread). Copied if the worker is free, dropped otherwise.
 void
 psvr2_hand_tracking_push_transfer(struct xrt_device *xdev, const uint8_t *data, size_t length, int64_t timestamp_ns);

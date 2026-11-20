@@ -164,6 +164,20 @@ void
 psvr2_hmd_attach_hand_tracking(struct xrt_device *hmd_xdev, struct xrt_device *hand_tracking);
 
 /*!
+ * Ask for optical hand tracking (the SteamVR driver, from DriverKit's setting; PSVR2_HAND_TRACKING does the same),
+ * before the system is created. The hand tracker is then created; it tracks only while switched on
+ * (psvr2_hand_tracking_set_active), when a controller is off.
+ *
+ * @ingroup drv_psvr2
+ */
+void
+psvr2_hand_tracking_want(bool want);
+
+//! The headset's hand tracking device (psvr2_hmd_attach_hand_tracking), or NULL. @ingroup drv_psvr2
+struct xrt_device *
+psvr2_hmd_get_hand_tracker(struct xrt_device *hmd_xdev);
+
+/*!
  * Probing function for PlayStation VR2 devices.
  *
  * @ingroup drv_psvr2

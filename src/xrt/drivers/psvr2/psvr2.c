@@ -1068,6 +1068,23 @@ led_xfer_cb(struct libusb_transfer *xfer)
 		           h[38], h[39]);
 	}
 
+	{
+		/*
+		 * What the headset says its LED detector runs with (gain and exposure, floats at header bytes 32 and 36): logged
+		 * whenever it changes. Report 0x14 changes these at any time (2026-11-20: 500-8000 us all echoed) but not the
+		 * camera images (their brightness stayed the same): it sets the LED detector only.
+		 */
+		const uint8_t *h = (const uint8_t *)&payload->header;
+		float gain, exposure;
+		memcpy(&gain, h + 32, sizeof(gain));
+		memcpy(&exposure, h + 36, sizeof(exposure));
+		if (gain != hmd->ld_echo_gain || exposure != hmd->ld_echo_exposure) {
+			hmd->ld_echo_gain = gain;
+			hmd->ld_echo_exposure = exposure;
+			PSVR2_INFO(hmd, "Headset LED detector now: gain %.0f, exposure %.0f", gain, exposure);
+		}
+	}
+
 	PSVR2_TRACE(hmd, "timestamp: %u, frame_counter: %u, unk3: %u", payload->header.timestamp,
 	            payload->header.frame_counter, payload->header.unk3);
 
@@ -1843,8 +1860,8 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 	 * instead: the 1000x1000 BC4 bottom pair that the BC4 parsing below (USB_CAM_MODE10_XFER_SIZE, "10" = 0x10)
 	 * and the hand tracking prototype use. With 0xa the recordings got only 819456 byte mode 0xa transfers.
 	 */
-	hmd->camera_mode = hmd->camera_recorder != NULL || psvr2_hand_tracking_enabled() ||
-	                           debug_get_bool_option_psvr2_basalt()
+	// Hand tracking asks for the bottom pair only while hands are wanted (psvr2_hand_tracking_set_active).
+	hmd->camera_mode = hmd->camera_recorder != NULL || debug_get_bool_option_psvr2_basalt()
 	                       ? PSVR2_CAMERA_MODE_BOTTOM_SBS_BC4
 	                       : PSVR2_CAMERA_MODE_10;
 	hmd->camera_mode_default = hmd->camera_mode;
@@ -2161,6 +2178,24 @@ psvr2_hmd_controllers_attached(struct xrt_device *hmd_xdev)
 
 //! Cleared by the builder when Sense controllers are connected (psvr2_hand_tracking_set_allowed).
 static bool hand_tracking_allowed = true;
+//! Set by the SteamVR driver from DriverKit's setting (psvr2_hand_tracking_want), before the system is created.
+static bool hand_tracking_wanted = false;
+
+void
+psvr2_hand_tracking_want(bool want)
+{
+	hand_tracking_wanted = want;
+}
+
+struct xrt_device *
+psvr2_hmd_get_hand_tracker(struct xrt_device *hmd_xdev)
+{
+	struct psvr2_hmd *hmd = psvr2_hmd(hmd_xdev);
+	os_mutex_lock(&hmd->data_lock);
+	struct xrt_device *ht = hmd->hand_tracker;
+	os_mutex_unlock(&hmd->data_lock);
+	return ht;
+}
 
 void
 psvr2_hand_tracking_set_allowed(bool allowed)
@@ -2172,7 +2207,7 @@ bool
 psvr2_hand_tracking_enabled(void)
 {
 #ifdef XRT_BUILD_DRIVER_HANDTRACKING
-	return hand_tracking_allowed && debug_get_bool_option_psvr2_hand_tracking();
+	return hand_tracking_allowed && (hand_tracking_wanted || debug_get_bool_option_psvr2_hand_tracking());
 #else
 	return false;
 #endif
