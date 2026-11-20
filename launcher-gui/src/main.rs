@@ -1402,6 +1402,23 @@ impl eframe::App for Launcher {
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Only the floor height? Choose Adjust Floor Height in step 4 instead.").color(theme::SLATE).size(12.0));
                     ui.add_space(10.0);
+                    ui.label(egui::RichText::new("Keep the room for next time: anchor it").font(theme::bold(14.0)).color(theme::GRAPHITE));
+                    ui.add_space(4.0);
+                    for step in [
+                        "5. Pick a spot on the floor you can find again, for example a piece of tape: your floor mark.",
+                        "6. Put the left controller on the mark, crouch next to it so the headset sees it, and hold the Create button for about 3 seconds until it buzzes.",
+                    ] {
+                        ui.label(step);
+                    }
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Your room is now saved. Each time you start SteamVR, do step 6 on the same mark to bring it back; until then you play without a saved room.",
+                        )
+                        .color(theme::SLATE)
+                        .size(12.0),
+                    );
+                    ui.add_space(10.0);
                     if ui.add(theme::primary("OK")).clicked() {
                         open = false;
                     }

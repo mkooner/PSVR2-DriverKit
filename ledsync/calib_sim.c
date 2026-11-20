@@ -11,6 +11,10 @@
  * window drifts slowly; the controller can leave the view for stretches.
  *
  *   calib_sim [runs] [exposure_us] [dropout_share] [seed]
+ *
+ * SIM_DROP_AT=<s> SIM_DROP_FOR=<s>: the left controller's link drops at that time and comes back after that long, as
+ * pssense_reconnect does it (t_led_sync_refinement_restart at the drop and at the reconnect). Its hold time is then
+ * counted from the reconnect; the run passes when both hold.
  */
 #include "os/os_time.h"
 
@@ -73,6 +77,10 @@ struct sim_ctrl
 	int64_t effective_from_ns;
 	bool visible;
 	int64_t vis_change_ns;
+	// SIM_DROP_AT/SIM_DROP_FOR: this controller's Bluetooth link drops (the driver restarts its LED sync, no events
+	// reach it, its LEDs aren't driven), then it reconnects (restart again) and must calibrate anew.
+	bool dropped;
+	int64_t reconnect_ns;
 	int64_t hold_at_ns;
 	// Simulated tracker: this frame's match, reported one frame later (SIM_TRACKER=1).
 	int pending_match;
@@ -116,6 +124,9 @@ main(int argc, char **argv)
 	if (getenv("SIM_LED_LATENCY_FRAMES"))
 		g_led_latency_frames = atof(getenv("SIM_LED_LATENCY_FRAMES"));
 
+	const double drop_at = getenv("SIM_DROP_AT") ? atof(getenv("SIM_DROP_AT")) : -1;
+	const double drop_for = getenv("SIM_DROP_FOR") ? atof(getenv("SIM_DROP_FOR")) : 3;
+	double sum_other = 0, worst_other = 0, sum_back = 0, worst_back = 0;
 	double sum_both = 0, worst_both = 0, sum_err = 0, worst_err = 0;
 	int failed = 0, n_ok = 0;
 	double times[1000];
@@ -149,6 +160,21 @@ main(int argc, char **argv)
 			// Advance to this frame's processing time, applying LED commands due before it.
 			exposure_start += FRAME_NS;
 			int64_t proc = exposure_start + PROC_DELAY_NS;
+			if (drop_at >= 0) {
+				struct sim_ctrl *d = &c[0];
+				if (!d->dropped && d->reconnect_ns == 0 && proc - start_ns >= (int64_t)(drop_at * 1e9)) {
+					d->dropped = true; // the read thread ends: pssense_run_thread restarts the LED sync
+					d->pending = false;
+					d->on_mode = false;
+					d->hold_at_ns = -1;
+					t_led_sync_refinement_restart(&d->r);
+				} else if (d->dropped && proc - start_ns >= (int64_t)((drop_at + drop_for) * 1e9)) {
+					d->dropped = false; // pssense_reconnect: restart again, a fresh link
+					d->reconnect_ns = proc;
+					d->on_mode = true;
+					t_led_sync_refinement_restart(&d->r);
+				}
+			}
 			for (int i = 0; i < 2; i++) {
 				struct sim_ctrl *s = &c[i];
 				if (s->pending && s->apply_at_ns <= proc) {
@@ -191,7 +217,7 @@ main(int argc, char **argv)
 					count = 0;
 			}
 			for (int i = 0; i < 2; i++) {
-				vis[i] = visible_leds(&c[i], exposure_ns, exposure_start);
+				vis[i] = c[i].dropped ? 0 : visible_leds(&c[i], exposure_ns, exposure_start);
 				count += vis[i];
 			}
 
@@ -207,6 +233,9 @@ main(int argc, char **argv)
 			te.camera_exposure_start = ev;
 			for (int i = 0; i < 2; i++) {
 				struct sim_ctrl *s = &c[i];
+				if (s->dropped) {
+					continue; // no driver thread for it
+				}
 				t_led_sync_push_timing_event(&s->r, &te.camera_exposure_start);
 				if (g_tracker) {
 					// Last frame's tracker result arrives now.
@@ -229,8 +258,9 @@ main(int argc, char **argv)
 					// Driver send wait (report cadence, haptics) + round trip ~10-30ms.
 					s->apply_at_ns = proc + (int64_t)(4e6 + urand() * 8e6) + (int64_t)(8e6 + urand() * 20e6);
 				}
-				if (s->hold_at_ns < 0 && s->r.phase == T_LED_SYNC_PHASE_COUNT_HOLD) {
-					s->hold_at_ns = proc - start_ns;
+				if (s->hold_at_ns < 0 && s->r.phase == T_LED_SYNC_PHASE_COUNT_HOLD &&
+				    !(drop_at >= 0 && i == 0 && s->reconnect_ns == 0)) {
+					s->hold_at_ns = proc - (s->reconnect_ns ? s->reconnect_ns : start_ns);
 					double blink = (double)s->r.current_blink_duration_ns;
 					double true_centre = s->window_left_ns + (blink + exposure_ns) / 2;
 					double held = (double)s->r.count_calib.hold_centre_ns;
@@ -244,10 +274,19 @@ main(int argc, char **argv)
 			}
 			if (c[0].hold_at_ns >= 0 && c[1].hold_at_ns >= 0)
 				break;
+			if (drop_at >= 0 && c[0].reconnect_ns == 0 && proc - start_ns > (int64_t)((drop_at + drop_for + 1) * 1e9))
+				break; // can't happen: guard
 		}
 		if (c[0].hold_at_ns < 0 || c[1].hold_at_ns < 0) {
 			failed++;
 		} else {
+			if (drop_at >= 0) {
+				double other = c[1].hold_at_ns / 1e9, back = c[0].hold_at_ns / 1e9;
+				sum_other += other;
+				worst_other = fmax(worst_other, other);
+				sum_back += back;
+				worst_back = fmax(worst_back, back);
+			}
 			double both = fmax(c[0].hold_at_ns, c[1].hold_at_ns) / 1e9;
 			times[n_ok++] = both;
 			sum_both += both;
@@ -278,5 +317,10 @@ main(int argc, char **argv)
 	       "held centre error mean %.0fus worst %.0fus (half room %.0fus); %d/%d never finished\n",
 	       exposure_us, dropout, n_ok ? times[n_ok / 2] : 0, n_ok ? sum_both / n_ok : 0, worst_both,
 	       n_ok ? sum_err / (2 * n_ok) : 0, worst_err, exposure_us / 2, failed, runs);
+	if (drop_at >= 0 && n_ok > 0) {
+		printf("left drops at %.1fs for %.1fs: right holding after mean %.1fs worst %.1fs; left holding again "
+		       "after reconnecting mean %.1fs worst %.1fs\n",
+		       drop_at, drop_for, sum_other / n_ok, worst_other, sum_back / n_ok, worst_back);
+	}
 	return 0;
 }
