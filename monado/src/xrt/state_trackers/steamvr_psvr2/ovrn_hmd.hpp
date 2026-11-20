@@ -289,8 +289,18 @@ protected:
 			if (e == nullptr || strcmp(e, "0") != 0) {
 				constexpr auto kSupportsInHMDRoomSetup = (vr::ETrackedDeviceProperty)11003;
 				props->SetBoolProperty(m_container, kSupportsInHMDRoomSetup, true);
-				log("ovrn: in-headset playspace setup offered to SteamVR (SupportsInHMDRoomSetup_Bool; "
-				    "OVRN_IN_HMD_ROOM_SETUP=0 off)\n");
+				/*
+				 * 11003 only shows the buttons. The dashboard's setRoomSetupStep runs every step but recenter only
+				 * for a headset with VRLinkClientHMDSupportsRoomSetupRequests_Bool (11004) or with the
+				 * steamvr.inHMDRoomSetupDebug setting, else "HMD doesnt support setRoomSetupStep" and nothing
+				 * happens: with the setting removed (2026-11-19), Adjust Floor and Playspace Setup did nothing,
+				 * recenter still worked. The dashboard treats 11004 specially only when SteamVR is itself a VR
+				 * Link server (it forwards the step to the client), which a wired PS VR2 never is.
+				 */
+				constexpr auto kSupportsRoomSetupRequests = (vr::ETrackedDeviceProperty)11004;
+				props->SetBoolProperty(m_container, kSupportsRoomSetupRequests, true);
+				log("ovrn: in-headset playspace setup offered to SteamVR (SupportsInHMDRoomSetup_Bool, "
+				    "VRLinkClientHMDSupportsRoomSetupRequests_Bool; OVRN_IN_HMD_ROOM_SETUP=0 off)\n");
 			}
 		}
 

@@ -714,6 +714,13 @@ main(int argc, char **argv)
 			int32_t style = -1;
 			check(prop(0, Prop_HmdTrackingStyle_Int32, &style) && style == HmdTrackingStyle_InsideOutCameras,
 			      "the headset reports inside-out tracking (Prop_HmdTrackingStyle_Int32 = InsideOutCameras)");
+			{
+				// SteamVR's dashboard: 11003 shows Playspace Setup / Adjust Floor, 11004 lets their steps run
+				bool shows = false, runs = false;
+				check(prop(0, 11003, &shows) && shows && prop(0, 11004, &runs) && runs,
+				      "in-headset playspace setup: SupportsInHMDRoomSetup_Bool (11003) and "
+				      "VRLinkClientHMDSupportsRoomSetupRequests_Bool (11004) both true on the headset");
+			}
 		}
 		if (monado && !room) {
 			std::lock_guard<std::mutex> l(g_mutex);
