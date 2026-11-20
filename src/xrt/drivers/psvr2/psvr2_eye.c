@@ -21,6 +21,21 @@
 #include "psvr2.h"
 
 
+
+/*!
+ * The gaze pose's rotation from the headset's gaze direction (a unit vector, x right, y up after the flips): turns the
+ * view direction -Z onto it, with no roll. Pitch asin(y) about X, then yaw about Y, so the result is exactly the
+ * headset's direction (taking atan() of the vector's x and y, as before, shrank the angles: 19.1 deg came out 18.1).
+ */
+static void
+gaze_quat_from_dir(const struct xrt_vec3 *d, struct xrt_quat *out)
+{
+	const float y = d->y > 1.0f ? 1.0f : (d->y < -1.0f ? -1.0f : d->y);
+	const float h = 1.0f - d->x * d->x - y * y;
+	const float fwd = h > 0.0f ? sqrtf(h) : 0.0f;
+	math_quat_from_euler_angles(&(struct xrt_vec3){.x = asinf(y), .y = atan2f(-d->x, fwd)}, out);
+}
+
 static void
 process_gaze_packet(struct psvr2_hmd *hmd, uint8_t *buf, size_t bytes_read)
 {
@@ -150,12 +165,8 @@ process_gaze_packet(struct psvr2_hmd *hmd, uint8_t *buf, size_t bytes_read)
 	hmd->et_data.unk_float_5 = __lef32_to_cpu(gaze_state.packet_data.unk_float_5);
 
 	// update the gaze direction
-	float look_x_dir = atanf(hmd->et_data.combined.filtered_gaze_direction.x);
-	float look_y_dir = atanf(hmd->et_data.combined.filtered_gaze_direction.y);
-
 	struct xrt_space_relation gaze_relation = {0};
-	math_quat_from_euler_angles(&(struct xrt_vec3){.x = look_y_dir, .y = -look_x_dir},
-	                            &gaze_relation.pose.orientation);
+	gaze_quat_from_dir(&hmd->et_data.combined.filtered_gaze_direction, &gaze_relation.pose.orientation);
 	gaze_relation.pose.position = (struct xrt_vec3){0};
 
 	if (hmd->et_data.combined.gaze_direction_valid) {
@@ -275,7 +286,7 @@ psvr2_get_combined_gaze(struct xrt_device *xdev,
 	// The same rotation as the gaze pose pushed in process_gaze_packet (the OpenXR eye gaze), applied to the view
 	// direction -Z: the SteamVR eye gaze and Monado's OpenXR one agree.
 	struct xrt_quat q;
-	math_quat_from_euler_angles(&(struct xrt_vec3){.x = atanf(d.y), .y = -atanf(d.x)}, &q);
+	gaze_quat_from_dir(&d, &q);
 	struct xrt_vec3 fwd = {0.0f, 0.0f, -1.0f};
 	math_quat_rotate_vec3(&q, &fwd, out_dir);
 	*out_valid = valid;
