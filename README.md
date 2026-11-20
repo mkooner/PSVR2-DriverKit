@@ -108,9 +108,6 @@ runs everything.
   - the SteamVR camera interfaces behind Room View, and the passthrough cameras' lens model;
   - the PS VR2 properties SteamVR expects;
   - reporting eye tracking to SteamVR.
-- **Device pictures in PSVR2-DriverKit:** from Wikimedia Commons: the headset by C.Suthorn
-  ([CC BY-SA 4.0](https://commons.wikimedia.org/wiki/File:PSVR2_(Non-Stereoscopic).png)), the controllers by
-  ArlindoPereira ([CC BY 4.0](https://commons.wikimedia.org/wiki/File:PlayStation_VR2.jpg)).
 
 ## Repository layout
 
