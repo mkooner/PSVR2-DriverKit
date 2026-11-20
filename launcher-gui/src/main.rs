@@ -524,7 +524,31 @@ mod compile_tests {
         assert_eq!(b.fraction(), 1.0);
     }
 
-    /// Register replaces Sony's PS VR2 driver with ours and keeps the others; Unregister puts Sony's back. Run in a
+    /// Turn on writes the four camera settings (booleans as booleans) and keeps the rest; Undo restores the file.
+    #[test]
+    fn psvr2_settings_apply_and_undo() {
+        let _turn = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let real_home = std::env::var("HOME").unwrap_or_default();
+        let home = std::env::temp_dir().join(format!("dk-settings-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let file = home.join("steamvr.vrsettings");
+        let start = r#"{"camera":{"enableCamera":false,"roomViewStyle":2},"steamvr":{"supersampleScale":1.4}}"#;
+        fs::write(&file, start).unwrap();
+        apply_psvr2_settings(&file).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(psvr2_settings_on(&v), 4);
+        assert_eq!(v["camera"]["enableCamera"], serde_json::Value::Bool(true));
+        assert_eq!(v["camera"]["roomViewStyle"], 4);
+        assert_eq!(v["steamvr"]["supersampleScale"], 1.4, "other settings are kept");
+        undo_psvr2_settings(&file).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), start);
+        let _ = fs::remove_dir_all(&home);
+        std::env::set_var("HOME", real_home);
+    }
+
+    /// Register replaces Sony's PS VR2 driver with ours and keeps the others; Unregister removes only ours. Run in a
     /// temporary HOME so the real SteamVR config isn't touched.
     #[test]
     fn register_and_unregister() {
@@ -551,7 +575,7 @@ mod compile_tests {
 
         unregister_driver().unwrap();
         let (_, list) = external_drivers().unwrap();
-        assert_eq!(list, vec![other.display().to_string(), sony.display().to_string()]);
+        assert_eq!(list, vec![other.display().to_string()], "Unregister removes only our driver");
         let _ = fs::remove_dir_all(&home);
         std::env::set_var("HOME", real_home);
     }
@@ -632,6 +656,8 @@ struct Launcher {
     message: String,
     saved_at: Option<Instant>,
     build: Arc<Mutex<BuildState>>,
+    /// The Compile tab's Check: is the installed build the latest on GitHub?
+    check: Arc<Mutex<CheckState>>,
     /// --screenshot <file.png> [launcher|settings|compile]: render one tab, save it, quit (for checking the design).
     screenshot: Option<(PathBuf, Instant, bool)>,
     /// The device pictures (assets/): headset, left and right Sense controller.
@@ -676,6 +702,7 @@ impl Launcher {
             message: String::new(),
             saved_at: None,
             build: Arc::new(Mutex::new(BuildState::default())),
+            check: Arc::new(Mutex::new(CheckState::default())),
             screenshot: None,
             reg_cache: None,
             pictures: [
@@ -957,6 +984,107 @@ impl Launcher {
  */
 
 /// A running or finished compile (build-driver.sh's output, read on a thread).
+/// What Check found (see check_build).
+#[derive(Default)]
+struct CheckState {
+    running: bool,
+    result: Option<CheckResult>,
+}
+
+#[derive(Clone)]
+enum CheckResult {
+    NotInstalled(String),
+    UpToDate(String),
+    NewBuild(String),
+    Failed(String),
+}
+
+/// The build installed in @p dest: (commit, commit date) as build-driver.sh recorded it, or the source folder's commit
+/// for installs made before it recorded one. None: nothing installed there.
+fn installed_build(dest: &Path) -> Option<(String, String)> {
+    if !dest.join("build/steamvr-monado-psvr2/driver.vrdrivermanifest").exists() {
+        return None;
+    }
+    let env = driver_env();
+    let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+    let same = get("PSVR2_DRIVERKIT_HOME").map(|h| Path::new(&h).canonicalize().ok() == dest.canonicalize().ok()).unwrap_or(false);
+    if same {
+        if let Some(c) = get("SOURCE_COMMIT").filter(|c| !c.is_empty()) {
+            return Some((c, get("SOURCE_DATE").unwrap_or_default()));
+        }
+    }
+    let git = |args: &[&str]| {
+        Command::new("git").arg("-C").arg(dest.join("source")).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let c = git(&["rev-parse", "HEAD"])?;
+    Some((c, git(&["log", "-1", "--format=%cI"]).unwrap_or_default()))
+}
+
+/// The latest commit on GitHub's main branch: (commit, date, first line of its message). Asks the GitHub CLI when it's
+/// signed in (the repository is private), else git with your own credentials, never prompting.
+fn latest_on_github() -> Result<(String, String, String), String> {
+    let gh = Command::new("gh")
+        .args(["api", &format!("repos/{}/commits/main", REPO_WEB.trim_start_matches("github.com/")), "--jq", ".sha, .commit.committer.date, (.commit.message | split(\"\\n\") | .[0])"])
+        .stdin(Stdio::null())
+        .output();
+    if let Ok(o) = &gh {
+        if o.status.success() {
+            let t = String::from_utf8_lossy(&o.stdout);
+            let mut l = t.lines();
+            if let (Some(c), Some(d)) = (l.next(), l.next()) {
+                return Ok((c.trim().to_string(), d.trim().to_string(), l.next().unwrap_or("").trim().to_string()));
+            }
+        }
+    }
+    let o = Command::new("git")
+        .args(["ls-remote", &format!("https://{REPO_WEB}.git"), "refs/heads/main"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("couldn't run git: {e}"))?;
+    let t = String::from_utf8_lossy(&o.stdout);
+    match t.split_whitespace().next() {
+        Some(c) if o.status.success() && c.len() >= 7 => Ok((c.to_string(), String::new(), String::new())),
+        _ => Err("couldn't reach GitHub: sign in first (gh auth login) or check your connection".into()),
+    }
+}
+
+/// "2026-11-19 14:32" in local time from an ISO date (GitHub's are UTC, git's carry their offset).
+fn short_date(iso: &str) -> String {
+    if iso.is_empty() {
+        return String::new();
+    }
+    Command::new("date")
+        .args(["-d", iso, "+%Y-%m-%d %H:%M"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| iso.to_string())
+}
+
+fn check_build(dest: &Path) -> CheckResult {
+    let installed = installed_build(dest);
+    let latest = latest_on_github();
+    match (installed, latest) {
+        (None, Ok((c, d, m))) => CheckResult::NotInstalled(format!(
+            "Not installed in {}. Latest on GitHub: {} ({}){}. Press Compile Driver to install it.",
+            dest.display(), &c[..7.min(c.len())], short_date(&d), if m.is_empty() { String::new() } else { format!(", \"{m}\"") })),
+        (None, Err(e)) => CheckResult::NotInstalled(format!("Not installed in {}. ({e})", dest.display())),
+        (Some(_), Err(e)) => CheckResult::Failed(e),
+        (Some((ic, id)), Ok((c, d, m))) => {
+            if ic == c {
+                CheckResult::UpToDate(format!("Up to date: build {} ({}) is the latest on GitHub.", &ic[..7.min(ic.len())], short_date(&id)))
+            } else {
+                CheckResult::NewBuild(format!(
+                    "New build available: installed {} ({}), GitHub has {} ({}){}. Press Compile Driver to update.",
+                    &ic[..7.min(ic.len())], short_date(&id), &c[..7.min(c.len())], short_date(&d),
+                    if m.is_empty() { String::new() } else { format!(", \"{m}\"") }))
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct BuildState {
     running: bool,
@@ -1089,7 +1217,7 @@ fn container_problems(plugin: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Registered: our plugin in SteamVR's driver list (Steam starts SteamVR with it, as with Sony's). The PS VR2
-/// entries it replaces are kept in ~/.config/PSVR2-DriverKit/replaced-drivers.json for Unregister.
+/// entries it takes out (two drivers can't both run the headset) are named in the message, not saved.
 fn register_driver(plugin: &Path) -> Result<String, String> {
     if !plugin.join("driver.vrdrivermanifest").exists() {
         return Err(format!("no plugin at {} (compile first)", plugin.display()));
@@ -1097,41 +1225,93 @@ fn register_driver(plugin: &Path) -> Result<String, String> {
     let (v, list) = external_drivers()?;
     let ours = plugin.display().to_string();
     let replaced: Vec<String> = list.iter().filter(|p| is_psvr2_driver(p) && **p != ours).cloned().collect();
-    if !replaced.is_empty() {
-        let keep = config_dir().join("replaced-drivers.json");
-        let _ = fs::create_dir_all(config_dir());
-        fs::write(&keep, serde_json::to_string_pretty(&replaced).unwrap_or_default()).map_err(|e| e.to_string())?;
-    }
     let mut new: Vec<String> = list.into_iter().filter(|p| !is_psvr2_driver(p)).collect();
     new.push(ours.clone());
     write_external_drivers(v, &new)?;
     Ok(if replaced.is_empty() {
         format!("Registered {ours} with SteamVR.")
     } else {
-        format!("Registered {ours} with SteamVR (instead of {}; Unregister puts it back).", replaced.join(", "))
+        format!("Registered {ours} with SteamVR; taken off SteamVR's list: {} (two PS VR2 drivers can't both run the headset).", replaced.join(", "))
     })
 }
 
 /// Unregister: our plugin out of SteamVR's list, the PS VR2 driver it replaced (Sony's) back.
 fn unregister_driver() -> Result<String, String> {
     let (v, list) = external_drivers()?;
-    let mut new: Vec<String> = list.into_iter().filter(|p| !p.trim_end_matches('/').ends_with("steamvr-monado-psvr2")).collect();
-    let keep = config_dir().join("replaced-drivers.json");
-    let restored: Vec<String> = fs::read_to_string(&keep)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|p| Path::new(p).exists() && !new.contains(p))
-        .collect();
-    new.extend(restored.iter().cloned());
+    let new: Vec<String> = list.into_iter().filter(|p| !p.trim_end_matches('/').ends_with("steamvr-monado-psvr2")).collect();
     write_external_drivers(v, &new)?;
-    let _ = fs::remove_file(&keep);
-    Ok(if restored.is_empty() {
-        "Our driver unregistered from SteamVR.".to_string()
+    Ok("Our driver unregistered from SteamVR (the other drivers on the list are left as they are).".to_string())
+}
+
+
+/// The SteamVR settings DriverKit turns on for the PS VR2 (section, key, value): the camera on, Room View available
+/// as the full camera picture, and the camera shown near the play-area walls.
+const PSVR2_STEAMVR_SETTINGS: [(&str, &str, i64); 4] = [
+    ("camera", "enableCamera", 1),
+    ("camera", "roomView", 1),
+    ("camera", "roomViewStyle", 4),
+    ("camera", "enableCameraForCollisionBounds", 1),
+];
+
+/// enableCamera and enableCameraForCollisionBounds are booleans in SteamVR's settings; the others numbers.
+fn setting_value(key: &str, v: i64) -> serde_json::Value {
+    if key.starts_with("enable") {
+        serde_json::Value::from(v != 0)
     } else {
-        format!("Our driver unregistered; {} registered again.", restored.join(", "))
-    })
+        serde_json::Value::from(v)
+    }
+}
+
+/// SteamVR's settings file (<SteamVR config>/steamvr.vrsettings, the config folder from openvrpaths.vrpath).
+fn steamvr_settings_file(steam_root: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let from_vrpath = fs::read_to_string(openvrpaths_file())
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["config"].get(0).and_then(|c| c.as_str()).map(PathBuf::from));
+    from_vrpath
+        .unwrap_or_else(|| {
+            if steam_root.is_empty() {
+                Path::new(&home).join(".local/share/Steam/config")
+            } else {
+                Path::new(steam_root).join("config")
+            }
+        })
+        .join("steamvr.vrsettings")
+}
+
+/// How many of the PS VR2 settings are already on in this settings JSON.
+fn psvr2_settings_on(v: &serde_json::Value) -> usize {
+    PSVR2_STEAMVR_SETTINGS.iter().filter(|(sec, key, val)| v[*sec][*key] == setting_value(key, *val)).count()
+}
+
+/// Turn the PS VR2 settings on in SteamVR's settings (SteamVR closed). The file is backed up first, once, into
+/// ~/.config/PSVR2-DriverKit/steamvr.vrsettings.before-psvr2 (kept for Undo; a later run keeps the first backup).
+fn apply_psvr2_settings(file: &Path) -> Result<String, String> {
+    let text = fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+    let backup = config_dir().join("steamvr.vrsettings.before-psvr2");
+    if !backup.exists() {
+        let _ = fs::create_dir_all(config_dir());
+        fs::write(&backup, &text).map_err(|e| format!("backup {}: {e}", backup.display()))?;
+    }
+    for (sec, key, val) in PSVR2_STEAMVR_SETTINGS {
+        if !v[sec].is_object() {
+            v[sec] = serde_json::json!({});
+        }
+        v[sec][key] = setting_value(key, val);
+    }
+    fs::write(file, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(format!("SteamVR's camera and Room View are on for the PS VR2 (backup: {}).", backup.display()))
+}
+
+/// Undo: SteamVR's settings file back from DriverKit's backup (SteamVR closed).
+fn undo_psvr2_settings(file: &Path) -> Result<String, String> {
+    let backup = config_dir().join("steamvr.vrsettings.before-psvr2");
+    let text = fs::read_to_string(&backup).map_err(|_| "no backup to restore (the features were never turned on from here)".to_string())?;
+    fs::write(file, text).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(&backup);
+    Ok("SteamVR's settings are back as they were before Turn on PS VR2 features.".to_string())
 }
 
 /// The packages build-driver.sh needs (compilers, CMake/Ninja, the Monado build's libraries, Rust for DriverKit).
@@ -1510,10 +1690,33 @@ impl Launcher {
                 {
                     self.start_compile(steamvr);
                 }
-                if running {
+                let checking = self.check.lock().unwrap().running;
+                if ui
+                    .add_enabled(!running && !checking, egui::Button::new("Check"))
+                    .on_hover_text("Is the installed build the latest on GitHub, is there a newer one, or is nothing installed yet?")
+                    .clicked()
+                {
+                    let dest = PathBuf::from(self.cfg.install_dir.trim());
+                    *self.check.lock().unwrap() = CheckState { running: true, result: None };
+                    let state = self.check.clone();
+                    thread::spawn(move || {
+                        let r = check_build(&dest);
+                        *state.lock().unwrap() = CheckState { running: false, result: Some(r) };
+                    });
+                }
+                if running || checking {
                     ui.spinner();
                 }
             });
+            if let Some(r) = self.check.lock().unwrap().result.clone() {
+                let (color, text) = match r {
+                    CheckResult::UpToDate(t) => (theme::LIT, t),
+                    CheckResult::NewBuild(t) => (theme::PS_BLUE.gamma_multiply(1.4), t),
+                    CheckResult::NotInstalled(t) => (theme::SLATE, t),
+                    CheckResult::Failed(t) => (theme::FAULT, t),
+                };
+                ui.label(egui::RichText::new(text).color(color).font(theme::bold(13.0)));
+            }
             if running || result.is_some() {
                 let text = match (running, &result) {
                     (true, _) if step == 3 && total > 0 => format!("Compiling {done} of {total}"),
@@ -1561,7 +1764,7 @@ impl Launcher {
             // Registered, but not this (container-ready) copy: Register replaces it.
             let current = list.iter().any(|p| Path::new(p.trim_end_matches('/')) == plugin.as_path());
             let sony = list.iter().any(|p| p.contains("PlayStation VR2 App"));
-            theme::note(ui, "When our driver is registered, Steam starts SteamVR with it, from the Library or from any game. Unregister brings Sony's driver back.");
+            theme::note(ui, "When our driver is registered, Steam starts SteamVR with it, from the Library or from any game. Unregister only removes our driver; it doesn't register any other.");
             ui.horizontal(|ui| {
                 let (color, text) = match (ours, sony) {
                     (true, _) if !current => (theme::FAULT, "The registered copy of our driver can't load when Steam starts SteamVR: Register replaces it with this one"),
@@ -1596,6 +1799,39 @@ impl Launcher {
                 }
             });
             ui.label(egui::RichText::new(format!("Driver: {}", plugin.display())).color(theme::SLATE).size(12.0));
+        });
+
+        theme::section(ui, "SteamVR features", |ui| {
+            theme::note(ui, "Turns on SteamVR's camera features for the PS VR2, permanently: the camera, Room View as the full camera picture (headset button or double-press PS), and the camera when you get near your play-area walls. Room setup needs nothing here: the driver offers it itself.");
+            let file = steamvr_settings_file(&self.cfg.steam_root);
+            let on = fs::read_to_string(&file)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .map(|v| psvr2_settings_on(&v))
+                .unwrap_or(0);
+            let all = on == PSVR2_STEAMVR_SETTINGS.len();
+            ui.label(egui::RichText::new(if all { "All PS VR2 camera features are on".to_string() } else { format!("{on} of {} PS VR2 camera features are on", PSVR2_STEAMVR_SETTINGS.len()) })
+                .font(theme::bold(14.0))
+                .color(if all { theme::LIT } else { theme::SLATE }));
+            let backup = config_dir().join("steamvr.vrsettings.before-psvr2");
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!steamvr && !all, theme::primary("Turn on PS VR2 features"))
+                    .on_disabled_hover_text(if steamvr { "Close SteamVR first: it rewrites its settings while running." } else { "Already on." })
+                    .clicked()
+                {
+                    self.message = apply_psvr2_settings(&file).unwrap_or_else(|e| format!("Couldn't change SteamVR's settings: {e}"));
+                }
+                if ui
+                    .add_enabled(!steamvr && backup.exists(), egui::Button::new("Undo"))
+                    .on_hover_text("Puts SteamVR's settings back from the backup made when the features were turned on.")
+                    .on_disabled_hover_text(if steamvr { "Close SteamVR first." } else { "Nothing to undo." })
+                    .clicked()
+                {
+                    self.message = undo_psvr2_settings(&file).unwrap_or_else(|e| format!("Couldn't undo: {e}"));
+                }
+            });
+            ui.label(egui::RichText::new(format!("Settings file: {}", file.display())).color(theme::SLATE).size(12.0));
         });
 
         theme::section(ui, "Packages needed to compile", |ui| {
@@ -1712,6 +1948,16 @@ const BUILD_SCRIPT: &str = include_str!("../../build-driver.sh");
 const REPO_WEB: &str = "github.com/mkooner/PSVR2-DriverKit";
 
 fn main() -> eframe::Result<()> {
+    // --check [install folder]: what the Compile tab's Check button reports, printed (default: the saved install folder)
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--check") {
+        let dest = args.get(i + 1).cloned().unwrap_or_else(|| load_config().install_dir);
+        let text = match check_build(Path::new(&dest)) {
+            CheckResult::UpToDate(t) | CheckResult::NewBuild(t) | CheckResult::NotInstalled(t) | CheckResult::Failed(t) => t,
+        };
+        println!("{text}");
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--status") {
         // What the launcher sees, without the window (for checks and scripts).
         let st = poll_status();
@@ -1733,8 +1979,10 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    // --screenshot: a tall window, so a whole tab fits in the picture.
+    let height = if std::env::args().any(|a| a == "--screenshot") { 1500.0 } else { 760.0 };
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 760.0]).with_min_inner_size([720.0, 520.0]).with_title("PSVR2-DriverKit"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, height]).with_min_inner_size([720.0, 520.0]).with_title("PSVR2-DriverKit"),
         ..Default::default()
     };
     let args: Vec<String> = std::env::args().collect();

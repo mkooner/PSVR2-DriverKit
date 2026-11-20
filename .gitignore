@@ -54,3 +54,4 @@ tools/vrposelog
 tools/vrposeprobe
 tools/vrtestscene
 launcher-gui/target/
+tools/xreyetest
