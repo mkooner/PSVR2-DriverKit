@@ -22,11 +22,19 @@
  *
  */
 
-#define LOG_TRACE(refinement, ...) U_LOG_IFL_T(refinement->log_level, __VA_ARGS__)
-#define LOG_DEBUG(refinement, ...) U_LOG_IFL_D(refinement->log_level, __VA_ARGS__)
-#define LOG_INFO(refinement, ...) U_LOG_IFL_I(refinement->log_level, __VA_ARGS__)
-#define LOG_WARN(refinement, ...) U_LOG_IFL_W(refinement->log_level, __VA_ARGS__)
-#define LOG_ERROR(refinement, ...) U_LOG_IFL_E(refinement->log_level, __VA_ARGS__)
+// Every line names its device ("[left] ..."): two controllers calibrate and hold their timing side by side, and their
+// messages read the same.
+#define LED_SYNC_NAME(refinement) ((refinement)->name[0] != '\0' ? (refinement)->name : "?")
+#define LOG_TRACE(refinement, fmt, ...)                                                                                \
+	U_LOG_IFL_T((refinement)->log_level, "[%s] " fmt, LED_SYNC_NAME(refinement), ##__VA_ARGS__)
+#define LOG_DEBUG(refinement, fmt, ...)                                                                                \
+	U_LOG_IFL_D((refinement)->log_level, "[%s] " fmt, LED_SYNC_NAME(refinement), ##__VA_ARGS__)
+#define LOG_INFO(refinement, fmt, ...)                                                                                 \
+	U_LOG_IFL_I((refinement)->log_level, "[%s] " fmt, LED_SYNC_NAME(refinement), ##__VA_ARGS__)
+#define LOG_WARN(refinement, fmt, ...)                                                                                 \
+	U_LOG_IFL_W((refinement)->log_level, "[%s] " fmt, LED_SYNC_NAME(refinement), ##__VA_ARGS__)
+#define LOG_ERROR(refinement, fmt, ...)                                                                                \
+	U_LOG_IFL_E((refinement)->log_level, "[%s] " fmt, LED_SYNC_NAME(refinement), ##__VA_ARGS__)
 
 //! The amount of frames to not see it for consider a device "not found" during an active search
 #define MAX_SAMPLE_LATENCY 3

@@ -91,8 +91,9 @@ DEBUG_GET_ONCE_BOOL_OPTION(constellation_tracker_blob_recovery_prior_gate, "T_CO
  *
  * A mitigation. The controllers' gyro bias is now removed at rest (pssense_imu_rest.h); the rest of the error is a
  * ~30 deg pitch between the PS VR2 camera rig and gravity (controller gravity vs the tracker's up in every recording,
- * headset SLAM level to 0.5 deg; compensated so far by PSSENSE_IMU_REF_CORRECTION_DEG) and the right controller's gyro
- * cross-axis error (~2.3% X-Z). Remove once both are fixed at the source.
+ * headset SLAM level to 0.5 deg), which was the tracker's camera mount error, fixed at the source on 2026-11-19
+ * (PSVR2_CAM_ALIGN; PSSENSE_IMU_REF_CORRECTION_DEG back to 0), and the right controller's gyro cross-axis error
+ * (~2.3% X-Z), still open. Remove once that is fixed too.
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_imu_up_learn, "T_CONSTELLATION_IMU_UP_LEARN", 0.05f)
 //! Largest prior image error the snap searches (undistorted px).

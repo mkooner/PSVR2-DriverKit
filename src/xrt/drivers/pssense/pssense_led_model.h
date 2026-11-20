@@ -39,7 +39,14 @@ static const struct t_constellation_tracker_led_model_match_parameters DEFAULT_M
  * disagreed with the uncorrected 3DoF orientation by 29.9 / 26.7 deg (left / right, 01:47 run), close to the 35 deg
  * gravity gate; a pure X rotation of +30.0 / +26.5 deg brings that to 7.0 / 6.5 deg (96% / 84% within 20 deg).
  */
-#define PSSENSE_IMU_REF_CORRECTION_DEG_DEFAULT (28.25f)
+/*
+ * 2026-11-19: that ~30 deg was the PS VR2 camera rig's mount error (the tracker's camera 0 looked level instead of
+ * 28.9 deg down, see PSVR2_CAM_ALIGN in psvr2_constellation_tracking.c). With the rig aligned, 28.25 made the optical
+ * and IMU up disagree by 30.3 deg (median, both controllers) next to the 35 deg gravity gate and tracking fell apart
+ * in motion; with 0 they agree to 2.5 deg (median, 3.9 p90), better than the old 3.7 / 6.5 deg, and the accelerometer
+ * at rest matches the optical up to 0.9-1.3 deg (desk recording 20:58, replayed with the aligned rig).
+ */
+#define PSSENSE_IMU_REF_CORRECTION_DEG_DEFAULT (0.0f)
 
 //! The offset from the LED origin -> IMU origin, for the left controller
 static struct xrt_vec3 T_led_imu_left = {
