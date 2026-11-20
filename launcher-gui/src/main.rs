@@ -179,17 +179,13 @@ const CONFIG_VERSION: u32 = 8;
 
 impl Default for Config {
     fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let kit = format!("{home}/Documents/Claude/Monado/psvr2-test");
-        let mut settings = default_settings();
-        for s in settings.iter_mut() {
-            if s.key == "VIT_SYSTEM_LIBRARY_PATH" {
-                s.kind = Kind::Value { value: format!("{home}/Documents/Claude/Monado/basalt-install/lib/libbasalt.so") };
-            }
-        }
+        // A fresh install: everything in the Compile Driver tab's default folder (the commands and launches stay empty
+        // until a compile puts a build there; driver.env then names the real folders, see load_config).
+        let install = default_install_dir();
+        let settings = default_settings();
         Config {
-            test_kit: kit,
-            monado_build: format!("{home}/Documents/Claude/Monado/trial/build"),
+            test_kit: format!("{install}/kit"),
+            monado_build: format!("{install}/build"),
             settings,
             steam_root: String::new(),
             steamvr_dir: String::new(),
@@ -1344,6 +1340,21 @@ const PACKAGES: [(&str, &str); 3] = [
 ];
 
 /// A command or environment line to paste into a terminal, with its Copy button.
+/// This user's runtime folder: XDG_RUNTIME_DIR, else /run/user/<their user id> (from /proc/self/status).
+fn runtime_dir() -> String {
+    if let Ok(d) = std::env::var("XDG_RUNTIME_DIR") {
+        if !d.is_empty() {
+            return d;
+        }
+    }
+    let uid = fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| t.lines().find(|l| l.starts_with("Uid:")).and_then(|l| l.split_whitespace().nth(1).map(String::from)))
+        .unwrap_or_else(|| "0".into());
+    format!("/run/user/{uid}")
+}
+
+/// A command with a Copy button; an empty command shows a blank row (nothing compiled yet).
 fn copy_row(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new()
         .fill(theme::FIELD)
@@ -1352,7 +1363,12 @@ fn copy_row(ui: &mut egui::Ui, text: &str) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                if ui.button("Copy").on_hover_text("Copy to the clipboard").clicked() {
+                if ui
+                    .add_enabled(!text.is_empty(), egui::Button::new("Copy"))
+                    .on_hover_text("Copy to the clipboard")
+                    .on_disabled_hover_text("Compile the driver first (Compile Driver tab): the command appears once it's built.")
+                    .clicked()
+                {
                     ui.ctx().copy_text(text.to_string());
                 }
                 ui.add(egui::Label::new(egui::RichText::new(text).monospace().color(theme::GRAPHITE)).wrap());
@@ -1588,13 +1604,15 @@ impl Launcher {
             });
             ui.add_space(6.0);
             theme::note(ui, "Native OpenXR apps started elsewhere (monado-service must be running):");
-            let manifest = self.cfg.manifest().display().to_string();
-            let xr = format!("XR_RUNTIME_JSON={manifest}");
-            copy_row(ui, &xr);
+            // Only real paths: blank until a compiled build (Monado's OpenXR runtime file) is found on this PC.
+            let manifest = self.cfg.manifest();
+            let built = manifest.is_file();
+            let xr = format!("XR_RUNTIME_JSON={}", manifest.display());
+            copy_row(ui, if built { &xr } else { "" });
             theme::note(ui, "Steam games on Monado (Properties > Launch Options):");
-            let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
-            let pv = format!("PRESSURE_VESSEL_FILESYSTEMS_RW={runtime}/monado_comp_ipc");
-            copy_row(ui, &format!("{xr} {pv} %command%"));
+            let pv = format!("PRESSURE_VESSEL_FILESYSTEMS_RW={}/monado_comp_ipc", runtime_dir());
+            let steam = format!("{xr} {pv} %command%");
+            copy_row(ui, if built { &steam } else { "" });
         });
     }
 
