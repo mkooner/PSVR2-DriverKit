@@ -96,7 +96,56 @@ struct DeviceInfo
 	std::vector<std::pair<int, float>> float_props;
 	//! A hidden-area mask file to hand SteamVR ("ham_vert <eye> <type> <u> <v>" lines); empty: none.
 	std::string hidden_area_file;
+	/*!
+	 * Controllers: where the hand's grip (OpenXR's grip pose) is in the pose the driver reports (the controller's
+	 * SteamVR root, which its render model and input profile poses are relative to). The hand skeleton is fitted in
+	 * the grip and placed with this. Identity: the reported pose is the grip.
+	 */
+	Pose grip_in_root;
 };
+
+//! a * b for rotations (Quat is x, y, z, w).
+inline Quat
+quat_mul(const Quat &a, const Quat &b)
+{
+	return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+	        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+
+inline Vec3
+quat_rotate(const Quat &q, const Vec3 &v)
+{
+	const Vec3 u{q.x, q.y, q.z};
+	auto cross = [](const Vec3 &a, const Vec3 &b) {
+		return Vec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+	};
+	const Vec3 c = cross(u, v);
+	const Vec3 t{2 * c.x, 2 * c.y, 2 * c.z};
+	const Vec3 c2 = cross(u, t);
+	return {v.x + q.w * t.x + c2.x, v.y + q.w * t.y + c2.y, v.z + q.w * t.z + c2.z};
+}
+
+/*!
+ * The controller's root from its grip: root = grip * inverse(grip_in_root), with the velocities of that point (the
+ * angular velocity is the same; the linear one adds w x r for the root's offset r from the grip, in tracking space).
+ */
+inline TrackedPose
+root_from_grip(const TrackedPose &grip, const Pose &grip_in_root)
+{
+	const Quat gi{-grip_in_root.orientation.x, -grip_in_root.orientation.y, -grip_in_root.orientation.z,
+	              grip_in_root.orientation.w};
+	const Vec3 t = quat_rotate(gi, grip_in_root.position); // inverse: rotation gi, translation -gi * t
+	const Vec3 root_in_grip{-t.x, -t.y, -t.z};
+	TrackedPose out = grip;
+	out.pose.orientation = quat_mul(grip.pose.orientation, gi);
+	const Vec3 r = quat_rotate(grip.pose.orientation, root_in_grip);
+	out.pose.position = {grip.pose.position.x + r.x, grip.pose.position.y + r.y, grip.pose.position.z + r.z};
+	const Vec3 &w = grip.angular_velocity;
+	out.linear_velocity = {grip.linear_velocity.x + w.y * r.z - w.z * r.y,
+	                       grip.linear_velocity.y + w.z * r.x - w.x * r.z,
+	                       grip.linear_velocity.z + w.x * r.y - w.y * r.x};
+	return out;
+}
 
 /*!
  * The headset's passthrough cameras (the PS VR2's bottom pair), as SteamVR's camera component needs them: per camera

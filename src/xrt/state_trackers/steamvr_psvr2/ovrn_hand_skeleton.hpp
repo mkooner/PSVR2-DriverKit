@@ -1,17 +1,32 @@
-// Copyright 2018-2019, polygraphene
-// Copyright 2020-2024, alvr-org
 // Copyright 2026, Mehrab Kooner
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  A controller hand skeleton for SteamVR from the buttons: ALVR's bone tables and blending
- *         (alvr/server_openvr/cpp/alvr_server/Controller.cpp, GetThumbBoneTransform / GetTriggerBoneTransform /
- *         GetGripClickBoneTransform / GetBoneTransform, MIT), wrapped for this driver.
+ * @brief  The PS VR2 Sense controller's hand skeleton for SteamVR (/input/skeleton/left|right), driven by the Sense's
+ *         finger sensors.
  *
- * Sony's driver gives each Sense controller a skeleton input (/input/skeleton/left|right); games built on Unreal's
- * SteamVR plugin (AMID EVIL VR, Hellsweeper VR) bind their hand animation to it and hung the GPU with our driver,
- * which had none (their logs: "skeleton/left ... missing path invalid device path for skeleton output", 2026-11-19).
- * The pose here always has all 31 bones valid, from the first frame on.
+ * Sony's driver gives each Sense controller a skeleton input; games built on Unreal's SteamVR plugin (AMID EVIL VR,
+ * Hellsweeper VR) bind their hand animation to it and hung the GPU with our driver while it had none (their logs:
+ * "skeleton/left ... missing path invalid device path for skeleton output", 2026-11-19). Every pose here has all 31
+ * bones valid, from the first frame on.
+ *
+ * How the hand is made:
+ *  - The hand itself is Valve's reference hand, read at startup from SteamVR's own resources
+ *    (resources/skeletons/vr_glove_left|right_skeleton.glb, the skeleton SteamVR's glove model is skinned to), so the
+ *    bones' lengths and frames are exactly the ones SteamVR and games expect. Without that file a plain built-in hand
+ *    of the same layout is used, so the skeleton still works.
+ *  - It is fitted to the Sense once, in the controller's grip pose (the pose this driver reports; OpenXR's grip: its
+ *    Z axis runs through the tube the fingers make around the handle, the left palm faces +X, the right palm -X, the
+ *    index finger toward -Z): the palm lies across the handle, the middle finger lands on the grip sensor, the
+ *    fingers close until they touch the handle, the index fingertip rests on the trigger and the thumb on the stick
+ *    and on each face button. The control positions come from Sony's Sense model (the controller's dimensions).
+ *  - Every frame the Sense's sensors drive it: how near the index finger is to the trigger, trigger touch and pull;
+ *    how near the middle finger is to the grip, grip touch and click; and which control the thumb touches. The fingers
+ *    move smoothly between the fitted poses.
+ *
+ * The motion is modelled after ALVR's skeleton (github.com/alvr-org/ALVR, server_openvr Controller.cpp, MIT), our
+ * reference implementation for SteamVR controller skeletons; the hand, its fit and the sensor-driven motion are our
+ * own.
  * @ingroup st_ovrn
  */
 
@@ -19,907 +34,885 @@
 
 #include "openvr_driver.h"
 
+#include "util/u_json.h"
+
+#include <unistd.h>
+
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <string>
+#include <vector>
 
 namespace ovrn {
 namespace skel {
 
 constexpr uint32_t kBoneCount = 31; //!< OpenVR's hand skeleton (HandSkeletonBone_Count)
 
-// clang-format off
-inline void GetThumbBoneTransform(
-    bool withController, bool isLeftHand, bool touch, vr::VRBoneTransform_t outBoneTransform[]
-) {
-    if (isLeftHand) {
-        if (touch) {
-            if (withController) {
-                outBoneTransform[2] = { { -0.017303f, 0.032567f, 0.025281f, 1.f },
-                                        { 0.317609f, 0.528344f, 0.213134f, 0.757991f } };
-                outBoneTransform[3] = { { 0.040406f, 0.000000f, -0.000000f, 1.f },
-                                        { 0.991742f, 0.085317f, 0.019416f, 0.093765f } };
-                outBoneTransform[4] = { { 0.032517f, -0.000000f, 0.000000f, 1.f },
-                                        { 0.959385f, -0.012202f, -0.031055f, 0.280120f } };
-            } else {
-                outBoneTransform[2] = { { -0.016426f, 0.030866f, 0.025118f, 1.f },
-                                        { 0.403850f, 0.595704f, 0.082451f, 0.689380f } };
-                outBoneTransform[3] = { { 0.040406f, 0.000000f, -0.000000f, 1.f },
-                                        { 0.989655f, -0.090426f, 0.028457f, 0.107691f } };
-                outBoneTransform[4] = { { 0.032517f, 0.000000f, 0.000000f, 1.f },
-                                        { 0.988590f, 0.143978f, 0.041520f, 0.015363f } };
-            }
-        } else {
-            outBoneTransform[2] = { { -0.012083f, 0.028070f, 0.025050f, 1 },
-                                    { 0.464112f, 0.567418f, 0.272106f, 0.623374f } };
-            outBoneTransform[3] = { { 0.040406f, 0.000000f, -0.000000f, 1 },
-                                    { 0.994838f, 0.082939f, 0.019454f, 0.055130f } };
-            outBoneTransform[4] = { { 0.032517f, 0.000000f, 0.000000f, 1 },
-                                    { 0.974793f, -0.003213f, 0.021867f, -0.222015f } };
-        }
-
-        outBoneTransform[5] = { { 0.030464f, -0.000000f, -0.000000f, 1 },
-                                { 1.000000f, -0.000000f, 0.000000f, 0.000000f } };
-    } else {
-        if (touch) {
-            if (withController) {
-                outBoneTransform[2] = { { 0.017303f, 0.032567f, 0.025281f, 1 },
-                                        { 0.528344f, -0.317609f, 0.757991f, -0.213134f } };
-                outBoneTransform[3] = { { -0.040406f, -0.000000f, 0.000000f, 1 },
-                                        { 0.991742f, 0.085317f, 0.019416f, 0.093765f } };
-                outBoneTransform[4] = { { -0.032517f, 0.000000f, -0.000000f, 1 },
-                                        { 0.959385f, -0.012202f, -0.031055f, 0.280120f } };
-            } else {
-                outBoneTransform[2] = { { 0.016426f, 0.030866f, 0.025118f, 1 },
-                                        { 0.595704f, -0.403850f, 0.689380f, -0.082451f } };
-                outBoneTransform[3] = { { -0.040406f, -0.000000f, 0.000000f, 1 },
-                                        { 0.989655f, -0.090426f, 0.028457f, 0.107691f } };
-                outBoneTransform[4] = { { -0.032517f, -0.000000f, -0.000000f, 1 },
-                                        { 0.988590f, 0.143978f, 0.041520f, 0.015363f } };
-            }
-        } else {
-            outBoneTransform[2] = { { 0.012330f, 0.028661f, 0.025049f, 1 },
-                                    { 0.571059f, -0.451277f, 0.630056f, -0.270685f } };
-            outBoneTransform[3] = { { -0.040406f, -0.000000f, 0.000000f, 1 },
-                                    { 0.994565f, 0.078280f, 0.018282f, 0.066177f } };
-            outBoneTransform[4] = { { -0.032517f, -0.000000f, -0.000000f, 1 },
-                                    { 0.977658f, -0.003039f, 0.020722f, -0.209156f } };
-        }
-
-        outBoneTransform[5] = { { -0.030464f, 0.000000f, 0.000000f, 1 },
-                                { 1.000000f, -0.000000f, 0.000000f, 0.000000f } };
-    }
-}
-
-inline void GetTriggerBoneTransform(
-    bool withController,
-    bool isLeftHand,
-    bool touch,
-    float click,
-    vr::VRBoneTransform_t outBoneTransform[]
-) {
-    if (click) {
-        if (withController) {
-            if (isLeftHand) {
-                outBoneTransform[6] = { { -0.003925f, 0.027171f, 0.014640f, 1 },
-                                        { 0.666448f, 0.430031f, -0.455947f, 0.403772f } };
-                outBoneTransform[7] = { { 0.076015f, -0.005124f, 0.000239f, 1 },
-                                        { -0.956011f, -0.000025f, 0.158355f, -0.246913f } };
-                outBoneTransform[8] = { { 0.043930f, -0.000000f, -0.000000f, 1 },
-                                        { -0.944138f, -0.043351f, 0.014947f, -0.326345f } };
-                outBoneTransform[9] = { { 0.028695f, 0.000000f, 0.000000f, 1 },
-                                        { -0.912149f, 0.003626f, 0.039888f, -0.407898f } };
-                outBoneTransform[10] = { { 0.022821f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, -0.000000f, -0.000000f, 0.000000f } };
-                outBoneTransform[11] = { { 0.002177f, 0.007120f, 0.016319f, 1 },
-                                         { 0.529359f, 0.540512f, -0.463783f, 0.461011f } };
-                outBoneTransform[12] = { { 0.070953f, 0.000779f, 0.000997f, 1 },
-                                         { 0.847397f, -0.257141f, -0.139135f, 0.443213f } };
-                outBoneTransform[13] = { { 0.043108f, 0.000000f, 0.000000f, 1 },
-                                         { 0.874907f, 0.009875f, 0.026584f, 0.483460f } };
-                outBoneTransform[14] = { { 0.033266f, -0.000000f, 0.000000f, 1 },
-                                         { 0.894578f, -0.036774f, -0.050597f, 0.442513f } };
-                outBoneTransform[15] = { { 0.025892f, -0.000000f, 0.000000f, 1 },
-                                         { 0.999195f, -0.000000f, 0.000000f, 0.040126f } };
-                outBoneTransform[16] = { { 0.000513f, -0.006545f, 0.016348f, 1 },
-                                         { 0.500244f, 0.530784f, -0.516215f, 0.448939f } };
-                outBoneTransform[17] = { { 0.065876f, 0.001786f, 0.000693f, 1 },
-                                         { 0.831617f, -0.242931f, -0.139695f, 0.479461f } };
-                outBoneTransform[18] = { { 0.040697f, 0.000000f, 0.000000f, 1 },
-                                         { 0.769163f, -0.001746f, 0.001363f, 0.639049f } };
-                outBoneTransform[19] = { { 0.028747f, -0.000000f, -0.000000f, 1 },
-                                         { 0.968615f, -0.064538f, -0.046586f, 0.235477f } };
-                outBoneTransform[20] = { { 0.022430f, -0.000000f, 0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, -0.000000f, -0.000000f } };
-                outBoneTransform[21] = { { -0.002478f, -0.018981f, 0.015214f, 1 },
-                                         { 0.474671f, 0.434670f, -0.653212f, 0.398827f } };
-                outBoneTransform[22] = { { 0.062878f, 0.002844f, 0.000332f, 1 },
-                                         { 0.798788f, -0.199577f, -0.094418f, 0.559636f } };
-                outBoneTransform[23] = { { 0.030220f, 0.000002f, -0.000000f, 1 },
-                                         { 0.853087f, 0.001644f, -0.000913f, 0.521765f } };
-                outBoneTransform[24] = { { 0.018187f, -0.000002f, 0.000000f, 1 },
-                                         { 0.974249f, 0.052491f, 0.003591f, 0.219249f } };
-                outBoneTransform[25] = { { 0.018018f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-                outBoneTransform[26] = { { 0.006629f, 0.026690f, 0.061870f, 1 },
-                                         { 0.805084f, -0.018369f, 0.584788f, -0.097597f } };
-                outBoneTransform[27] = { { -0.007882f, -0.040478f, 0.039337f, 1 },
-                                         { -0.322494f, 0.932092f, 0.121861f, 0.111140f } };
-                outBoneTransform[28] = { { 0.017136f, -0.032633f, 0.080682f, 1 },
-                                         { -0.169466f, 0.800083f, 0.571006f, 0.071415f } };
-                outBoneTransform[29] = { { 0.011144f, -0.028727f, 0.108366f, 1 },
-                                         { -0.076328f, 0.788280f, 0.605097f, 0.081527f } };
-                outBoneTransform[30] = { { 0.011333f, -0.026044f, 0.128585f, 1 },
-                                         { -0.144791f, 0.737451f, 0.656958f, -0.060069f } };
-            } else {
-                outBoneTransform[6] = { { -0.003925f, 0.027171f, 0.014640f, 1 },
-                                        { 0.666448f, 0.430031f, -0.455947f, 0.403772f } };
-                outBoneTransform[7] = { { 0.076015f, -0.005124f, 0.000239f, 1 },
-                                        { -0.956011f, -0.000025f, 0.158355f, -0.246913f } };
-                outBoneTransform[8] = { { 0.043930f, -0.000000f, -0.000000f, 1 },
-                                        { -0.944138f, -0.043351f, 0.014947f, -0.326345f } };
-                outBoneTransform[9] = { { 0.028695f, 0.000000f, 0.000000f, 1 },
-                                        { -0.912149f, 0.003626f, 0.039888f, -0.407898f } };
-                outBoneTransform[10] = { { 0.022821f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, -0.000000f, -0.000000f, 0.000000f } };
-                outBoneTransform[11] = { { 0.002177f, 0.007120f, 0.016319f, 1 },
-                                         { 0.529359f, 0.540512f, -0.463783f, 0.461011f } };
-                outBoneTransform[12] = { { 0.070953f, 0.000779f, 0.000997f, 1 },
-                                         { 0.847397f, -0.257141f, -0.139135f, 0.443213f } };
-                outBoneTransform[13] = { { 0.043108f, 0.000000f, 0.000000f, 1 },
-                                         { 0.874907f, 0.009875f, 0.026584f, 0.483460f } };
-                outBoneTransform[14] = { { 0.033266f, -0.000000f, 0.000000f, 1 },
-                                         { 0.894578f, -0.036774f, -0.050597f, 0.442513f } };
-                outBoneTransform[15] = { { 0.025892f, -0.000000f, 0.000000f, 1 },
-                                         { 0.999195f, -0.000000f, 0.000000f, 0.040126f } };
-                outBoneTransform[16] = { { 0.000513f, -0.006545f, 0.016348f, 1 },
-                                         { 0.500244f, 0.530784f, -0.516215f, 0.448939f } };
-                outBoneTransform[17] = { { 0.065876f, 0.001786f, 0.000693f, 1 },
-                                         { 0.831617f, -0.242931f, -0.139695f, 0.479461f } };
-                outBoneTransform[18] = { { 0.040697f, 0.000000f, 0.000000f, 1 },
-                                         { 0.769163f, -0.001746f, 0.001363f, 0.639049f } };
-                outBoneTransform[19] = { { 0.028747f, -0.000000f, -0.000000f, 1 },
-                                         { 0.968615f, -0.064538f, -0.046586f, 0.235477f } };
-                outBoneTransform[20] = { { 0.022430f, -0.000000f, 0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, -0.000000f, -0.000000f } };
-                outBoneTransform[21] = { { -0.002478f, -0.018981f, 0.015214f, 1 },
-                                         { 0.474671f, 0.434670f, -0.653212f, 0.398827f } };
-                outBoneTransform[22] = { { 0.062878f, 0.002844f, 0.000332f, 1 },
-                                         { 0.798788f, -0.199577f, -0.094418f, 0.559636f } };
-                outBoneTransform[23] = { { 0.030220f, 0.000002f, -0.000000f, 1 },
-                                         { 0.853087f, 0.001644f, -0.000913f, 0.521765f } };
-                outBoneTransform[24] = { { 0.018187f, -0.000002f, 0.000000f, 1 },
-                                         { 0.974249f, 0.052491f, 0.003591f, 0.219249f } };
-                outBoneTransform[25] = { { 0.018018f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-                outBoneTransform[26] = { { 0.006629f, 0.026690f, 0.061870f, 1 },
-                                         { 0.805084f, -0.018369f, 0.584788f, -0.097597f } };
-                outBoneTransform[27] = { { -0.007882f, -0.040478f, 0.039337f, 1 },
-                                         { -0.322494f, 0.932092f, 0.121861f, 0.111140f } };
-                outBoneTransform[28] = { { 0.017136f, -0.032633f, 0.080682f, 1 },
-                                         { -0.169466f, 0.800083f, 0.571006f, 0.071415f } };
-                outBoneTransform[29] = { { 0.011144f, -0.028727f, 0.108366f, 1 },
-                                         { -0.076328f, 0.788280f, 0.605097f, 0.081527f } };
-                outBoneTransform[30] = { { 0.011333f, -0.026044f, 0.128585f, 1 },
-                                         { -0.144791f, 0.737451f, 0.656958f, -0.060069f } };
-            }
-        } else {
-            if (isLeftHand) {
-                outBoneTransform[6] = { { 0.003802f, 0.021514f, 0.012803f, 1 },
-                                        { 0.617314f, 0.395175f, -0.510874f, 0.449185f } };
-                outBoneTransform[7] = { { 0.074204f, -0.005002f, 0.000234f, 1 },
-                                        { 0.737291f, -0.032006f, -0.115013f, 0.664944f } };
-                outBoneTransform[8] = { { 0.043287f, -0.000000f, -0.000000f, 1 },
-                                        { 0.611381f, 0.003287f, 0.003823f, 0.791320f } };
-                outBoneTransform[9] = { { 0.028275f, 0.000000f, 0.000000f, 1 },
-                                        { 0.745389f, -0.000684f, -0.000945f, 0.666629f } };
-                outBoneTransform[10] = { { 0.022821f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, -0.000000f, 0.000000f } };
-                outBoneTransform[11] = { { 0.004885f, 0.006885f, 0.016480f, 1 },
-                                         { 0.522678f, 0.527374f, -0.469333f, 0.477923f } };
-                outBoneTransform[12] = { { 0.070953f, 0.000779f, 0.000997f, 1 },
-                                         { 0.826071f, -0.121321f, 0.017267f, 0.550082f } };
-                outBoneTransform[13] = { { 0.043108f, 0.000000f, 0.000000f, 1 },
-                                         { 0.956676f, 0.013210f, 0.009330f, 0.290704f } };
-                outBoneTransform[14] = { { 0.033266f, 0.000000f, 0.000000f, 1 },
-                                         { 0.979740f, -0.001605f, -0.019412f, 0.199323f } };
-                outBoneTransform[15] = { { 0.025892f, -0.000000f, 0.000000f, 1 },
-                                         { 0.999195f, 0.000000f, 0.000000f, 0.040126f } };
-                outBoneTransform[16] = { { 0.001696f, -0.006648f, 0.016418f, 1 },
-                                         { 0.509620f, 0.540794f, -0.504891f, 0.439220f } };
-                outBoneTransform[17] = { { 0.065876f, 0.001786f, 0.000693f, 1 },
-                                         { 0.955009f, -0.065344f, -0.063228f, 0.282294f } };
-                outBoneTransform[18] = { { 0.040577f, 0.000000f, 0.000000f, 1 },
-                                         { 0.953823f, -0.000972f, 0.000697f, 0.300366f } };
-                outBoneTransform[19] = { { 0.028698f, -0.000000f, -0.000000f, 1 },
-                                         { 0.977627f, -0.001163f, -0.011433f, 0.210033f } };
-                outBoneTransform[20] = { { 0.022430f, -0.000000f, 0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-                outBoneTransform[21] = { { -0.001792f, -0.019041f, 0.015254f, 1 },
-                                         { 0.518602f, 0.511152f, -0.596086f, 0.338315f } };
-                outBoneTransform[22] = { { 0.062878f, 0.002844f, 0.000332f, 1 },
-                                         { 0.978584f, -0.045398f, -0.103083f, 0.172297f } };
-                outBoneTransform[23] = { { 0.030154f, 0.000000f, 0.000000f, 1 },
-                                         { 0.970479f, -0.000068f, -0.002025f, 0.241175f } };
-                outBoneTransform[24] = { { 0.018187f, 0.000000f, 0.000000f, 1 },
-                                         { 0.997053f, -0.000687f, -0.052009f, -0.056395f } };
-                outBoneTransform[25] = { { 0.018018f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, -0.000000f, -0.000000f, -0.000000f } };
-                outBoneTransform[26] = { { -0.005193f, 0.054191f, 0.060030f, 1 },
-                                         { 0.747374f, 0.182388f, 0.599615f, 0.220518f } };
-                outBoneTransform[27] = { { 0.000171f, 0.016473f, 0.096515f, 1 },
-                                         { -0.006456f, 0.022747f, -0.932927f, -0.359287f } };
-                outBoneTransform[28] = { { -0.038019f, -0.074839f, 0.046941f, 1 },
-                                         { -0.199973f, 0.698334f, -0.635627f, -0.261380f } };
-                outBoneTransform[29] = { { -0.036836f, -0.089774f, 0.081969f, 1 },
-                                         { -0.191006f, 0.756582f, -0.607429f, -0.148761f } };
-                outBoneTransform[30] = { { -0.030241f, -0.086049f, 0.119881f, 1 },
-                                         { -0.019037f, 0.779368f, -0.612017f, -0.132881f } };
-            } else {
-                outBoneTransform[6] = { { -0.003802f, 0.021514f, 0.012803f, 1 },
-                                        { 0.395174f, -0.617314f, 0.449185f, 0.510874f } };
-                outBoneTransform[7] = { { -0.074204f, 0.005002f, -0.000234f, 1 },
-                                        { 0.737291f, -0.032006f, -0.115013f, 0.664944f } };
-                outBoneTransform[8] = { { -0.043287f, 0.000000f, 0.000000f, 1 },
-                                        { 0.611381f, 0.003287f, 0.003823f, 0.791320f } };
-                outBoneTransform[9] = { { -0.028275f, -0.000000f, -0.000000f, 1 },
-                                        { 0.745389f, -0.000684f, -0.000945f, 0.666629f } };
-                outBoneTransform[10] = { { -0.022821f, -0.000000f, 0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, -0.000000f, 0.000000f } };
-                outBoneTransform[11] = { { -0.004885f, 0.006885f, 0.016480f, 1 },
-                                         { 0.527233f, -0.522513f, 0.478085f, 0.469510f } };
-                outBoneTransform[12] = { { -0.070953f, -0.000779f, -0.000997f, 1 },
-                                         { 0.826317f, -0.120120f, 0.019005f, 0.549918f } };
-                outBoneTransform[13] = { { -0.043108f, -0.000000f, -0.000000f, 1 },
-                                         { 0.958363f, 0.013484f, 0.007380f, 0.285138f } };
-                outBoneTransform[14] = { { -0.033266f, -0.000000f, -0.000000f, 1 },
-                                         { 0.977901f, -0.001431f, -0.018078f, 0.208279f } };
-                outBoneTransform[15] = { { -0.025892f, 0.000000f, -0.000000f, 1 },
-                                         { 0.999195f, 0.000000f, 0.000000f, 0.040126f } };
-                outBoneTransform[16] = { { -0.001696f, -0.006648f, 0.016418f, 1 },
-                                         { 0.541481f, -0.508179f, 0.441001f, 0.504054f } };
-                outBoneTransform[17] = { { -0.065876f, -0.001786f, -0.000693f, 1 },
-                                         { 0.953780f, -0.064506f, -0.058812f, 0.287548f } };
-                outBoneTransform[18] = { { -0.040577f, -0.000000f, -0.000000f, 1 },
-                                         { 0.954761f, -0.000983f, 0.000698f, 0.297372f } };
-                outBoneTransform[19] = { { -0.028698f, 0.000000f, 0.000000f, 1 },
-                                         { 0.976924f, -0.001344f, -0.010281f, 0.213335f } };
-                outBoneTransform[20] = { { -0.022430f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-                outBoneTransform[21] = { { 0.001792f, -0.019041f, 0.015254f, 1 },
-                                         { 0.510569f, -0.514906f, 0.341115f, 0.598191f } };
-                outBoneTransform[22] = { { -0.062878f, -0.002844f, -0.000332f, 1 },
-                                         { 0.979195f, -0.043879f, -0.095103f, 0.173800f } };
-                outBoneTransform[23] = { { -0.030154f, -0.000000f, -0.000000f, 1 },
-                                         { 0.971387f, -0.000102f, -0.002019f, 0.237494f } };
-                outBoneTransform[24] = { { -0.018187f, -0.000000f, -0.000000f, 1 },
-                                         { 0.997961f, 0.000800f, -0.051911f, -0.037114f } };
-                outBoneTransform[25] = { { -0.018018f, -0.000000f, 0.000000f, 1 },
-                                         { 1.000000f, -0.000000f, -0.000000f, -0.000000f } };
-                outBoneTransform[26] = { { 0.004392f, 0.055515f, 0.060253f, 1 },
-                                         { 0.745924f, 0.156756f, -0.597950f, -0.247953f } };
-                outBoneTransform[27] = { { -0.000171f, 0.016473f, 0.096515f, 1 },
-                                         { -0.006456f, 0.022747f, 0.932927f, 0.359287f } };
-                outBoneTransform[28] = { { 0.038119f, -0.074730f, 0.046338f, 1 },
-                                         { -0.207931f, 0.699835f, 0.632631f, 0.258406f } };
-                outBoneTransform[29] = { { 0.035492f, -0.089519f, 0.081636f, 1 },
-                                         { -0.197555f, 0.760574f, 0.601098f, 0.145535f } };
-                outBoneTransform[30] = { { 0.029073f, -0.085957f, 0.119561f, 1 },
-                                         { -0.031423f, 0.791013f, 0.597190f, 0.129133f } };
-            }
-        }
-    } else if (touch) {
-        if (withController) {
-            if (isLeftHand) {
-                outBoneTransform[6] = { { -0.003925f, 0.027171f, 0.014640f, 1 },
-                                        { 0.666448f, 0.430031f, -0.455947f, 0.403772f } };
-                outBoneTransform[7] = { { 0.074204f, -0.005002f, 0.000234f, 1 },
-                                        { -0.951843f, 0.009717f, 0.158611f, -0.262188f } };
-                outBoneTransform[8] = { { 0.043930f, -0.000000f, -0.000000f, 1 },
-                                        { -0.973045f, -0.044676f, 0.010341f, -0.226012f } };
-                outBoneTransform[9] = { { 0.028695f, 0.000000f, 0.000000f, 1 },
-                                        { -0.935253f, -0.002881f, 0.023037f, -0.353217f } };
-                outBoneTransform[10] = { { 0.022821f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, -0.000000f, -0.000000f, 0.000000f } };
-                outBoneTransform[11] = { { 0.002177f, 0.007120f, 0.016319f, 1 },
-                                         { 0.529359f, 0.540512f, -0.463783f, 0.461011f } };
-                outBoneTransform[12] = { { 0.070953f, 0.000779f, 0.000997f, 1 },
-                                         { 0.847397f, -0.257141f, -0.139135f, 0.443213f } };
-                outBoneTransform[13] = { { 0.043108f, 0.000000f, 0.000000f, 1 },
-                                         { 0.874907f, 0.009875f, 0.026584f, 0.483460f } };
-                outBoneTransform[14] = { { 0.033266f, -0.000000f, 0.000000f, 1 },
-                                         { 0.894578f, -0.036774f, -0.050597f, 0.442513f } };
-                outBoneTransform[15] = { { 0.025892f, -0.000000f, 0.000000f, 1 },
-                                         { 0.999195f, -0.000000f, 0.000000f, 0.040126f } };
-                outBoneTransform[16] = { { 0.000513f, -0.006545f, 0.016348f, 1 },
-                                         { 0.500244f, 0.530784f, -0.516215f, 0.448939f } };
-                outBoneTransform[17] = { { 0.065876f, 0.001786f, 0.000693f, 1 },
-                                         { 0.831617f, -0.242931f, -0.139695f, 0.479461f } };
-                outBoneTransform[18] = { { 0.040697f, 0.000000f, 0.000000f, 1 },
-                                         { 0.769163f, -0.001746f, 0.001363f, 0.639049f } };
-                outBoneTransform[19] = { { 0.028747f, -0.000000f, -0.000000f, 1 },
-                                         { 0.968615f, -0.064538f, -0.046586f, 0.235477f } };
-                outBoneTransform[20] = { { 0.022430f, -0.000000f, 0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, -0.000000f, -0.000000f } };
-                outBoneTransform[21] = { { -0.002478f, -0.018981f, 0.015214f, 1 },
-                                         { 0.474671f, 0.434670f, -0.653212f, 0.398827f } };
-                outBoneTransform[22] = { { 0.062878f, 0.002844f, 0.000332f, 1 },
-                                         { 0.798788f, -0.199577f, -0.094418f, 0.559636f } };
-                outBoneTransform[23] = { { 0.030220f, 0.000002f, -0.000000f, 1 },
-                                         { 0.853087f, 0.001644f, -0.000913f, 0.521765f } };
-                outBoneTransform[24] = { { 0.018187f, -0.000002f, 0.000000f, 1 },
-                                         { 0.974249f, 0.052491f, 0.003591f, 0.219249f } };
-                outBoneTransform[25] = { { 0.018018f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-                outBoneTransform[26] = { { 0.006629f, 0.026690f, 0.061870f, 1 },
-                                         { 0.805084f, -0.018369f, 0.584788f, -0.097597f } };
-                outBoneTransform[27] = { { -0.009005f, -0.041708f, 0.037992f, 1 },
-                                         { -0.338860f, 0.939952f, -0.007564f, 0.040082f } };
-                outBoneTransform[28] = { { 0.017136f, -0.032633f, 0.080682f, 1 },
-                                         { -0.169466f, 0.800083f, 0.571006f, 0.071415f } };
-                outBoneTransform[29] = { { 0.011144f, -0.028727f, 0.108366f, 1 },
-                                         { -0.076328f, 0.788280f, 0.605097f, 0.081527f } };
-                outBoneTransform[30] = { { 0.011333f, -0.026044f, 0.128585f, 1 },
-                                         { -0.144791f, 0.737451f, 0.656958f, -0.060069f } };
-            } else {
-                outBoneTransform[6] = { { -0.003925f, 0.027171f, 0.014640f, 1 },
-                                        { 0.666448f, 0.430031f, -0.455947f, 0.403772f } };
-                outBoneTransform[7] = { { 0.074204f, -0.005002f, 0.000234f, 1 },
-                                        { -0.951843f, 0.009717f, 0.158611f, -0.262188f } };
-                outBoneTransform[8] = { { 0.043930f, -0.000000f, -0.000000f, 1 },
-                                        { -0.973045f, -0.044676f, 0.010341f, -0.226012f } };
-                outBoneTransform[9] = { { 0.028695f, 0.000000f, 0.000000f, 1 },
-                                        { -0.935253f, -0.002881f, 0.023037f, -0.353217f } };
-                outBoneTransform[10] = { { 0.022821f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, -0.000000f, -0.000000f, 0.000000f } };
-                outBoneTransform[11] = { { 0.002177f, 0.007120f, 0.016319f, 1 },
-                                         { 0.529359f, 0.540512f, -0.463783f, 0.461011f } };
-                outBoneTransform[12] = { { 0.070953f, 0.000779f, 0.000997f, 1 },
-                                         { 0.847397f, -0.257141f, -0.139135f, 0.443213f } };
-                outBoneTransform[13] = { { 0.043108f, 0.000000f, 0.000000f, 1 },
-                                         { 0.874907f, 0.009875f, 0.026584f, 0.483460f } };
-                outBoneTransform[14] = { { 0.033266f, -0.000000f, 0.000000f, 1 },
-                                         { 0.894578f, -0.036774f, -0.050597f, 0.442513f } };
-                outBoneTransform[15] = { { 0.025892f, -0.000000f, 0.000000f, 1 },
-                                         { 0.999195f, -0.000000f, 0.000000f, 0.040126f } };
-                outBoneTransform[16] = { { 0.000513f, -0.006545f, 0.016348f, 1 },
-                                         { 0.500244f, 0.530784f, -0.516215f, 0.448939f } };
-                outBoneTransform[17] = { { 0.065876f, 0.001786f, 0.000693f, 1 },
-                                         { 0.831617f, -0.242931f, -0.139695f, 0.479461f } };
-                outBoneTransform[18] = { { 0.040697f, 0.000000f, 0.000000f, 1 },
-                                         { 0.769163f, -0.001746f, 0.001363f, 0.639049f } };
-                outBoneTransform[19] = { { 0.028747f, -0.000000f, -0.000000f, 1 },
-                                         { 0.968615f, -0.064538f, -0.046586f, 0.235477f } };
-                outBoneTransform[20] = { { 0.022430f, -0.000000f, 0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, -0.000000f, -0.000000f } };
-                outBoneTransform[21] = { { -0.002478f, -0.018981f, 0.015214f, 1 },
-                                         { 0.474671f, 0.434670f, -0.653212f, 0.398827f } };
-                outBoneTransform[22] = { { 0.062878f, 0.002844f, 0.000332f, 1 },
-                                         { 0.798788f, -0.199577f, -0.094418f, 0.559636f } };
-                outBoneTransform[23] = { { 0.030220f, 0.000002f, -0.000000f, 1 },
-                                         { 0.853087f, 0.001644f, -0.000913f, 0.521765f } };
-                outBoneTransform[24] = { { 0.018187f, -0.000002f, 0.000000f, 1 },
-                                         { 0.974249f, 0.052491f, 0.003591f, 0.219249f } };
-                outBoneTransform[25] = { { 0.018018f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-                outBoneTransform[26] = { { 0.006629f, 0.026690f, 0.061870f, 1 },
-                                         { 0.805084f, -0.018369f, 0.584788f, -0.097597f } };
-                outBoneTransform[27] = { { -0.009005f, -0.041708f, 0.037992f, 1 },
-                                         { -0.338860f, 0.939952f, -0.007564f, 0.040082f } };
-                outBoneTransform[28] = { { 0.017136f, -0.032633f, 0.080682f, 1 },
-                                         { -0.169466f, 0.800083f, 0.571006f, 0.071415f } };
-                outBoneTransform[29] = { { 0.011144f, -0.028727f, 0.108366f, 1 },
-                                         { -0.076328f, 0.788280f, 0.605097f, 0.081527f } };
-                outBoneTransform[30] = { { 0.011333f, -0.026044f, 0.128585f, 1 },
-                                         { -0.144791f, 0.737451f, 0.656958f, -0.060069f } };
-            }
-        } else {
-            if (isLeftHand) {
-                outBoneTransform[6] = { { 0.002693f, 0.023387f, 0.013573f, 1 },
-                                        { 0.626743f, 0.404630f, -0.499840f, 0.440032f } };
-                outBoneTransform[7] = { { 0.074204f, -0.005002f, 0.000234f, 1 },
-                                        { 0.869067f, -0.019031f, -0.093524f, 0.485400f } };
-                outBoneTransform[8] = { { 0.043512f, -0.000000f, -0.000000f, 1 },
-                                        { 0.834068f, 0.020722f, 0.003930f, 0.551259f } };
-                outBoneTransform[9] = { { 0.028422f, 0.000000f, 0.000000f, 1 },
-                                        { 0.890556f, 0.000289f, -0.009290f, 0.454779f } };
-                outBoneTransform[10] = { { 0.022821f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, -0.000000f, 0.000000f } };
-                outBoneTransform[11] = { { 0.003937f, 0.006967f, 0.016424f, 1 },
-                                         { 0.531603f, 0.532690f, -0.459598f, 0.471602f } };
-                outBoneTransform[12] = { { 0.070953f, 0.000779f, 0.000997f, 1 },
-                                         { 0.906933f, -0.142169f, -0.015445f, 0.396261f } };
-                outBoneTransform[13] = { { 0.043108f, 0.000000f, 0.000000f, 1 },
-                                         { 0.975787f, 0.014996f, 0.010867f, 0.217936f } };
-                outBoneTransform[14] = { { 0.033266f, 0.000000f, 0.000000f, 1 },
-                                         { 0.992777f, -0.002096f, -0.021403f, 0.118029f } };
-                outBoneTransform[15] = { { 0.025892f, -0.000000f, 0.000000f, 1 },
-                                         { 0.999195f, 0.000000f, 0.000000f, 0.040126f } };
-                outBoneTransform[16] = { { 0.001282f, -0.006612f, 0.016394f, 1 },
-                                         { 0.513688f, 0.543325f, -0.502550f, 0.434011f } };
-                outBoneTransform[17] = { { 0.065876f, 0.001786f, 0.000693f, 1 },
-                                         { 0.971280f, -0.068108f, -0.073480f, 0.215818f } };
-                outBoneTransform[18] = { { 0.040619f, 0.000000f, 0.000000f, 1 },
-                                         { 0.976566f, -0.001379f, 0.000441f, 0.215216f } };
-                outBoneTransform[19] = { { 0.028715f, -0.000000f, -0.000000f, 1 },
-                                         { 0.987232f, -0.000977f, -0.011919f, 0.158838f } };
-                outBoneTransform[20] = { { 0.022430f, -0.000000f, 0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-                outBoneTransform[21] = { { -0.002032f, -0.019020f, 0.015240f, 1 },
-                                         { 0.521784f, 0.511917f, -0.594340f, 0.335325f } };
-                outBoneTransform[22] = { { 0.062878f, 0.002844f, 0.000332f, 1 },
-                                         { 0.982925f, -0.053050f, -0.108004f, 0.139206f } };
-                outBoneTransform[23] = { { 0.030177f, 0.000000f, 0.000000f, 1 },
-                                         { 0.979798f, 0.000394f, -0.001374f, 0.199982f } };
-                outBoneTransform[24] = { { 0.018187f, 0.000000f, 0.000000f, 1 },
-                                         { 0.997410f, -0.000172f, -0.051977f, -0.049724f } };
-                outBoneTransform[25] = { { 0.018018f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, -0.000000f, -0.000000f, -0.000000f } };
-                outBoneTransform[26] = { { -0.004857f, 0.053377f, 0.060017f, 1 },
-                                         { 0.751040f, 0.174397f, 0.601473f, 0.209178f } };
-                outBoneTransform[27] = { { -0.013234f, -0.004327f, 0.069740f, 1 },
-                                         { -0.119277f, 0.262590f, -0.888979f, -0.355718f } };
-                outBoneTransform[28] = { { -0.037500f, -0.074514f, 0.046899f, 1 },
-                                         { -0.204942f, 0.706005f, -0.626220f, -0.259623f } };
-                outBoneTransform[29] = { { -0.036251f, -0.089302f, 0.081732f, 1 },
-                                         { -0.194045f, 0.764033f, -0.596592f, -0.150590f } };
-                outBoneTransform[30] = { { -0.029633f, -0.085595f, 0.119439f, 1 },
-                                         { -0.025015f, 0.787219f, -0.601140f, -0.135243f } };
-            } else {
-                outBoneTransform[6] = { { -0.002693f, 0.023387f, 0.013573f, 1 },
-                                        { 0.404698f, -0.626951f, 0.439894f, 0.499645f } };
-                outBoneTransform[7] = { { -0.074204f, 0.005002f, -0.000234f, 1 },
-                                        { 0.870303f, -0.017421f, -0.092515f, 0.483436f } };
-                outBoneTransform[8] = { { -0.043512f, 0.000000f, 0.000000f, 1 },
-                                        { 0.835972f, 0.018944f, 0.003312f, 0.548436f } };
-                outBoneTransform[9] = { { -0.028422f, -0.000000f, -0.000000f, 1 },
-                                        { 0.890326f, 0.000173f, -0.008504f, 0.455244f } };
-                outBoneTransform[10] = { { -0.022821f, -0.000000f, 0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, -0.000000f, 0.000000f } };
-                outBoneTransform[11] = { { -0.003937f, 0.006967f, 0.016424f, 1 },
-                                         { 0.532293f, -0.531137f, 0.472074f, 0.460113f } };
-                outBoneTransform[12] = { { -0.070953f, -0.000779f, -0.000997f, 1 },
-                                         { 0.908154f, -0.139967f, -0.013210f, 0.394323f } };
-                outBoneTransform[13] = { { -0.043108f, -0.000000f, -0.000000f, 1 },
-                                         { 0.977887f, 0.015350f, 0.008912f, 0.208378f } };
-                outBoneTransform[14] = { { -0.033266f, -0.000000f, -0.000000f, 1 },
-                                         { 0.992487f, -0.002006f, -0.020888f, 0.120540f } };
-                outBoneTransform[15] = { { -0.025892f, 0.000000f, -0.000000f, 1 },
-                                         { 0.999195f, 0.000000f, 0.000000f, 0.040126f } };
-                outBoneTransform[16] = { { -0.001282f, -0.006612f, 0.016394f, 1 },
-                                         { 0.544460f, -0.511334f, 0.436935f, 0.501187f } };
-                outBoneTransform[17] = { { -0.065876f, -0.001786f, -0.000693f, 1 },
-                                         { 0.971233f, -0.064561f, -0.071188f, 0.217877f } };
-                outBoneTransform[18] = { { -0.040619f, -0.000000f, -0.000000f, 1 },
-                                         { 0.978211f, -0.001419f, 0.000451f, 0.207607f } };
-                outBoneTransform[19] = { { -0.028715f, 0.000000f, 0.000000f, 1 },
-                                         { 0.987488f, -0.001166f, -0.010852f, 0.157314f } };
-                outBoneTransform[20] = { { -0.022430f, 0.000000f, -0.000000f, 1 },
-                                         { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-                outBoneTransform[21] = { { 0.002032f, -0.019020f, 0.015240f, 1 },
-                                         { 0.513640f, -0.518192f, 0.337332f, 0.594860f } };
-                outBoneTransform[22] = { { -0.062878f, -0.002844f, -0.000332f, 1 },
-                                         { 0.983501f, -0.050059f, -0.104491f, 0.138930f } };
-                outBoneTransform[23] = { { -0.030177f, -0.000000f, -0.000000f, 1 },
-                                         { 0.981170f, 0.000501f, -0.001363f, 0.193138f } };
-                outBoneTransform[24] = { { -0.018187f, -0.000000f, -0.000000f, 1 },
-                                         { 0.997801f, 0.000487f, -0.051933f, -0.041173f } };
-                outBoneTransform[25] = { { -0.018018f, -0.000000f, 0.000000f, 1 },
-                                         { 1.000000f, -0.000000f, -0.000000f, -0.000000f } };
-                outBoneTransform[26] = { { 0.004574f, 0.055518f, 0.060226f, 1 },
-                                         { 0.745334f, 0.161961f, -0.597782f, -0.246784f } };
-                outBoneTransform[27] = { { 0.013831f, -0.004360f, 0.069547f, 1 },
-                                         { -0.117443f, 0.257604f, 0.890065f, 0.357255f } };
-                outBoneTransform[28] = { { 0.038220f, -0.074817f, 0.046428f, 1 },
-                                         { -0.205767f, 0.697939f, 0.635107f, 0.259191f } };
-                outBoneTransform[29] = { { 0.035802f, -0.089658f, 0.081733f, 1 },
-                                         { -0.196007f, 0.758396f, 0.604341f, 0.145564f } };
-                outBoneTransform[30] = { { 0.029364f, -0.086069f, 0.119701f, 1 },
-                                         { -0.028444f, 0.787767f, 0.601616f, 0.129123f } };
-            }
-        }
-    } else {
-        // no touch
-        if (isLeftHand) {
-            outBoneTransform[6] = { { 0.000632f, 0.026866f, 0.015002f, 1 },
-                                    { 0.644251f, 0.421979f, -0.478202f, 0.422133f } };
-            outBoneTransform[7] = { { 0.074204f, -0.005002f, 0.000234f, 1 },
-                                    { 0.995332f, 0.007007f, -0.039124f, 0.087949f } };
-            outBoneTransform[8] = { { 0.043930f, -0.000000f, -0.000000f, 1 },
-                                    { 0.997891f, 0.045808f, 0.002142f, -0.045943f } };
-            outBoneTransform[9] = { { 0.028695f, 0.000000f, 0.000000f, 1 },
-                                    { 0.999649f, 0.001850f, -0.022782f, -0.013409f } };
-            outBoneTransform[10] = { { 0.022821f, 0.000000f, -0.000000f, 1 },
-                                     { 1.000000f, 0.000000f, -0.000000f, 0.000000f } };
-            outBoneTransform[11] = { { 0.002177f, 0.007120f, 0.016319f, 1 },
-                                     { 0.546723f, 0.541277f, -0.442520f, 0.460749f } };
-            outBoneTransform[12] = { { 0.070953f, 0.000779f, 0.000997f, 1 },
-                                     { 0.980294f, -0.167261f, -0.078959f, 0.069368f } };
-            outBoneTransform[13] = { { 0.043108f, 0.000000f, 0.000000f, 1 },
-                                     { 0.997947f, 0.018493f, 0.013192f, 0.059886f } };
-            outBoneTransform[14] = { { 0.033266f, 0.000000f, 0.000000f, 1 },
-                                     { 0.997394f, -0.003328f, -0.028225f, -0.066315f } };
-            outBoneTransform[15] = { { 0.025892f, -0.000000f, 0.000000f, 1 },
-                                     { 0.999195f, 0.000000f, 0.000000f, 0.040126f } };
-            outBoneTransform[16] = { { 0.000513f, -0.006545f, 0.016348f, 1 },
-                                     { 0.516692f, 0.550144f, -0.495548f, 0.429888f } };
-            outBoneTransform[17] = { { 0.065876f, 0.001786f, 0.000693f, 1 },
-                                     { 0.990420f, -0.058696f, -0.101820f, 0.072495f } };
-            outBoneTransform[18] = { { 0.040697f, 0.000000f, 0.000000f, 1 },
-                                     { 0.999545f, -0.002240f, 0.000004f, 0.030081f } };
-            outBoneTransform[19] = { { 0.028747f, -0.000000f, -0.000000f, 1 },
-                                     { 0.999102f, -0.000721f, -0.012693f, 0.040420f } };
-            outBoneTransform[20] = { { 0.022430f, -0.000000f, 0.000000f, 1 },
-                                     { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-            outBoneTransform[21] = { { -0.002478f, -0.018981f, 0.015214f, 1 },
-                                     { 0.526918f, 0.523940f, -0.584025f, 0.326740f } };
-            outBoneTransform[22] = { { 0.062878f, 0.002844f, 0.000332f, 1 },
-                                     { 0.986609f, -0.059615f, -0.135163f, 0.069132f } };
-            outBoneTransform[23] = { { 0.030220f, 0.000000f, 0.000000f, 1 },
-                                     { 0.994317f, 0.001896f, -0.000132f, 0.106446f } };
-            outBoneTransform[24] = { { 0.018187f, 0.000000f, 0.000000f, 1 },
-                                     { 0.995931f, -0.002010f, -0.052079f, -0.073526f } };
-            outBoneTransform[25] = { { 0.018018f, 0.000000f, -0.000000f, 1 },
-                                     { 1.000000f, -0.000000f, -0.000000f, -0.000000f } };
-            outBoneTransform[26] = { { -0.006059f, 0.056285f, 0.060064f, 1 },
-                                     { 0.737238f, 0.202745f, 0.594267f, 0.249441f } };
-            outBoneTransform[27] = { { -0.040416f, -0.043018f, 0.019345f, 1 },
-                                     { -0.290330f, 0.623527f, -0.663809f, -0.293734f } };
-            outBoneTransform[28] = { { -0.039354f, -0.075674f, 0.047048f, 1 },
-                                     { -0.187047f, 0.678062f, -0.659285f, -0.265683f } };
-            outBoneTransform[29] = { { -0.038340f, -0.090987f, 0.082579f, 1 },
-                                     { -0.183037f, 0.736793f, -0.634757f, -0.143936f } };
-            outBoneTransform[30] = { { -0.031806f, -0.087214f, 0.121015f, 1 },
-                                     { -0.003659f, 0.758407f, -0.639342f, -0.126678f } };
-        } else {
-            outBoneTransform[6] = { { -0.000632f, 0.026866f, 0.015002f, 1 },
-                                    { 0.421833f, -0.643793f, 0.422458f, 0.478661f } };
-            outBoneTransform[7] = { { -0.074204f, 0.005002f, -0.000234f, 1 },
-                                    { 0.994784f, 0.007053f, -0.041286f, 0.093009f } };
-            outBoneTransform[8] = { { -0.043930f, 0.000000f, 0.000000f, 1 },
-                                    { 0.998404f, 0.045905f, 0.002780f, -0.032767f } };
-            outBoneTransform[9] = { { -0.028695f, -0.000000f, -0.000000f, 1 },
-                                    { 0.999704f, 0.001955f, -0.022774f, -0.008282f } };
-            outBoneTransform[10] = { { -0.022821f, -0.000000f, 0.000000f, 1 },
-                                     { 1.000000f, 0.000000f, -0.000000f, 0.000000f } };
-            outBoneTransform[11] = { { -0.002177f, 0.007120f, 0.016319f, 1 },
-                                     { 0.541874f, -0.547427f, 0.459996f, 0.441701f } };
-            outBoneTransform[12] = { { -0.070953f, -0.000779f, -0.000997f, 1 },
-                                     { 0.979837f, -0.168061f, -0.075910f, 0.076899f } };
-            outBoneTransform[13] = { { -0.043108f, -0.000000f, -0.000000f, 1 },
-                                     { 0.997271f, 0.018278f, 0.013375f, 0.070266f } };
-            outBoneTransform[14] = { { -0.033266f, -0.000000f, -0.000000f, 1 },
-                                     { 0.998402f, -0.003143f, -0.026423f, -0.049849f } };
-            outBoneTransform[15] = { { -0.025892f, 0.000000f, -0.000000f, 1 },
-                                     { 0.999195f, 0.000000f, 0.000000f, 0.040126f } };
-            outBoneTransform[16] = { { -0.000513f, -0.006545f, 0.016348f, 1 },
-                                     { 0.548983f, -0.519068f, 0.426914f, 0.496920f } };
-            outBoneTransform[17] = { { -0.065876f, -0.001786f, -0.000693f, 1 },
-                                     { 0.989791f, -0.065882f, -0.096417f, 0.081716f } };
-            outBoneTransform[18] = { { -0.040697f, -0.000000f, -0.000000f, 1 },
-                                     { 0.999102f, -0.002168f, -0.000020f, 0.042317f } };
-            outBoneTransform[19] = { { -0.028747f, 0.000000f, 0.000000f, 1 },
-                                     { 0.998584f, -0.000674f, -0.012714f, 0.051653f } };
-            outBoneTransform[20] = { { -0.022430f, 0.000000f, -0.000000f, 1 },
-                                     { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-            outBoneTransform[21] = { { 0.002478f, -0.018981f, 0.015214f, 1 },
-                                     { 0.518597f, -0.527304f, 0.328264f, 0.587580f } };
-            outBoneTransform[22] = { { -0.062878f, -0.002844f, -0.000332f, 1 },
-                                     { 0.987294f, -0.063356f, -0.125964f, 0.073274f } };
-            outBoneTransform[23] = { { -0.030220f, -0.000000f, -0.000000f, 1 },
-                                     { 0.993413f, 0.001573f, -0.000147f, 0.114578f } };
-            outBoneTransform[24] = { { -0.018187f, -0.000000f, -0.000000f, 1 },
-                                     { 0.997047f, -0.000695f, -0.052009f, -0.056495f } };
-            outBoneTransform[25] = { { -0.018018f, -0.000000f, 0.000000f, 1 },
-                                     { 1.000000f, -0.000000f, -0.000000f, -0.000000f } };
-            outBoneTransform[26] = { { 0.005198f, 0.054204f, 0.060030f, 1 },
-                                     { 0.747318f, 0.182508f, -0.599586f, -0.220688f } };
-            outBoneTransform[27] = { { 0.038779f, -0.042973f, 0.019824f, 1 },
-                                     { -0.297445f, 0.639373f, 0.648910f, 0.285734f } };
-            outBoneTransform[28] = { { 0.038027f, -0.074844f, 0.046941f, 1 },
-                                     { -0.199898f, 0.698218f, 0.635767f, 0.261406f } };
-            outBoneTransform[29] = { { 0.036845f, -0.089781f, 0.081973f, 1 },
-                                     { -0.190960f, 0.756469f, 0.607591f, 0.148733f } };
-            outBoneTransform[30] = { { 0.030251f, -0.086056f, 0.119887f, 1 },
-                                     { -0.018948f, 0.779249f, 0.612180f, 0.132846f } };
-        }
-    }
-}
-
-inline void GetGripClickBoneTransform(
-    bool withController, bool isLeftHand, vr::VRBoneTransform_t outBoneTransform[]
-) {
-    if (withController) {
-        if (isLeftHand) {
-            outBoneTransform[11] = { { 0.002177f, 0.007120f, 0.016319f, 1 },
-                                     { 0.529359f, 0.540512f, -0.463783f, 0.461011f } };
-            outBoneTransform[12] = { { 0.070953f, 0.000779f, 0.000997f, 1 },
-                                     { -0.831727f, 0.270927f, 0.175647f, -0.451638f } };
-            outBoneTransform[13] = { { 0.043108f, 0.000000f, 0.000000f, 1 },
-                                     { -0.854886f, -0.008231f, -0.028107f, -0.517990f } };
-            outBoneTransform[14] = { { 0.033266f, -0.000000f, 0.000000f, 1 },
-                                     { -0.825759f, 0.085208f, 0.086456f, -0.550805f } };
-            outBoneTransform[15] = { { 0.025892f, -0.000000f, 0.000000f, 1 },
-                                     { 0.999195f, -0.000000f, 0.000000f, 0.040126f } };
-            outBoneTransform[16] = { { 0.000513f, -0.006545f, 0.016348f, 1 },
-                                     { 0.500244f, 0.530784f, -0.516215f, 0.448939f } };
-            outBoneTransform[17] = { { 0.065876f, 0.001786f, 0.000693f, 1 },
-                                     { 0.831617f, -0.242931f, -0.139695f, 0.479461f } };
-            outBoneTransform[18] = { { 0.040697f, 0.000000f, 0.000000f, 1 },
-                                     { 0.769163f, -0.001746f, 0.001363f, 0.639049f } };
-            outBoneTransform[19] = { { 0.028747f, -0.000000f, -0.000000f, 1 },
-                                     { 0.968615f, -0.064537f, -0.046586f, 0.235477f } };
-            outBoneTransform[20] = { { 0.022430f, -0.000000f, 0.000000f, 1 },
-                                     { 1.000000f, 0.000000f, -0.000000f, -0.000000f } };
-            outBoneTransform[21] = { { -0.002478f, -0.018981f, 0.015214f, 1 },
-                                     { 0.474671f, 0.434670f, -0.653212f, 0.398827f } };
-            outBoneTransform[22] = { { 0.062878f, 0.002844f, 0.000332f, 1 },
-                                     { 0.798788f, -0.199577f, -0.094418f, 0.559636f } };
-            outBoneTransform[23] = { { 0.030220f, 0.000002f, -0.000000f, 1 },
-                                     { 0.853087f, 0.001644f, -0.000913f, 0.521765f } };
-            outBoneTransform[24] = { { 0.018187f, -0.000002f, 0.000000f, 1 },
-                                     { 0.974249f, 0.052491f, 0.003591f, 0.219249f } };
-            outBoneTransform[25] = { { 0.018018f, 0.000000f, -0.000000f, 1 },
-                                     { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-
-            outBoneTransform[28] = { { 0.016642f, -0.029992f, 0.083200f, 1 },
-                                     { -0.094577f, 0.694550f, 0.702845f, 0.121100f } };
-            outBoneTransform[29] = { { 0.011144f, -0.028727f, 0.108366f, 1 },
-                                     { -0.076328f, 0.788280f, 0.605097f, 0.081527f } };
-            outBoneTransform[30] = { { 0.011333f, -0.026044f, 0.128585f, 1 },
-                                     { -0.144791f, 0.737451f, 0.656958f, -0.060069f } };
-        } else {
-            outBoneTransform[11] = { { 0.002177f, 0.007120f, 0.016319f, 1 },
-                                     { 0.529359f, 0.540512f, -0.463783f, 0.461011f } };
-            outBoneTransform[12] = { { 0.070953f, 0.000779f, 0.000997f, 1 },
-                                     { -0.831727f, 0.270927f, 0.175647f, -0.451638f } };
-            outBoneTransform[13] = { { 0.043108f, 0.000000f, 0.000000f, 1 },
-                                     { -0.854886f, -0.008231f, -0.028107f, -0.517990f } };
-            outBoneTransform[14] = { { 0.033266f, -0.000000f, 0.000000f, 1 },
-                                     { -0.825759f, 0.085208f, 0.086456f, -0.550805f } };
-            outBoneTransform[15] = { { 0.025892f, -0.000000f, 0.000000f, 1 },
-                                     { 0.999195f, -0.000000f, 0.000000f, 0.040126f } };
-            outBoneTransform[16] = { { 0.000513f, -0.006545f, 0.016348f, 1 },
-                                     { 0.500244f, 0.530784f, -0.516215f, 0.448939f } };
-            outBoneTransform[17] = { { 0.065876f, 0.001786f, 0.000693f, 1 },
-                                     { 0.831617f, -0.242931f, -0.139695f, 0.479461f } };
-            outBoneTransform[18] = { { 0.040697f, 0.000000f, 0.000000f, 1 },
-                                     { 0.769163f, -0.001746f, 0.001363f, 0.639049f } };
-            outBoneTransform[19] = { { 0.028747f, -0.000000f, -0.000000f, 1 },
-                                     { 0.968615f, -0.064537f, -0.046586f, 0.235477f } };
-            outBoneTransform[20] = { { 0.022430f, -0.000000f, 0.000000f, 1 },
-                                     { 1.000000f, 0.000000f, -0.000000f, -0.000000f } };
-            outBoneTransform[21] = { { -0.002478f, -0.018981f, 0.015214f, 1 },
-                                     { 0.474671f, 0.434670f, -0.653212f, 0.398827f } };
-            outBoneTransform[22] = { { 0.062878f, 0.002844f, 0.000332f, 1 },
-                                     { 0.798788f, -0.199577f, -0.094418f, 0.559636f } };
-            outBoneTransform[23] = { { 0.030220f, 0.000002f, -0.000000f, 1 },
-                                     { 0.853087f, 0.001644f, -0.000913f, 0.521765f } };
-            outBoneTransform[24] = { { 0.018187f, -0.000002f, 0.000000f, 1 },
-                                     { 0.974249f, 0.052491f, 0.003591f, 0.219249f } };
-            outBoneTransform[25] = { { 0.018018f, 0.000000f, -0.000000f, 1 },
-                                     { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-
-            outBoneTransform[28] = { { 0.016642f, -0.029992f, 0.083200f, 1 },
-                                     { -0.094577f, 0.694550f, 0.702845f, 0.121100f } };
-            outBoneTransform[29] = { { 0.011144f, -0.028727f, 0.108366f, 1 },
-                                     { -0.076328f, 0.788280f, 0.605097f, 0.081527f } };
-            outBoneTransform[30] = { { 0.011333f, -0.026044f, 0.128585f, 1 },
-                                     { -0.144791f, 0.737451f, 0.656958f, -0.060069f } };
-        }
-
-    } else {
-        if (isLeftHand) {
-            outBoneTransform[11] = { { 0.005787f, 0.006806f, 0.016534f, 1 },
-                                     { 0.514203f, 0.522315f, -0.478348f, 0.483700f } };
-            outBoneTransform[12] = { { 0.070953f, 0.000779f, 0.000997f, 1 },
-                                     { 0.723653f, -0.097901f, 0.048546f, 0.681458f } };
-            outBoneTransform[13] = { { 0.043108f, 0.000000f, 0.000000f, 1 },
-                                     { 0.637464f, -0.002366f, -0.002831f, 0.770472f } };
-            outBoneTransform[14] = { { 0.033266f, 0.000000f, 0.000000f, 1 },
-                                     { 0.658008f, 0.002610f, 0.003196f, 0.753000f } };
-            outBoneTransform[15] = { { 0.025892f, -0.000000f, 0.000000f, 1 },
-                                     { 0.999195f, 0.000000f, 0.000000f, 0.040126f } };
-            outBoneTransform[16] = { { 0.004123f, -0.006858f, 0.016563f, 1 },
-                                     { 0.489609f, 0.523374f, -0.520644f, 0.463997f } };
-            outBoneTransform[17] = { { 0.065876f, 0.001786f, 0.000693f, 1 },
-                                     { 0.759970f, -0.055609f, 0.011571f, 0.647471f } };
-            outBoneTransform[18] = { { 0.040331f, 0.000000f, 0.000000f, 1 },
-                                     { 0.664315f, 0.001595f, 0.001967f, 0.747449f } };
-            outBoneTransform[19] = { { 0.028489f, -0.000000f, -0.000000f, 1 },
-                                     { 0.626957f, -0.002784f, -0.003234f, 0.779042f } };
-            outBoneTransform[20] = { { 0.022430f, -0.000000f, 0.000000f, 1 },
-                                     { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-            outBoneTransform[21] = { { 0.001131f, -0.019295f, 0.015429f, 1 },
-                                     { 0.479766f, 0.477833f, -0.630198f, 0.379934f } };
-            outBoneTransform[22] = { { 0.062878f, 0.002844f, 0.000332f, 1 },
-                                     { 0.827001f, 0.034282f, 0.003440f, 0.561144f } };
-            outBoneTransform[23] = { { 0.029874f, 0.000000f, 0.000000f, 1 },
-                                     { 0.702185f, -0.006716f, -0.009289f, 0.711903f } };
-            outBoneTransform[24] = { { 0.017979f, 0.000000f, 0.000000f, 1 },
-                                     { 0.676853f, 0.007956f, 0.009917f, 0.736009f } };
-            outBoneTransform[25] = { { 0.018018f, 0.000000f, -0.000000f, 1 },
-                                     { 1.000000f, -0.000000f, -0.000000f, -0.000000f } };
-
-            outBoneTransform[28] = { { 0.000448f, 0.001536f, 0.116543f, 1 },
-                                     { -0.039357f, 0.105143f, -0.928833f, -0.353079f } };
-            outBoneTransform[29] = { { 0.003949f, -0.014869f, 0.130608f, 1 },
-                                     { -0.055071f, 0.068695f, -0.944016f, -0.317933f } };
-            outBoneTransform[30] = { { 0.003263f, -0.034685f, 0.139926f, 1 },
-                                     { 0.019690f, -0.100741f, -0.957331f, -0.270149f } };
-        } else {
-            outBoneTransform[11] = { { -0.005787f, 0.006806f, 0.016534f, 1 },
-                                     { 0.522315f, -0.514203f, 0.483700f, 0.478348f } };
-            outBoneTransform[12] = { { -0.070953f, -0.000779f, -0.000997f, 1 },
-                                     { 0.723653f, -0.097901f, 0.048546f, 0.681458f } };
-            outBoneTransform[13] = { { -0.043108f, -0.000000f, -0.000000f, 1 },
-                                     { 0.637464f, -0.002366f, -0.002831f, 0.770472f } };
-            outBoneTransform[14] = { { -0.033266f, -0.000000f, -0.000000f, 1 },
-                                     { 0.658008f, 0.002610f, 0.003196f, 0.753000f } };
-            outBoneTransform[15] = { { -0.025892f, 0.000000f, -0.000000f, 1 },
-                                     { 0.999195f, 0.000000f, 0.000000f, 0.040126f } };
-            outBoneTransform[16] = { { -0.004123f, -0.006858f, 0.016563f, 1 },
-                                     { 0.523374f, -0.489609f, 0.463997f, 0.520644f } };
-            outBoneTransform[17] = { { -0.065876f, -0.001786f, -0.000693f, 1 },
-                                     { 0.759970f, -0.055609f, 0.011571f, 0.647471f } };
-            outBoneTransform[18] = { { -0.040331f, -0.000000f, -0.000000f, 1 },
-                                     { 0.664315f, 0.001595f, 0.001967f, 0.747449f } };
-            outBoneTransform[19] = { { -0.028489f, 0.000000f, 0.000000f, 1 },
-                                     { 0.626957f, -0.002784f, -0.003234f, 0.779042f } };
-            outBoneTransform[20] = { { -0.022430f, 0.000000f, -0.000000f, 1 },
-                                     { 1.000000f, 0.000000f, 0.000000f, 0.000000f } };
-            outBoneTransform[21] = { { -0.001131f, -0.019295f, 0.015429f, 1 },
-                                     { 0.477833f, -0.479766f, 0.379935f, 0.630198f } };
-            outBoneTransform[22] = { { -0.062878f, -0.002844f, -0.000332f, 1 },
-                                     { 0.827001f, 0.034282f, 0.003440f, 0.561144f } };
-            outBoneTransform[23] = { { -0.029874f, -0.000000f, -0.000000f, 1 },
-                                     { 0.702185f, -0.006716f, -0.009289f, 0.711903f } };
-            outBoneTransform[24] = { { -0.017979f, -0.000000f, -0.000000f, 1 },
-                                     { 0.676853f, 0.007956f, 0.009917f, 0.736009f } };
-            outBoneTransform[25] = { { -0.018018f, -0.000000f, 0.000000f, 1 },
-                                     { 1.000000f, -0.000000f, -0.000000f, -0.000000f } };
-
-            outBoneTransform[28] = { { -0.000448f, 0.001536f, 0.116543f, 1 },
-                                     { -0.039357f, 0.105143f, 0.928833f, 0.353079f } };
-            outBoneTransform[29] = { { -0.003949f, -0.014869f, 0.130608f, 1 },
-                                     { -0.055071f, 0.068695f, 0.944016f, 0.317933f } };
-            outBoneTransform[30] = { { -0.003263f, -0.034685f, 0.139926f, 1 },
-                                     { 0.019690f, -0.100741f, 0.957331f, 0.270149f } };
-        }
-    }
-}
-// clang-format on
-
-inline vr::HmdVector4_t
-lerp(const vr::HmdVector4_t &a, const vr::HmdVector4_t &b, float t)
+//! Which control the thumb is on. A: square (left) / cross (right); B: triangle (left) / circle (right).
+enum class Thumb
 {
-	return {a.v[0] + (b.v[0] - a.v[0]) * t, a.v[1] + (b.v[1] - a.v[1]) * t, a.v[2] + (b.v[2] - a.v[2]) * t, 1.0f};
-}
-
-inline vr::HmdQuaternionf_t
-slerp(const vr::HmdQuaternionf_t &a, vr::HmdQuaternionf_t b, float t)
-{
-	float d = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
-	if (d < 0.0f) {
-		b = {-b.w, -b.x, -b.y, -b.z};
-		d = -d;
-	}
-	float wa = 1.0f - t, wb = t;
-	if (d < 0.9995f) {
-		const float th = std::acos(d), sn = std::sin(th);
-		wa = std::sin((1.0f - t) * th) / sn;
-		wb = std::sin(t * th) / sn;
-	}
-	vr::HmdQuaternionf_t q = {a.w * wa + b.w * wb, a.x * wa + b.x * wb, a.y * wa + b.y * wb, a.z * wa + b.z * wb};
-	const float n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
-	if (n > 1e-6f) {
-		q = {q.w / n, q.x / n, q.y / n, q.z / n};
-	} else {
-		q = {1.0f, 0.0f, 0.0f, 0.0f};
-	}
-	return q;
-}
-
-//! The finger state the skeleton follows (from the Sense's trigger, grip and touch inputs).
-struct HandInput
-{
-	float trigger = 0.0f;       //!< 0..1
-	bool trigger_touch = false; //!< finger on the trigger
-	float grip = 0.0f;          //!< 0..1 (the Sense's L1/R1 is a click: 0 or 1)
-	bool thumb_touch = false;   //!< thumb on the stick or a face button
+	None,
+	Stick,
+	ButtonA,
+	ButtonB,
 };
 
+//! The finger state the skeleton follows (the Sense's sensors).
+struct HandInput
+{
+	float trigger = 0.0f;           //!< 0..1
+	bool trigger_touch = false;     //!< index finger on the trigger
+	float trigger_proximity = 0.0f; //!< 0..1, how near the index finger is to the trigger
+	float grip = 0.0f;              //!< 0..1 (the Sense's L1/R1 is a click: 0 or 1)
+	bool grip_touch = false;        //!< middle finger on the grip
+	float grip_proximity = 0.0f;    //!< 0..1, how near the middle finger is to the grip
+	Thumb thumb = Thumb::None;
+};
+
+namespace detail {
+
+struct V
+{
+	float x = 0, y = 0, z = 0;
+};
+struct Q
+{
+	float w = 1, x = 0, y = 0, z = 0;
+};
+
+inline V
+operator+(V a, V b)
+{
+	return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+inline V
+operator-(V a, V b)
+{
+	return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+inline V
+operator*(V a, float s)
+{
+	return {a.x * s, a.y * s, a.z * s};
+}
+inline float
+dot(V a, V b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+inline V
+cross(V a, V b)
+{
+	return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+inline float
+len(V a)
+{
+	return std::sqrt(dot(a, a));
+}
+inline V
+unit(V a)
+{
+	const float n = len(a);
+	return n > 1e-9f ? a * (1.0f / n) : V{1, 0, 0};
+}
+inline Q
+operator*(Q a, Q b)
+{
+	return {a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z, a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+	        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x, a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w};
+}
+inline Q
+normalized(Q q)
+{
+	const float n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+	if (!(n > 1e-9f) || !std::isfinite(n)) {
+		return Q{};
+	}
+	return {q.w / n, q.x / n, q.y / n, q.z / n};
+}
+inline V
+rotate(Q q, V v)
+{
+	const V u{q.x, q.y, q.z};
+	const V t = cross(u, v) * 2.0f;
+	return v + t * q.w + cross(u, t);
+}
+inline Q
+about(V axis, float angle)
+{
+	const V a = unit(axis);
+	const float s = std::sin(angle * 0.5f);
+	return {std::cos(angle * 0.5f), a.x * s, a.y * s, a.z * s};
+}
+//! The rotation whose matrix has the columns c0, c1, c2 (an orthonormal right-handed basis).
+inline Q
+from_columns(V c0, V c1, V c2)
+{
+	const float m[3][3] = {{c0.x, c1.x, c2.x}, {c0.y, c1.y, c2.y}, {c0.z, c1.z, c2.z}};
+	const float tr = m[0][0] + m[1][1] + m[2][2];
+	Q q;
+	if (tr > 0) {
+		const float s = std::sqrt(tr + 1.0f) * 2.0f;
+		q = {0.25f * s, (m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s};
+	} else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+		const float s = std::sqrt(1.0f + m[0][0] - m[1][1] - m[2][2]) * 2.0f;
+		q = {(m[2][1] - m[1][2]) / s, 0.25f * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s};
+	} else if (m[1][1] > m[2][2]) {
+		const float s = std::sqrt(1.0f + m[1][1] - m[0][0] - m[2][2]) * 2.0f;
+		q = {(m[0][2] - m[2][0]) / s, (m[0][1] + m[1][0]) / s, 0.25f * s, (m[1][2] + m[2][1]) / s};
+	} else {
+		const float s = std::sqrt(1.0f + m[2][2] - m[0][0] - m[1][1]) * 2.0f;
+		q = {(m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25f * s};
+	}
+	return normalized(q);
+}
+inline float
+deg(float d)
+{
+	return d * 3.14159265f / 180.0f;
+}
+inline float
+clamp01(float v)
+{
+	return std::isfinite(v) ? (v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v)) : 0.0f;
+}
+//! 0 below @p a, 1 above @p b, smooth in between.
+inline float
+ramp(float v, float a, float b)
+{
+	const float t = clamp01((clamp01(v) - a) / (b - a));
+	return t * t * (3.0f - 2.0f * t);
+}
+
+/*
+ * OpenVR's bone order: 0 root, 1 wrist, 2-5 thumb (0, 1, 2, end), 6-10 index (metacarpal, 0, 1, 2, end), 11-15
+ * middle, 16-20 ring, 21-25 pinky, 26-30 the aux bones (thumb..pinky).
+ */
+inline int
+parent_of(int bone)
+{
+	if (bone <= 0) {
+		return -1;
+	}
+	if (bone == 1 || bone >= 26) {
+		return bone == 1 ? 0 : 0;
+	}
+	if (bone == 2 || bone == 6 || bone == 11 || bone == 16 || bone == 21) {
+		return 1;
+	}
+	return bone - 1;
+}
+
+constexpr int kFingerFirst[5] = {2, 6, 11, 16, 21}; //!< first bone of each finger (thumb: thumb_0, others: metacarpal)
+constexpr int kLastJoint[5] = {4, 9, 14, 19, 24};   //!< the last joint of each finger (what its aux bone follows)
+constexpr int kTip[5] = {5, 10, 15, 20, 25};
+
+inline std::vector<std::string>
+bone_names(bool left)
+{
+	const std::string s = left ? "l" : "r";
+	std::vector<std::string> n = {"Root", "wrist_" + s};
+	n.push_back("finger_thumb_0_" + s);
+	n.push_back("finger_thumb_1_" + s);
+	n.push_back("finger_thumb_2_" + s);
+	n.push_back("finger_thumb_" + s + "_end");
+	for (const char *f : {"index", "middle", "ring", "pinky"}) {
+		n.push_back(std::string("finger_") + f + "_meta_" + s);
+		n.push_back(std::string("finger_") + f + "_0_" + s);
+		n.push_back(std::string("finger_") + f + "_1_" + s);
+		n.push_back(std::string("finger_") + f + "_2_" + s);
+		n.push_back(std::string("finger_") + f + "_" + s + "_end");
+	}
+	for (const char *f : {"thumb", "index", "middle", "ring", "pinky"}) {
+		n.push_back(std::string("finger_") + f + "_" + s + "_aux");
+	}
+	return n;
+}
+
+//! The hand at rest: each bone's position and rotation in its parent.
+struct Rest
+{
+	V pos[kBoneCount];
+	Q rot[kBoneCount];
+};
+
+//! Valve's reference hand from a SteamVR skeleton .glb (glTF binary: a JSON chunk with the bones as nodes).
+inline bool
+load_glb(const std::string &path, bool left, Rest &out, std::string *why)
+{
+	FILE *f = fopen(path.c_str(), "rb");
+	if (f == nullptr) {
+		*why = "can't open " + path;
+		return false;
+	}
+	std::vector<unsigned char> data;
+	unsigned char buf[65536];
+	size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && data.size() < (32u << 20)) {
+		data.insert(data.end(), buf, buf + n);
+	}
+	fclose(f);
+	auto u32 = [&](size_t at) {
+		return (uint32_t)data[at] | (uint32_t)data[at + 1] << 8 | (uint32_t)data[at + 2] << 16 |
+		       (uint32_t)data[at + 3] << 24;
+	};
+	if (data.size() < 20 || u32(0) != 0x46546C67u || u32(16) != 0x4E4F534Au || 20 + (size_t)u32(12) > data.size()) {
+		*why = path + " is not a glTF binary with a JSON chunk";
+		return false;
+	}
+	cJSON *root = cJSON_ParseWithLength(reinterpret_cast<const char *>(&data[20]), u32(12));
+	const cJSON *nodes = root != nullptr ? cJSON_GetObjectItemCaseSensitive(root, "nodes") : nullptr;
+	if (!cJSON_IsArray(nodes)) {
+		cJSON_Delete(root);
+		*why = path + ": no nodes";
+		return false;
+	}
+	auto numbers = [](const cJSON *node, const char *key, float *out, int count) {
+		const cJSON *a = cJSON_GetObjectItemCaseSensitive(node, key);
+		if (!cJSON_IsArray(a) || cJSON_GetArraySize(a) != count) {
+			return false;
+		}
+		for (int i = 0; i < count; i++) {
+			const cJSON *v = cJSON_GetArrayItem(a, i);
+			if (!cJSON_IsNumber(v) || !std::isfinite(v->valuedouble)) {
+				return false;
+			}
+			out[i] = (float)v->valuedouble;
+		}
+		return true;
+	};
+	const std::vector<std::string> names = bone_names(left);
+	const cJSON *found[kBoneCount] = {};
+	const cJSON *node = nullptr;
+	cJSON_ArrayForEach(node, nodes)
+	{
+		const cJSON *name = cJSON_GetObjectItemCaseSensitive(node, "name");
+		if (!cJSON_IsString(name)) {
+			continue;
+		}
+		for (uint32_t i = 0; i < kBoneCount; i++) {
+			if (names[i] == name->valuestring) {
+				found[i] = node;
+			}
+		}
+	}
+	bool ok = true;
+	float scale = 1.0f; // the bones are in the Root node's units (Valve's: centimetre-sized numbers, Root scale 100)
+	for (uint32_t i = 0; i < kBoneCount && ok; i++) {
+		if (found[i] == nullptr) {
+			*why = path + ": no bone " + names[i];
+			ok = false;
+			break;
+		}
+		float t[3] = {0, 0, 0}, r[4] = {0, 0, 0, 1}, s[3] = {1, 1, 1};
+		numbers(found[i], "translation", t, 3);
+		numbers(found[i], "rotation", r, 4);
+		if (i == 0 && numbers(found[i], "scale", s, 3)) {
+			scale = s[0];
+		}
+		const float k = i == 0 ? 1.0f : scale;
+		out.pos[i] = {t[0] * k, t[1] * k, t[2] * k};
+		out.rot[i] = normalized(Q{r[3], r[0], r[1], r[2]});
+	}
+	cJSON_Delete(root);
+	if (ok && !(scale > 0.0f && scale < 1000.0f)) {
+		*why = path + ": implausible scale";
+		ok = false;
+	}
+	return ok;
+}
+
 /*!
- * One hand's skeleton, as ALVR's Controller::GetBoneTransform: thumb and index touches animate over a few frames,
- * the trigger curls the fingers, the grip closes middle to pinky. Call update() once per frame, then pose().
+ * A plain hand of the same layout (bones along their x axis, curling about their z axis), for when SteamVR's
+ * reference hand can't be read. Made for the left hand; the right hand is its mirror image, built the way Valve's
+ * right hand relates to its left one (positions mirrored in x; bones hanging on the wrist or root turned
+ * (w,x,y,z) -> (x,-w,z,-y), the others unchanged — exact for SteamVR's two reference hands).
+ */
+inline Rest
+builtin_rest(bool left)
+{
+	Rest r;
+	for (uint32_t i = 0; i < kBoneCount; i++) {
+		r.pos[i] = {};
+		r.rot[i] = Q{};
+	}
+	// left hand: fingers along +Z from the wrist, index toward +Y, palm toward +X (curling turns +Z toward +X)
+	const float spread_y[4] = {0.022f, 0.006f, -0.010f, -0.024f}; // index..pinky knuckle side offsets
+	const float meta_len[4] = {0.072f, 0.070f, 0.066f, 0.060f};
+	const float lens[4][4] = {
+	    {0.044f, 0.028f, 0.022f, 0}, {0.048f, 0.031f, 0.024f, 0}, {0.044f, 0.029f, 0.023f, 0}, {0.034f, 0.021f, 0.019f, 0}};
+	const Q along_z = about({0, 1, 0}, deg(-90)) * about({1, 0, 0}, deg(-90)); // x -> +Z, z (curl axis) -> +Y
+	for (int f = 0; f < 4; f++) {
+		const int b = kFingerFirst[f + 1];
+		const float fan = deg(6.0f * (1.5f - (float)f));
+		r.pos[b] = {0.0f, spread_y[f] * 0.5f, 0.012f};
+		r.rot[b] = about({1, 0, 0}, -fan) * along_z;
+		r.pos[b + 1] = {meta_len[f], 0, 0};
+		r.rot[b + 1] = about({0, 0, 1}, deg(10));
+		r.pos[b + 2] = {lens[f][0], 0, 0};
+		r.rot[b + 2] = about({0, 0, 1}, deg(8));
+		r.pos[b + 3] = {lens[f][1], 0, 0};
+		r.rot[b + 3] = about({0, 0, 1}, deg(5));
+		r.pos[b + 4] = {lens[f][2], 0, 0};
+	}
+	r.pos[2] = {0.008f, 0.020f, 0.025f};
+	r.rot[2] = about({1, 0, 0}, deg(-45)) * about({0, 1, 0}, deg(-20)) * along_z;
+	r.pos[3] = {0.040f, 0, 0};
+	r.rot[3] = about({0, 0, 1}, deg(15));
+	r.pos[4] = {0.032f, 0, 0};
+	r.rot[4] = about({0, 0, 1}, deg(10));
+	r.pos[5] = {0.030f, 0, 0};
+	if (!left) {
+		for (uint32_t i = 1; i < kBoneCount; i++) {
+			r.pos[i].x = -r.pos[i].x;
+			const int p = parent_of((int)i);
+			if (p <= 1 && i != 1) {
+				const Q q = r.rot[i];
+				r.rot[i] = Q{q.x, -q.w, q.z, -q.y};
+			}
+		}
+	}
+	return r;
+}
+
+//! Where SteamVR is installed: OVRN_STEAMVR_DIR (tests), else from the running vrserver (<SteamVR>/bin/linux64).
+inline std::string
+steamvr_dir()
+{
+	const char *e = getenv("OVRN_STEAMVR_DIR");
+	if (e != nullptr && *e != '\0') {
+		return e;
+	}
+	char exe[4096];
+	const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+	if (n <= 0) {
+		return {};
+	}
+	exe[n] = '\0';
+	std::string d(exe);
+	for (int i = 0; i < 3; i++) {
+		const size_t s = d.find_last_of('/');
+		if (s == std::string::npos) {
+			return {};
+		}
+		d.resize(s);
+	}
+	return d;
+}
+
+/*
+ * The Sense's controls in its grip pose (metres, left controller; the right one mirrors x), from Sony's Sense model:
+ * each control's position, turned into the grip pose's frame. Sony's model angles turn the opposite way to a
+ * right-handed rotation: read that way the stick sits at the front end of the handle axis, the trigger under it and
+ * the grip sensor on the middle finger's side, as on the controller.
+ */
+constexpr float kTrigger[3] = {-0.00200f, -0.01831f, -0.04489f};
+constexpr float kStick[3] = {-0.00729f, 0.00466f, -0.04699f};
+constexpr float kButtonA[3] = {0.01390f, 0.02003f, -0.03291f}; // square / cross
+constexpr float kButtonB[3] = {0.01838f, 0.01598f, -0.04565f}; // triangle / circle
+constexpr float kGripSensor[3] = {0.00914f, -0.00738f, -0.01334f};
+constexpr float kFaceNormal[3] = {0.0f, 0.94883f, -0.31565f}; // out of the face the stick and buttons are on
+constexpr float kHandleRadius = 0.019f;                        // the grip's radius at the fingers
+constexpr float kFingerHalf = 0.009f;                          // bone line to finger surface
+constexpr float kPalmHalf = 0.013f;                            // bone line to palm surface
+constexpr float kPalmAt = 0.85f;      // the handle lies across the far palm (power grip), as a share wrist->knuckles
+constexpr float kPalmTiltDeg = 20.0f; // ... at a slant: the wrist sits back
+constexpr float kCurlMaxDeg[3] = {85.0f, 100.0f, 70.0f}; // full curl over the rest pose: knuckle, middle, last joint
+
+inline V
+sense_point(const float p[3], bool left)
+{
+	return {left ? p[0] : -p[0], p[1], p[2]};
+}
+
+/*!
+ * How every finger is bent away from the rest pose (radians): per finger the spread at its first finger joint and the
+ * bend of its three joints; the thumb's first joint also turns about its y axis (spread).
+ */
+struct Articulation
+{
+	float finger[5][4] = {}; //!< thumb, index, middle, ring, pinky: spread, joint 1, joint 2, joint 3
+
+	static Articulation
+	lerp(const Articulation &a, const Articulation &b, float t)
+	{
+		Articulation r;
+		for (int f = 0; f < 5; f++) {
+			for (int j = 0; j < 4; j++) {
+				r.finger[f][j] = a.finger[f][j] + (b.finger[f][j] - a.finger[f][j]) * t;
+			}
+		}
+		return r;
+	}
+};
+
+//! The ratio curl of a finger (index..pinky): k of each joint's full curl.
+inline void
+set_curl(Articulation &a, int finger, float k)
+{
+	a.finger[finger][0] = 0.0f;
+	for (int j = 0; j < 3; j++) {
+		a.finger[finger][j + 1] = deg(kCurlMaxDeg[j]) * k;
+	}
+}
+
+//! The bones' rotations in their parents for an articulation (the wrist's own rotation and position given).
+inline void
+articulate(const Rest &rest, const Articulation &a, V wrist_pos, Q wrist_rot, V pos[kBoneCount], Q rot[kBoneCount])
+{
+	for (uint32_t i = 0; i < kBoneCount; i++) {
+		pos[i] = rest.pos[i];
+		rot[i] = rest.rot[i];
+	}
+	pos[0] = {};
+	rot[0] = Q{};
+	pos[1] = wrist_pos;
+	rot[1] = wrist_rot;
+	const V Y{0, 1, 0}, Z{0, 0, 1};
+	// thumb: thumb_0 spreads (y) and bends (z), thumb_1 and thumb_2 bend
+	rot[2] = rest.rot[2] * about(Y, a.finger[0][0]) * about(Z, a.finger[0][1]);
+	rot[3] = rest.rot[3] * about(Z, a.finger[0][2]);
+	rot[4] = rest.rot[4] * about(Z, a.finger[0][3]);
+	// the other fingers: the first finger joint (after the metacarpal) spreads and bends, the next two bend
+	for (int f = 1; f < 5; f++) {
+		const int b = kFingerFirst[f] + 1;
+		rot[b] = rest.rot[b] * about(Y, a.finger[f][0]) * about(Z, a.finger[f][1]);
+		rot[b + 1] = rest.rot[b + 1] * about(Z, a.finger[f][2]);
+		rot[b + 2] = rest.rot[b + 2] * about(Z, a.finger[f][3]);
+	}
+}
+
+//! Every bone's pose in the root (the controller's grip pose); the aux bones follow each finger's last joint.
+inline void
+forward(const V pos[kBoneCount], const Q rot[kBoneCount], V wpos[kBoneCount], Q wrot[kBoneCount])
+{
+	for (int i = 0; i < 26; i++) {
+		const int p = parent_of(i);
+		if (p < 0) {
+			wpos[i] = pos[i];
+			wrot[i] = rot[i];
+		} else {
+			wpos[i] = wpos[p] + rotate(wrot[p], pos[i]);
+			wrot[i] = normalized(wrot[p] * rot[i]);
+		}
+	}
+	for (int f = 0; f < 5; f++) {
+		wpos[26 + f] = wpos[kLastJoint[f]];
+		wrot[26 + f] = wrot[kLastJoint[f]];
+	}
+}
+
+inline float
+from_axis(V p)
+{
+	return std::sqrt(p.x * p.x + p.y * p.y);
+}
+
+/*!
+ * The hand fitted to the Sense: the wrist's place, the finger poses that touch the controls, and how well they do.
+ */
+struct Fit
+{
+	V wrist_pos;
+	Q wrist_rot;
+	Articulation open;    //!< fingers off the controller
+	Articulation held;    //!< index on the trigger, the others closed on the grip, thumb on the stick
+	Articulation pressed; //!< trigger pulled and grip clicked
+	float thumb[4][4] = {}; //!< thumb joints for Thumb::None (lifted), Stick, ButtonA, ButtonB
+	float index_error_m = 0, thumb_error_m[4] = {};
+};
+
+class Fitter
+{
+public:
+	Fitter(const Rest &rest, bool left) : m_rest(rest), m_left(left) {}
+
+	Fit
+	run()
+	{
+		Fit fit;
+		place(fit);
+		// index..pinky close until they touch the handle
+		Articulation contact;
+		float k[5] = {};
+		for (int f = 1; f < 5; f++) {
+			k[f] = closeOnHandle(fit, f);
+			set_curl(contact, f, k[f]);
+		}
+		// along the handle: the middle fingertip on the grip sensor (the shift is along the axis: curls stay valid)
+		{
+			V wp[kBoneCount];
+			Q wr[kBoneCount];
+			pose(fit, contact, wp, wr);
+			fit.wrist_pos.z += sense_point(kGripSensor, m_left).z - wp[kTip[2]].z;
+		}
+		fit.open = Articulation{};
+		for (int f = 1; f < 5; f++) {
+			set_curl(fit.open, f, 0.12f);
+		}
+		fit.held = contact;
+		// the index fingertip pad rests on the trigger (its surface: a finger's half thickness out from it)
+		const V trig = sense_point(kTrigger, m_left) + V{0, -kFingerHalf, 0};
+		float idx[4] = {0, 0, 0, 0};
+		const float lo[4] = {deg(-25), deg(-20), 0, 0}, hi[4] = {deg(25), deg(90), deg(100), deg(70)};
+		fit.index_error_m = solve(fit, fit.held, 1, trig, lo, hi, idx);
+		for (int j = 0; j < 4; j++) {
+			fit.held.finger[1][j] = idx[j];
+		}
+		// the thumb on each control (its pad a finger's half thickness above the control), and lifted off
+		const V n{kFaceNormal[0], kFaceNormal[1], kFaceNormal[2]};
+		const V targets[4] = {sense_point(kStick, m_left) + n * 0.045f + V{0, 0, 0.01f}, // lifted: resting off the controls
+		                      sense_point(kStick, m_left) + n * (0.012f + kFingerHalf * 0.5f),
+		                      sense_point(kButtonA, m_left) + n * kFingerHalf,
+		                      sense_point(kButtonB, m_left) + n * kFingerHalf};
+		const float tlo[4] = {deg(-90), deg(-90), 0, 0}, thi[4] = {deg(90), deg(90), deg(60), deg(80)};
+		for (int t = 0; t < 4; t++) {
+			fit.thumb_error_m[t] = solve(fit, fit.held, 0, targets[t], tlo, thi, fit.thumb[t]);
+		}
+		for (int j = 0; j < 4; j++) {
+			fit.held.finger[0][j] = fit.thumb[1][j];
+			fit.open.finger[0][j] = fit.thumb[0][j];
+		}
+		// pulling the trigger bends the index a little further; clicking the grip squeezes the others
+		fit.pressed = fit.held;
+		fit.pressed.finger[1][1] += deg(10);
+		fit.pressed.finger[1][2] += deg(15);
+		fit.pressed.finger[1][3] += deg(10);
+		for (int f = 2; f < 5; f++) {
+			set_curl(fit.pressed, f, std::fmin(1.0f, k[f] + 0.06f));
+		}
+		return fit;
+	}
+
+private:
+	void
+	pose(const Fit &fit, const Articulation &a, V wp[kBoneCount], Q wr[kBoneCount]) const
+	{
+		V pos[kBoneCount];
+		Q rot[kBoneCount];
+		articulate(m_rest, a, fit.wrist_pos, fit.wrist_rot, pos, rot);
+		forward(pos, rot, wp, wr);
+	}
+
+	/*
+	 * The wrist's place: the palm faces the handle axis (left palm toward +X, right toward -X), the index side toward
+	 * -Z, the handle across the far palm at the handle's radius, slanted so the wrist sits back.
+	 */
+	void
+	place(Fit &fit) const
+	{
+		V wp[kBoneCount];
+		Q wr[kBoneCount];
+		Fit at_origin;
+		pose(at_origin, Articulation{}, wp, wr);
+		V knuckles{};
+		for (int f = 1; f < 5; f++) {
+			knuckles = knuckles + wp[kFingerFirst[f] + 1] * 0.25f;
+		}
+		const V wrist = wp[1];
+		const V fdir = unit(knuckles - wrist);
+		V across = wp[kFingerFirst[1] + 1] - wp[kFingerFirst[4] + 1];
+		across = unit(across - fdir * dot(across, fdir));
+		// the palm's side: where the middle fingertip goes when the finger curls a little
+		Articulation bit;
+		set_curl(bit, 2, 0.25f);
+		V wp2[kBoneCount];
+		Q wr2[kBoneCount];
+		pose(at_origin, bit, wp2, wr2);
+		V d = wp2[kTip[2]] - wp[kTip[2]];
+		d = d - fdir * dot(d, fdir) - across * dot(d, across);
+		const V palm = unit(d);
+		const V tn{m_left ? 1.0f : -1.0f, 0, 0};
+		const V ta{0, 0, -1};
+		const Q src = from_columns(palm, across, cross(palm, across));
+		const Q dst = from_columns(tn, ta, cross(tn, ta));
+		const Q r = normalized(about(tn, deg(m_left ? kPalmTiltDeg : -kPalmTiltDeg)) * dst *
+		                       Q{src.w, -src.x, -src.y, -src.z});
+		const V contact = wrist + (knuckles - wrist) * kPalmAt + palm * kPalmHalf;
+		fit.wrist_rot = r;
+		fit.wrist_pos = tn * -kHandleRadius - rotate(r, contact);
+	}
+
+	//! The smallest curl at which finger @p f touches the handle (its middle joint, last joint or tip).
+	float
+	closeOnHandle(const Fit &fit, int f) const
+	{
+		for (int i = 0; i <= 100; i++) {
+			Articulation a;
+			set_curl(a, f, (float)i / 100.0f);
+			V wp[kBoneCount];
+			Q wr[kBoneCount];
+			pose(fit, a, wp, wr);
+			const int b = kFingerFirst[f];
+			const float nearest =
+			    std::fmin(std::fmin(from_axis(wp[b + 2]), from_axis(wp[b + 3])), from_axis(wp[b + 4]));
+			if (nearest <= kHandleRadius + kFingerHalf) {
+				return (float)i / 100.0f;
+			}
+		}
+		return 1.0f;
+	}
+
+	/*!
+	 * Finger @p f's joints (within lo..hi) that put its pad (halfway between its last joint and tip) nearest to
+	 * @p target without its joints sinking into the handle: a coarse grid, then coordinate descent. Returns the miss.
+	 */
+	float
+	solve(const Fit &fit, const Articulation &base, int f, V target, const float lo[4], const float hi[4],
+	      float out[4]) const
+	{
+		auto cost = [&](const float x[4]) {
+			Articulation a = base;
+			for (int j = 0; j < 4; j++) {
+				a.finger[f][j] = x[j];
+			}
+			V wp[kBoneCount];
+			Q wr[kBoneCount];
+			pose(fit, a, wp, wr);
+			const V pad = (wp[kLastJoint[f]] + wp[kTip[f]]) * 0.5f;
+			float c = len(pad - target);
+			const int b = f == 0 ? 3 : kFingerFirst[f] + 2;
+			for (int j = b; j <= kTip[f]; j++) {
+				const float inside = kHandleRadius + kFingerHalf * 0.8f - from_axis(wp[j]);
+				if (inside > 0 && wp[j].z > -0.06f && wp[j].z < 0.05f) {
+					c += inside * 3.0f;
+				}
+			}
+			return c;
+		};
+		float x[4];
+		constexpr int kStarts = 8;
+		float starts[kStarts][4] = {};
+		float start_c[kStarts];
+		for (float &c : start_c) {
+			c = 1e9f;
+		}
+		const int steps = 6;
+		int idx[4];
+		for (idx[0] = 0; idx[0] < steps; idx[0]++) {
+			for (idx[1] = 0; idx[1] < steps; idx[1]++) {
+				for (idx[2] = 0; idx[2] < steps; idx[2]++) {
+					for (idx[3] = 0; idx[3] < steps; idx[3]++) {
+						for (int j = 0; j < 4; j++) {
+							x[j] = lo[j] + (hi[j] - lo[j]) * (float)idx[j] / (float)(steps - 1);
+						}
+						const float c = cost(x);
+						int worst = 0;
+						for (int k = 1; k < kStarts; k++) {
+							worst = start_c[k] > start_c[worst] ? k : worst;
+						}
+						if (c < start_c[worst]) {
+							start_c[worst] = c;
+							memcpy(starts[worst], x, sizeof(x));
+						}
+					}
+				}
+			}
+		}
+		float best[4] = {};
+		float best_c = 1e9f;
+		for (int k = 0; k < kStarts; k++) {
+			float cur[4];
+			memcpy(cur, starts[k], sizeof(cur));
+			float cur_c = start_c[k];
+			float step = deg(8);
+			while (step > deg(0.05f)) {
+				bool better = false;
+				for (int j = 0; j < 4; j++) {
+					for (float s : {step, -step}) {
+						memcpy(x, cur, sizeof(x));
+						x[j] = std::fmax(lo[j], std::fmin(hi[j], x[j] + s));
+						const float c = cost(x);
+						if (c < cur_c - 1e-7f) {
+							cur_c = c;
+							memcpy(cur, x, sizeof(cur));
+							better = true;
+						}
+					}
+				}
+				if (!better) {
+					step *= 0.5f;
+				}
+			}
+			if (cur_c < best_c) {
+				best_c = cur_c;
+				memcpy(best, cur, sizeof(best));
+			}
+		}
+		memcpy(out, best, sizeof(best));
+		Articulation a = base;
+		for (int j = 0; j < 4; j++) {
+			a.finger[f][j] = best[j];
+		}
+		V wp[kBoneCount];
+		Q wr[kBoneCount];
+		pose(fit, a, wp, wr);
+		return len((wp[kLastJoint[f]] + wp[kTip[f]]) * 0.5f - target);
+	}
+
+	const Rest &m_rest;
+	const bool m_left;
+};
+
+} // namespace detail
+
+/*!
+ * One hand's skeleton. Call update() once per frame with the Sense's finger state, then pose() for each motion range.
  */
 class HandSkeleton
 {
 public:
-	static constexpr int kAnimationFrames = 10; //!< ALVR's ANIMATION_FRAME_COUNT
+	static constexpr float kSmoothingS = 0.035f; //!< how quickly the fingers follow the sensors
 
-	explicit HandSkeleton(bool left) : m_left(left) {}
+	explicit HandSkeleton(bool left)
+	{
+		using namespace detail;
+		const std::string dir = steamvr_dir();
+		const std::string path =
+		    dir.empty() ? std::string() :
+		                  dir + "/resources/skeletons/vr_glove_" + (left ? "left" : "right") + "_skeleton.glb";
+		std::string why;
+		if (!path.empty() && load_glb(path, left, m_rest, &why)) {
+			m_source = "SteamVR's reference hand (" + path + ")";
+		} else {
+			m_rest = builtin_rest(left);
+			m_source = "the built-in hand (" + (path.empty() ? std::string("SteamVR's folder not found") : why) + ")";
+		}
+		m_fit = Fitter(m_rest, left).run();
+		m_current = m_fit.held;
+		m_currentFree = Articulation{};
+	}
+
+	//! Where the hand comes from and how well it fits the Sense, for the log.
+	std::string
+	describe() const
+	{
+		char b[256];
+		snprintf(b, sizeof(b),
+		         "index on the trigger %.0f mm, thumb on the stick %.0f / buttons %.0f, %.0f mm (lifted %.0f mm)",
+		         m_fit.index_error_m * 1000, m_fit.thumb_error_m[1] * 1000, m_fit.thumb_error_m[2] * 1000,
+		         m_fit.thumb_error_m[3] * 1000, m_fit.thumb_error_m[0] * 1000);
+		return m_source + "; fitted to the Sense: " + b;
+	}
+
+	bool
+	fromSteamVR() const
+	{
+		return m_source.rfind("SteamVR", 0) == 0;
+	}
 
 	void
-	update(const HandInput &in)
+	update(const HandInput &input)
 	{
-		m_in = in;
-		if (!std::isfinite(m_in.trigger)) {
-			m_in.trigger = 0.0f;
-		}
-		if (!std::isfinite(m_in.grip)) {
-			m_in.grip = 0.0f;
-		}
-		m_in.trigger = m_in.trigger < 0.0f ? 0.0f : (m_in.trigger > 1.0f ? 1.0f : m_in.trigger);
-		m_in.grip = m_in.grip < 0.0f ? 0.0f : (m_in.grip > 1.0f ? 1.0f : m_in.grip);
-		step(m_lastThumb, m_in.thumb_touch, m_thumbProgress);
-		step(m_lastIndex, m_in.trigger_touch, m_indexProgress);
+		using namespace detail;
+		const int64_t now = now_ns();
+		float dt = m_lastNs == 0 ? 1.0f : (float)(now - m_lastNs) * 1e-9f;
+		m_lastNs = now;
+		dt = dt < 0.0f ? 0.0f : (dt > 1.0f ? 1.0f : dt);
+		const float a = 1.0f - std::exp(-dt / kSmoothingS);
+		m_current = Articulation::lerp(m_current, target(input, true), a);
+		m_currentFree = Articulation::lerp(m_currentFree, target(input, false), a);
 	}
 
 	//! All 31 bones for one motion range (with the controller in hand, or the hand as if it held none).
 	void
 	pose(bool with_controller, vr::VRBoneTransform_t out[kBoneCount]) const
 	{
-		vr::VRBoneTransform_t a[kBoneCount] = {};
-		vr::VRBoneTransform_t b[kBoneCount] = {};
-		out[0] = {{0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, -0.0f, -0.0f, 0.0f}};
-		if (m_left) {
-			out[1] = {{-0.034038f, 0.036503f, 0.164722f, 1.0f}, {-0.055147f, -0.078608f, -0.920279f, 0.379296f}};
-		} else {
-			out[1] = {{0.034038f, 0.036503f, 0.164722f, 1.0f}, {-0.055147f, -0.078608f, 0.920279f, -0.379296f}};
-		}
-		GetThumbBoneTransform(with_controller, m_left, m_lastThumb, a);
-		GetThumbBoneTransform(with_controller, m_left, m_in.thumb_touch, b);
-		for (uint32_t i = 2; i < 6; i++) {
-			out[i].position = lerp(a[i].position, b[i].position, m_thumbProgress);
-			out[i].orientation = slerp(a[i].orientation, b[i].orientation, m_thumbProgress);
-		}
-		if (m_in.trigger > 0.0f) {
-			GetTriggerBoneTransform(with_controller, m_left, true, false, a);
-			GetTriggerBoneTransform(with_controller, m_left, true, true, b);
-			for (uint32_t i = 6; i < kBoneCount; i++) {
-				out[i].position = lerp(a[i].position, b[i].position, m_in.trigger);
-				out[i].orientation = slerp(a[i].orientation, b[i].orientation, m_in.trigger);
+		using namespace detail;
+		V pos[kBoneCount], wp[kBoneCount];
+		Q rot[kBoneCount], wr[kBoneCount];
+		articulate(m_rest, with_controller ? m_current : m_currentFree, m_fit.wrist_pos, m_fit.wrist_rot, pos, rot);
+		forward(pos, rot, wp, wr);
+		for (uint32_t i = 0; i < kBoneCount; i++) {
+			const bool aux = i >= 26;
+			V p = aux ? wp[i] : pos[i];
+			Q q = normalized(aux ? wr[i] : rot[i]);
+			if (aux || i == 1) { // the root's children: from the grip into the root
+				p = m_gripPos + rotate(m_gripRot, p);
+				q = normalized(m_gripRot * q);
 			}
-		} else {
-			GetTriggerBoneTransform(with_controller, m_left, m_lastIndex, false, a);
-			GetTriggerBoneTransform(with_controller, m_left, m_in.trigger_touch, false, b);
-			for (uint32_t i = 6; i < kBoneCount; i++) {
-				out[i].position = lerp(a[i].position, b[i].position, m_indexProgress);
-				out[i].orientation = slerp(a[i].orientation, b[i].orientation, m_indexProgress);
-			}
+			out[i].position = {{p.x, p.y, p.z, 1.0f}};
+			out[i].orientation = {q.w, q.x, q.y, q.z};
 		}
-		if (m_in.grip > 0.0f) {
-			GetGripClickBoneTransform(with_controller, m_left, b);
-			for (uint32_t i = 11; i < kBoneCount; i++) {
-				if (i == 26 || i == 27) {
-					continue; // ALVR leaves the thumb and index aux bones to the trigger pose
-				}
-				out[i].position = lerp(out[i].position, b[i].position, m_in.grip);
-				out[i].orientation = slerp(out[i].orientation, b[i].orientation, m_in.grip);
-			}
-		}
+	}
+
+	/*!
+	 * Where the grip (the frame the hand is fitted in) is in the skeleton's root, the controller pose the driver
+	 * reports: the wrist and the aux bones (the root's children) are placed through it. Default: the same.
+	 */
+	void
+	setGripInRoot(detail::V position, detail::Q orientation)
+	{
+		m_gripPos = position;
+		m_gripRot = detail::normalized(orientation);
+	}
+
+	//! The fitted poses (for the tests).
+	const detail::Fit &
+	fit() const
+	{
+		return m_fit;
 	}
 
 private:
-	static void
-	step(bool &last, bool current, float &progress)
+	static int64_t
+	now_ns()
 	{
-		if (last != current) {
-			progress += 1.0f / kAnimationFrames;
-			if (progress > 1.0f) {
-				progress = 0.0f;
-				last = current;
-			}
-		} else {
-			progress = 0.0f;
-		}
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 	}
 
-	const bool m_left;
-	HandInput m_in;
-	bool m_lastThumb = false;
-	bool m_lastIndex = false;
-	float m_thumbProgress = 0.0f;
-	float m_indexProgress = 0.0f;
+	//! The pose the sensors ask for (smoothed into m_current / m_currentFree by update()).
+	detail::Articulation
+	target(const HandInput &in, bool with_controller) const
+	{
+		using namespace detail;
+		const float trigger = clamp01(in.trigger);
+		const float grip = clamp01(in.grip);
+		const float near_index = in.trigger_touch || trigger > 0.0f ? 1.0f : ramp(in.trigger_proximity, 0.15f, 0.85f);
+		const float near_grip = in.grip_touch || grip > 0.0f ? 1.0f : ramp(in.grip_proximity, 0.15f, 0.85f);
+		const int thumb = in.thumb == Thumb::Stick ? 1 : in.thumb == Thumb::ButtonA ? 2 : in.thumb == Thumb::ButtonB ? 3 : 0;
+		Articulation a;
+		if (with_controller) {
+			const Articulation idle = Articulation::lerp(m_fit.open, m_fit.held, near_index);
+			const Articulation pulled = Articulation::lerp(m_fit.held, m_fit.pressed, trigger);
+			const Articulation &index = trigger > 0.0f ? pulled : idle;
+			const Articulation others_idle = Articulation::lerp(m_fit.open, m_fit.held, near_grip);
+			const Articulation others = Articulation::lerp(others_idle, m_fit.pressed, grip);
+			for (int j = 0; j < 4; j++) {
+				a.finger[1][j] = index.finger[1][j];
+				for (int f = 2; f < 5; f++) {
+					a.finger[f][j] = others.finger[f][j];
+				}
+				a.finger[0][j] = m_fit.thumb[thumb][j];
+			}
+		} else {
+			// no controller in the hand: the same sensors open and close a fist
+			set_curl(a, 1, 0.05f + 0.45f * near_index + 0.5f * trigger);
+			for (int f = 2; f < 5; f++) {
+				set_curl(a, f, 0.08f + 0.72f * near_grip + 0.2f * grip);
+			}
+			const float fold = thumb == 0 ? 0.0f : 0.7f;
+			for (int j = 0; j < 4; j++) {
+				a.finger[0][j] = m_fit.thumb[1][j] * fold;
+			}
+		}
+		return a;
+	}
+
+	detail::Rest m_rest;
+	detail::Fit m_fit;
+	std::string m_source;
+	detail::Articulation m_current, m_currentFree;
+	int64_t m_lastNs = 0;
+	detail::V m_gripPos;
+	detail::Q m_gripRot;
 };
 
 } // namespace skel

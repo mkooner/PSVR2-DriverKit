@@ -2554,6 +2554,12 @@ pssense_T_steamvrroot_xrgrip(const struct pssense_device *pssense)
 	};
 }
 
+void
+pssense_get_grip_in_steamvr_root(struct xrt_device *xdev, struct xrt_pose *out_pose)
+{
+	*out_pose = pssense_T_steamvrroot_xrgrip(from_device(xdev));
+}
+
 size_t
 pssense_get_grip_outline(struct xrt_device *xdev, struct xrt_vec3 *out_points, size_t max_points, float *out_radius_m)
 {
@@ -2944,6 +2950,9 @@ pssense_create(struct xrt_prober *xp,
 		pssense_device_destroy(&pssense->base);
 		return NULL;
 	}
+	// The LED timing's log lines name the controller.
+	snprintf(pssense->tracking.led_sync_refinement.name, sizeof(pssense->tracking.led_sync_refinement.name), "%s",
+	         pssense->hand == XRT_HAND_LEFT ? "left" : "right");
 
 	pssense->tracking.period_id = DURATION_NS_TO_PERIOD_ID(led_sync_refinement_options.initial_blink_duration_ns);
 	pssense->tracking.sync_phase = LED_SYNC_PHASE_PRESCAN;

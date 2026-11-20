@@ -514,6 +514,7 @@ public:
 		}
 		d.controller_type = "playstation_vr2_sense";
 		d.input_profile = "{monado_psvr2}/input/playstation_vr2_sense_controller_profile.json";
+		d.grip_in_root = gripInRoot(hand);
 		if (use_sense_render_models()) {
 			d.render_model = left ? "{monado_psvr2}playstation_vr2_sense_left" : "{monado_psvr2}playstation_vr2_sense_right";
 		} else {
@@ -536,11 +537,41 @@ public:
 		return d;
 	}
 
+	/*!
+	 * The controller's SteamVR root, as Sony's driver reports it: SteamVR places Sony's render model and the input
+	 * profile's poses (handgrip, tip, aim) relative to it. Monado gives the OpenXR grip, 10 cm further along the
+	 * controller and tilted 20.6 deg; reported as the root, the drawn controller sat ~11 cm off its real LEDs (LED
+	 * model vs Sony's mesh: 82 mm median off as the grip, 1.3 mm as the root).
+	 */
 	bool
 	controllerPose(Hand hand, int64_t at_ns, TrackedPose *out) override
 	{
 		struct xrt_device *xdev = m_hand[(int)hand];
-		return xdev != NULL && devicePose(xdev, XRT_INPUT_PSSENSE_GRIP_POSE, at_ns, out);
+		TrackedPose grip;
+		if (xdev == NULL || !devicePose(xdev, XRT_INPUT_PSSENSE_GRIP_POSE, at_ns, &grip)) {
+			return false;
+		}
+		*out = root_from_grip(grip, gripInRoot(hand));
+		return true;
+	}
+
+	//! Where the grip is in the controller's SteamVR root (identity without the Sense driver).
+	Pose
+	gripInRoot(Hand hand)
+	{
+		Pose p;
+#ifdef XRT_BUILD_DRIVER_PSSENSE
+		struct xrt_device *xdev = m_hand[(int)hand];
+		if (xdev != NULL && xdev->name == XRT_DEVICE_PSSENSE) {
+			struct xrt_pose g;
+			pssense_get_grip_in_steamvr_root(xdev, &g);
+			p.orientation = {g.orientation.x, g.orientation.y, g.orientation.z, g.orientation.w};
+			p.position = {g.position.x, g.position.y, g.position.z};
+		}
+#else
+		(void)hand;
+#endif
+		return p;
 	}
 
 	std::vector<InputDesc>
