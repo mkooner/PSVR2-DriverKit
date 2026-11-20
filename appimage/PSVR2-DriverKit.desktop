@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PSVR2-DriverKit
+Comment=PlayStation VR2 on Linux: compile, install and run the PS VR2 driver for SteamVR and Monado
+Exec=PSVR2-DriverKit
+Icon=psvr2-driverkit
+Categories=Game;Utility;
+Terminal=false
