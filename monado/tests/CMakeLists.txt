@@ -109,7 +109,7 @@ if(XRT_FEATURE_STEAMVR_PLUGIN)
 	target_include_directories(tests_ovrn_room PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2)
 	target_link_libraries(tests_ovrn_room PRIVATE aux_math xrt-interfaces)
 	target_include_directories(tests_ovrn_skeleton PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2)
-	target_link_libraries(tests_ovrn_skeleton PRIVATE xrt-external-openvr)
+	target_link_libraries(tests_ovrn_skeleton PRIVATE xrt-external-openvr xrt-external-cjson aux_util)
 	if(XRT_BUILD_DRIVER_PSVR2)
 		target_include_directories(
 			tests_ovrn_camera PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2

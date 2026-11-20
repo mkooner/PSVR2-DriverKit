@@ -76,6 +76,16 @@ size_t
 pssense_get_grip_outline(struct xrt_device *xdev, struct xrt_vec3 *out_points, size_t max_points, float *out_radius_m);
 
 /*!
+ * Where the OpenXR grip pose (XRT_INPUT_PSSENSE_GRIP_POSE) sits on the controller: its pose in the controller's
+ * SteamVR root, the frame Sony's render model and its components are in. A SteamVR driver reports the root:
+ * root = grip * inverse(this).
+ *
+ * @ingroup drv_pssense
+ */
+void
+pssense_get_grip_in_steamvr_root(struct xrt_device *xdev, struct xrt_pose *out_pose);
+
+/*!
  * @dir drivers/pssense
  *
  * @brief @ref drv_pssense files.

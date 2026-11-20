@@ -24,6 +24,7 @@
 #include "util/u_debug.h"
 
 #include <stdio.h>
+#include <math.h>
 
 /*
  * Camera 0 (bottom left) mount on the headset, relative to the head/SLAM body frame (x right, y up, -z forward):
@@ -39,13 +40,23 @@
  */
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_cam0_mount_legacy, "PSVR2_CAM0_MOUNT_LEGACY", true)
 DEBUG_GET_ONCE_OPTION(psvr2_cam0_mount, "PSVR2_CAM0_MOUNT", NULL)
+/*
+ * Align the finished camera chain to camera 0's measured mount (default on). The chain builds its 4x4 matrices from
+ * math_matrix_3x3_from_quat (row-major) through math_matrix_4x4_isometry_from_rt, which maps the 3x3 column-major:
+ * every rotation goes in transposed, i.e. inverted. With the legacy mount that left camera 0 looking 0.5 deg up
+ * instead of the measured 28.9 deg down (a 29.7 deg error on hardware), which put the controllers higher and further
+ * out than they are: on a desk 75 cm away, ~0.5 m up at head height while the passthrough showed them on the desk
+ * (2026-11-19). The cameras' relative poses from the chain were fitted to recorded data (see below) and are kept;
+ * the whole rig is turned so camera 0 has the calibration's mount (Rx(-15) * R as stored, 1.5 deg from the mount
+ * measured from motion), the same the passthrough uses. PSVR2_CAM_ALIGN=0 leaves the chain as it was.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_cam_align, "PSVR2_CAM_ALIGN", true)
 
 /*
  * Camera rig position relative to the head pose origin, "x y z" in cm (head frame: x right, y up, -z forward), added to
  * every camera. Sony's driver takes the camera positions from its own config (PSVR2Toolkit hmd_device_hooks.cpp,
- * cam0Cfg->position), not from the calibration block, so camera 0 sits at the head origin by default. Measure it with
- * psvr2-test/analysis/rig_offset.py (controller resting in view while the head turns); the 00:04 run had only 3
- * usable windows and gave an implausible 36cm, so there is no data-backed default yet.
+ * cam0Cfg->position), not from the calibration block, which leaves camera 0 at the head origin in the chain. The
+ * default is the fitted offset applied after the alignment (see there); this replaces it.
  */
 DEBUG_GET_ONCE_OPTION(psvr2_cam_rig_offset, "PSVR2_CAM_RIG_OFFSET", NULL)
 
@@ -346,16 +357,51 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 			parent_id = parent_ids[parent_id];
 		}
 		math_pose_from_isometry(&result, &mosaic->cameras[i].pose_in_origin);
+		PSVR2_DEBUG(hmd, "camera %zu pose position: (%f, %f, %f)", i,
+		            mosaic->cameras[i].pose_in_origin.position.x, mosaic->cameras[i].pose_in_origin.position.y,
+		            mosaic->cameras[i].pose_in_origin.position.z);
+	}
+
+	struct xrt_quat q_measured;
+	if (debug_get_bool_option_psvr2_cam_align() && mosaic->num_cameras >= 1 &&
+	    psvr2_cam0_mount_from_block(data, size, -15.0f, false, &q_measured)) {
+		// E = measured * camera0^-1, applied to the whole rig (camera 0 sits at the origin, so it turns in place).
+		struct xrt_quat c0 = mosaic->cameras[0].pose_in_origin.orientation;
+		struct xrt_quat c0_inv = {-c0.x, -c0.y, -c0.z, c0.w};
+		struct xrt_quat e;
+		math_quat_rotate(&q_measured, &c0_inv, &e);
+		math_quat_normalize(&e);
+		for (size_t i = 0; i < mosaic->num_cameras; i++) {
+			struct xrt_pose *p = &mosaic->cameras[i].pose_in_origin;
+			math_quat_rotate(&e, &p->orientation, &p->orientation);
+			math_quat_normalize(&p->orientation);
+			math_quat_rotate_vec3(&e, &p->position, &p->position);
+		}
+		/*
+		 * Where the rig is relative to the head pose origin: the chain puts camera 0 at the origin itself. Fitted on
+		 * hardware (2026-11-19, 28 s with both controllers resting on a desk while the head turned 46 deg in yaw and 70
+		 * in pitch): with camera 0 at (-2.9, -1.6, -11.3) cm in the head frame (left, down, forward, the bottom-left
+		 * camera at the front of the visor) the resting controllers held still to 1.0-1.1 cm, from 4.1-4.3 cm (each
+		 * half of the run alone: -3.4 -0.7 -10.9 and -3.1 -1.7 -11.1 cm). PSVR2_CAM_RIG_OFFSET "x y z" (cm) instead.
+		 */
+		float rx = -2.9f, ry = -1.6f, rz = -11.3f;
 		const char *rig = debug_get_option_psvr2_cam_rig_offset();
-		float rx = 0, ry = 0, rz = 0;
-		if (rig != NULL && sscanf(rig, "%f %f %f", &rx, &ry, &rz) == 3) {
+		if (rig != NULL && sscanf(rig, "%f %f %f", &rx, &ry, &rz) != 3) {
+			rx = -2.9f, ry = -1.6f, rz = -11.3f;
+		}
+		for (size_t i = 0; i < mosaic->num_cameras; i++) {
 			mosaic->cameras[i].pose_in_origin.position.x += rx / 100.0f;
 			mosaic->cameras[i].pose_in_origin.position.y += ry / 100.0f;
 			mosaic->cameras[i].pose_in_origin.position.z += rz / 100.0f;
 		}
-		PSVR2_DEBUG(hmd, "camera %zu pose position: (%f, %f, %f)", i,
-		            mosaic->cameras[i].pose_in_origin.position.x, mosaic->cameras[i].pose_in_origin.position.y,
-		            mosaic->cameras[i].pose_in_origin.position.z);
+		PSVR2_INFO(hmd, "Camera rig placed with camera 0 at (%.1f, %.1f, %.1f) cm from the head origin", rx, ry, rz);
+		const float e_deg = 2.0f * acosf(fminf(1.0f, fabsf(e.w))) * 180.0f / (float)M_PI;
+		for (size_t i = 0; i < mosaic->num_cameras; i++) {
+			float vp = 0, vy = 0;
+			psvr2_cam_mount_view_angles(&mosaic->cameras[i].pose_in_origin.orientation, &vp, &vy);
+			PSVR2_INFO(hmd, "Camera %zu aligned to the measured mount (rig turned %.1f deg): looks %.1f deg %s, %.1f deg %s",
+			           i, e_deg, fabsf(vp), vp < 0 ? "down" : "up", fabsf(vy), vy > 0 ? "left" : "right");
+		}
 	}
 
 	if (mosaic->num_cameras >= 2) {

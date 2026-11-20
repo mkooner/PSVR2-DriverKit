@@ -254,6 +254,17 @@ struct Skeleton
 };
 std::vector<Skeleton> g_skeletons; //!< handle = 100000 + index
 
+//! The eye-tracking component (handle 200000): its path and the updates SteamVR got.
+struct EyeComponent
+{
+	PropertyContainerHandle_t container = 0;
+	std::string path;
+	int updates = 0, valid = 0, invalid = 0, mixed_flags = 0;
+	VREyeTrackingData_t last{}, last_valid{};
+	double last_offset = 0, last_valid_offset = 0;
+};
+EyeComponent g_eye;
+
 std::string
 bone_problem(const VRBoneTransform_t *t, uint32_t n)
 {
@@ -325,8 +336,35 @@ struct FakeInput : IVRDriverInput
 	}
 	EVRInputError CreatePoseComponent(PropertyContainerHandle_t, const char *, VRInputComponentHandle_t *) override { return VRInputError_None; }
 	EVRInputError UpdatePoseComponent(VRInputComponentHandle_t, const HmdMatrix34_t *, double) override { return VRInputError_None; }
-	EVRInputError CreateEyeTrackingComponent(PropertyContainerHandle_t, const char *, VRInputComponentHandle_t *) override { return VRInputError_None; }
-	EVRInputError UpdateEyeTrackingComponent(VRInputComponentHandle_t, const VREyeTrackingData_t *, double) override { return VRInputError_None; }
+	EVRInputError
+	CreateEyeTrackingComponent(PropertyContainerHandle_t c, const char *name, VRInputComponentHandle_t *h) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		g_eye.container = c;
+		g_eye.path = name;
+		*h = 200000;
+		return VRInputError_None;
+	}
+	EVRInputError
+	UpdateEyeTrackingComponent(VRInputComponentHandle_t h, const VREyeTrackingData_t *d, double offset) override
+	{
+		std::lock_guard<std::mutex> l(g_mutex);
+		if (h != 200000) {
+			return VRInputError_InvalidHandle;
+		}
+		g_eye.updates++;
+		(d->bValid && d->bActive && d->bTracked ? g_eye.valid : g_eye.invalid)++;
+		if (d->bValid != d->bActive || d->bValid != d->bTracked) {
+			g_eye.mixed_flags++;
+		}
+		g_eye.last = *d;
+		g_eye.last_offset = offset;
+		if (d->bValid) {
+			g_eye.last_valid = *d;
+			g_eye.last_valid_offset = offset;
+		}
+		return VRInputError_None;
+	}
 };
 
 std::vector<VREvent_t> g_events; //!< events for the driver's next PollNextEvent calls
@@ -620,6 +658,7 @@ main(int argc, char **argv)
 			g_eyeToHead.clear();
 			g_components.clear();
 			g_skeletons.clear();
+			g_eye = EyeComponent{};
 			g_events.clear();
 		}
 		unsetenv("DISABLE_STEAMVR_LINUX_FIXES");
@@ -900,6 +939,31 @@ main(int argc, char **argv)
 				check(paths, "each controller has a hand skeleton (/input/skeleton/left|right, as Sony's driver)");
 				check(valid, "every skeleton pose SteamVR gets has 31 valid bones");
 				check(every_frame, "both skeleton motion ranges are set at activation and every frame after");
+			}
+			{
+				// Eye tracking: present only with a gaze source (OVRN_SIM_EYE=1, the test-only gaze).
+				const bool sim_eye = getenv("OVRN_SIM_EYE") != nullptr && strcmp(getenv("OVRN_SIM_EYE"), "1") == 0;
+				bool cap = false;
+				const bool has_cap = prop(0, Prop_SupportsXrEyeGazeInteraction_Bool, &cap) && cap;
+				std::lock_guard<std::mutex> l(g_mutex);
+				if (!sim_eye) {
+					check(!has_cap && g_eye.path.empty(),
+					      "no eye-tracking capability or component without a gaze source");
+				} else {
+					check(has_cap && g_eye.path == "/eyetracking" && g_eye.container == 1000,
+					      "eye tracking: Prop_SupportsXrEyeGazeInteraction_Bool and the /eyetracking component on the headset");
+					const VREyeTrackingData_t &v = g_eye.last_valid;
+					const float yaw = std::atan2(v.vGazeTarget.v[0], -v.vGazeTarget.v[2]) * 57.2958f;
+					const float pitch = std::asin(v.vGazeTarget.v[1]) * 57.2958f;
+					printf("    gaze: %d updates, %d valid, %d not valid; last valid yaw %.2f pitch %.2f deg, offset %.4f s\n",
+					       g_eye.updates, g_eye.valid, g_eye.invalid, yaw, pitch, g_eye.last_valid_offset);
+					check(g_eye.valid > 0 && std::fabs(yaw - 10.0f) < 0.01f && std::fabs(pitch - 5.0f) < 0.01f &&
+					          g_eye.last_valid_offset < 0.0 && g_eye.last_valid_offset > -0.02,
+					      "fresh gaze reaches SteamVR valid, unchanged (10 deg right, 5 up), as a few ms old");
+					check(g_eye.invalid > 0 && !g_eye.last.bValid,
+					      "gaze whose packet is 200 ms old reaches SteamVR as not valid (never stale)");
+					check(g_eye.mixed_flags == 0, "bActive, bValid and bTracked always agree");
+				}
 			}
 			check(trigger == 0.5f && trigger_updates >= 40 && stick_l == -1.0f && stick_r == 1.0f,
 			      "input values reach SteamVR every frame, per hand");

@@ -274,6 +274,9 @@ public: // Fields
 
 	std::atomic<uint32_t> shallow_searches_failed{0};
 
+	//! Samples the slow search has taken (slow thread only): staggers the search for lost devices across cameras.
+	uint64_t slow_samples{0};
+
 	//! This camera's index in the EuRoC recorder session (flattened across mosaics), or -1 if it has none.
 	std::atomic<int32_t> euroc_cam_index{-1};
 

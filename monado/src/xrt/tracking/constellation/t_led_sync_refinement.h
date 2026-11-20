@@ -265,6 +265,9 @@ struct t_led_sync_refinement
 	//! Whether the structure has been fully initialized.
 	bool initialized;
 
+	//! Which device this is for the log ("left", "right"), set by the driver after init; empty: unnamed.
+	char name[16];
+
 	enum u_logging_level log_level;
 
 	//! The options to use for refinement

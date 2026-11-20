@@ -22,7 +22,12 @@ public:
 	Controller(Backend *backend, Hand hand)
 	    : TrackedDevice(vr::TrackedDeviceClass_Controller, backend->controllerInfo(hand).serial), m_backend(backend),
 	      m_hand(hand), m_info(backend->controllerInfo(hand)), m_skeleton(hand == Hand::Left)
-	{}
+	{
+		const Pose &g = m_info.grip_in_root;
+		m_skeleton.setGripInRoot({(float)g.position.x, (float)g.position.y, (float)g.position.z},
+		                         {(float)g.orientation.w, (float)g.orientation.x, (float)g.orientation.y,
+		                          (float)g.orientation.z});
+	}
 
 	Hand
 	hand() const
@@ -89,10 +94,15 @@ public:
 		auto value = [&](int idx) { return idx >= 0 && (size_t)idx < n ? m_values[idx] : 0.0f; };
 		in.trigger = value(m_skelIdx.trigger);
 		in.trigger_touch = value(m_skelIdx.trigger_touch) > 0.5f || in.trigger > 0.0f;
+		in.trigger_proximity = value(m_skelIdx.trigger_near);
 		in.grip = value(m_skelIdx.grip);
-		for (int idx : m_skelIdx.thumb) {
-			in.thumb_touch = in.thumb_touch || value(idx) > 0.5f;
-		}
+		in.grip_touch = value(m_skelIdx.grip_touch) > 0.5f;
+		in.grip_proximity = value(m_skelIdx.grip_near);
+		// the thumb is on one control at a time; the buttons win over the stick (the thumb's edge brushes the stick)
+		in.thumb = value(m_skelIdx.button_a_touch) > 0.5f   ? skel::Thumb::ButtonA
+		           : value(m_skelIdx.button_b_touch) > 0.5f ? skel::Thumb::ButtonB
+		           : value(m_skelIdx.stick_touch) > 0.5f    ? skel::Thumb::Stick
+		                                                    : skel::Thumb::None;
 		return in;
 	}
 
@@ -142,13 +152,18 @@ private:
 	{
 		int trigger = -1;
 		int trigger_touch = -1;
+		int trigger_near = -1; //!< l2_sensor / r2_sensor: how near the index finger is
 		int grip = -1;
-		std::vector<int> thumb;
+		int grip_touch = -1;
+		int grip_near = -1; //!< l1_sensor / r1_sensor: how near the middle finger is
+		int stick_touch = -1;
+		int button_a_touch = -1; //!< square / cross
+		int button_b_touch = -1; //!< triangle / circle
 	};
 
 	/*!
 	 * The hand skeleton, as Sony's driver has one per Sense (/input/skeleton/left|right, our profile's skeleton
-	 * inputs): partial tracking from the buttons (ALVR's bone tables, ovrn_hand_skeleton.hpp), both motion ranges
+	 * inputs): partial tracking from the Sense's finger sensors (ovrn_hand_skeleton.hpp), both motion ranges
 	 * set before the first frame so a game never reads a skeleton without bones.
 	 */
 	void
@@ -157,16 +172,24 @@ private:
 		m_skelIdx = SkeletonInputs{};
 		for (size_t i = 0; i < descs.size(); i++) {
 			const std::string &p = descs[i].path;
-			const bool stick_touch = p == "/input/left_stick/touch" || p == "/input/right_stick/touch";
 			if (p == "/input/l2/value" || p == "/input/r2/value") {
 				m_skelIdx.trigger = (int)i;
 			} else if (p == "/input/l2/touch" || p == "/input/r2/touch") {
 				m_skelIdx.trigger_touch = (int)i;
+			} else if (p == "/input/l2_sensor/value" || p == "/input/r2_sensor/value") {
+				m_skelIdx.trigger_near = (int)i;
 			} else if (p == "/input/l1/value" || p == "/input/r1/value") {
 				m_skelIdx.grip = (int)i;
-			} else if (stick_touch || p == "/input/square/touch" || p == "/input/triangle/touch" ||
-			           p == "/input/cross/touch" || p == "/input/circle/touch") {
-				m_skelIdx.thumb.push_back((int)i);
+			} else if (p == "/input/l1/touch" || p == "/input/r1/touch") {
+				m_skelIdx.grip_touch = (int)i;
+			} else if (p == "/input/l1_sensor/value" || p == "/input/r1_sensor/value") {
+				m_skelIdx.grip_near = (int)i;
+			} else if (p == "/input/left_stick/touch" || p == "/input/right_stick/touch") {
+				m_skelIdx.stick_touch = (int)i;
+			} else if (p == "/input/square/touch" || p == "/input/cross/touch") {
+				m_skelIdx.button_a_touch = (int)i;
+			} else if (p == "/input/triangle/touch" || p == "/input/circle/touch") {
+				m_skelIdx.button_b_touch = (int)i;
 			}
 		}
 		const bool left = m_hand == Hand::Left;
@@ -181,7 +204,8 @@ private:
 		}
 		m_skeleton.update(skel::HandInput{});
 		submitSkeleton();
-		log("ovrn: %s hand skeleton (from trigger, grip and thumb touches)\n", left ? "left" : "right");
+		log("ovrn: %s hand skeleton from the Sense's finger sensors: %s\n", left ? "left" : "right",
+		    m_skeleton.describe().c_str());
 	}
 
 	void

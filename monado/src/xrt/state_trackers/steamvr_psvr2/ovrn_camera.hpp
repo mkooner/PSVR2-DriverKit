@@ -8,7 +8,7 @@
  * Two ways to SteamVR, both fed from the same frames:
  *  - the published IVRCameraComponent (openvr_driver.h): SteamVR's frame buffers (SetCameraFrameBuffering) or our
  *    own, GetVideoStreamFrame, and the sink callback;
- *  - SteamVR's internal camera frame queue "/lighthouse/camera/raw_frames" (ovrn_openvr_internal.hpp), which is how
+ *  - SteamVR's internal camera frame queue "/lighthouse/camera/raw_frames" (ovrn_steamvr_internal.hpp), which is how
  *    PSVR2Toolkit gets the picture shown with SteamVR 2.x; used only when SteamVR hands the interfaces out.
  *
  * The headset driver calls back on its USB thread with the BC4 image pair; that only copies it. A worker thread
@@ -28,7 +28,7 @@
 
 #include "ovrn_backend.hpp"
 #include "ovrn_log.hpp"
-#include "ovrn_openvr_internal.hpp"
+#include "ovrn_steamvr_internal.hpp"
 
 #include "openvr_driver.h"
 
@@ -132,16 +132,16 @@ public:
 		p->SetFloatProperty(c, vr::Prop_CameraGlobalGain_Float, 1.0f);
 
 		vr::EVRInitError e = vr::VRInitError_None;
-		m_queue = static_cast<vr::internal::IVRBlockQueue *>(
-		    vr::VRDriverContext()->GetGenericInterface(vr::internal::IVRBlockQueue_Version, &e));
-		m_paths = static_cast<vr::internal::IVRPaths *>(
-		    vr::VRDriverContext()->GetGenericInterface(vr::internal::IVRPaths_Version, &e));
+		m_queue = static_cast<steamvr::FrameQueue *>(
+		    vr::VRDriverContext()->GetGenericInterface(steamvr::kFrameQueueVersion, &e));
+		m_paths = static_cast<steamvr::Paths *>(
+		    vr::VRDriverContext()->GetGenericInterface(steamvr::kPathsVersion, &e));
 		if (m_queue != nullptr && m_paths != nullptr &&
 		    m_queue->Create(&m_queueHandle, "/lighthouse/camera/raw_frames", (uint32_t)m_frameBytes, 512, 8) ==
-		        vr::internal::BlockQueueError_None) {
-			vr::internal::write_path(m_paths, m_queueHandle, "/width", (int32_t)m_w);
-			vr::internal::write_path(m_paths, m_queueHandle, "/height", (int32_t)m_h);
-			vr::internal::write_path(m_paths, m_queueHandle, "/format", (int32_t)vr::CVS_FORMAT_NV12);
+		        steamvr::QueueResult::Ok) {
+			steamvr::set_path(m_paths, m_queueHandle, "/width", (int32_t)m_w);
+			steamvr::set_path(m_paths, m_queueHandle, "/height", (int32_t)m_h);
+			steamvr::set_path(m_paths, m_queueHandle, "/format", (int32_t)vr::CVS_FORMAT_NV12);
 			m_watcher = std::thread(&Camera::watchLoop, this);
 		} else {
 			m_queue = nullptr;
@@ -507,7 +507,7 @@ private:
 		std::unique_lock<std::mutex> l(m_watchMutex);
 		while (!m_watchQuit) {
 			bool has = false;
-			const bool ok = m_queue->QueueHasReader(m_queueHandle, &has) == vr::internal::BlockQueueError_None;
+			const bool ok = m_queue->QueueHasReader(m_queueHandle, &has) == steamvr::QueueResult::Ok;
 			l.unlock();
 			readerCheck(ok && has, now_ns());
 			l.lock();
@@ -593,15 +593,15 @@ private:
 			vr::PropertyContainerHandle_t block;
 			void *buffer = nullptr;
 			if (m_queue->AcquireWriteOnlyBlock(m_queueHandle, &block, &buffer) ==
-			        vr::internal::BlockQueueError_None &&
+			        steamvr::QueueResult::Ok &&
 			    buffer != nullptr) {
 				decode(pair, static_cast<uint8_t *>(buffer));
-				vr::internal::write_path(m_paths, block, "/server_time_ticks", (uint64_t)exposure_ns);
-				vr::internal::write_path(m_paths, block, "/frame_sequence", (uint64_t)seq);
-				vr::internal::write_path(m_paths, block, "/frame_size", (int32_t)m_frameBytes);
-				vr::internal::write_path(m_paths, block, "/frame_time_monotonic", (double)(exposure_ns * 1e-9));
-				vr::internal::write_path(m_paths, block, "/delivery_rate", kRate);
-				vr::internal::write_path(m_paths, block, "/elapsed_time", 1.0 / kRate);
+				steamvr::set_path(m_paths, block, "/server_time_ticks", (uint64_t)exposure_ns);
+				steamvr::set_path(m_paths, block, "/frame_sequence", (uint64_t)seq);
+				steamvr::set_path(m_paths, block, "/frame_size", (int32_t)m_frameBytes);
+				steamvr::set_path(m_paths, block, "/frame_time_monotonic", (double)(exposure_ns * 1e-9));
+				steamvr::set_path(m_paths, block, "/delivery_rate", kRate);
+				steamvr::set_path(m_paths, block, "/elapsed_time", 1.0 / kRate);
 				m_queue->ReleaseWriteOnlyBlock(m_queueHandle, block);
 			}
 		}
@@ -650,8 +650,8 @@ private:
 	uint8_t m_lut[256];
 	float m_gamma = 0.5f;
 
-	vr::internal::IVRBlockQueue *m_queue = nullptr;
-	vr::internal::IVRPaths *m_paths = nullptr;
+	steamvr::FrameQueue *m_queue = nullptr;
+	steamvr::Paths *m_paths = nullptr;
 	vr::PropertyContainerHandle_t m_queueHandle = vr::k_ulInvalidPropertyContainer;
 
 	std::mutex m_controlMutex; //!< start / stop, from SteamVR's calls and the queue watcher

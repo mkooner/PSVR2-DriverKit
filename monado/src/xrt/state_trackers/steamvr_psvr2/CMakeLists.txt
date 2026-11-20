@@ -10,10 +10,11 @@ add_library(
 	ovrn_camera_fit.hpp
 	ovrn_controller.hpp
 	ovrn_device.hpp
+	ovrn_hand_skeleton.hpp
 	ovrn_hmd.hpp
 	ovrn_interface.h
 	ovrn_log.hpp
-	ovrn_openvr_internal.hpp
+	ovrn_steamvr_internal.hpp
 	ovrn_provider.cpp
 	ovrn_room.cpp
 	ovrn_room.hpp
@@ -21,7 +22,9 @@ add_library(
 	ovrn_room_state.hpp
 	)
 target_include_directories(st_ovrn INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(st_ovrn PRIVATE xrt-external-openvr xrt-external-bcdec xrt-interfaces aux_math aux_util)
+target_link_libraries(
+	st_ovrn PRIVATE xrt-external-openvr xrt-external-bcdec xrt-external-cjson xrt-interfaces aux_math aux_util
+	)
 
 # The room calibration measures the floor with a resting Sense controller's LED outline.
 if(XRT_BUILD_DRIVER_PSSENSE)

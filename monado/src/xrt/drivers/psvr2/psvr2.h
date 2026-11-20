@@ -170,6 +170,8 @@ struct psvr2_et_data
 
 	uint32_t last_remote_report_sample_time_us;
 	timepoint_ns last_remote_report_sample_time_ns;
+	//! Host monotonic time the last gaze packet was processed (0: none yet), for freshness checks.
+	timepoint_ns last_packet_host_ns;
 
 	bool unk_float_4_valid;
 	float unk_float_4;
