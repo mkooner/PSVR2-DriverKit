@@ -1,0 +1,105 @@
+{
+  "to_controller_type": "playstation_vr2_hand",
+  "layouts": [
+    {
+      "priority": 100,
+      "from_controller_type": "knuckles",
+      "simulate_controller_type": false,
+      "simulate_render_model": false,
+      "simulate_HMD": false,
+      "autoremappings": [],
+      "remappings": [
+        {
+          "from": {
+            "path": "/user/hand/left/input/trigger"
+          },
+          "to": {
+            "path": "/user/hand/left/input/trigger",
+            "parameters_mode": "copy"
+          },
+          "mirror": false
+        },
+        {
+          "from": {
+            "path": "/user/hand/left/input/grip"
+          },
+          "to": {
+            "path": "/user/hand/left/input/grip",
+            "parameters_mode": "copy"
+          },
+          "mirror": false
+        },
+        {
+          "from": {
+            "path": "/user/hand/right/input/trigger"
+          },
+          "to": {
+            "path": "/user/hand/right/input/trigger",
+            "parameters_mode": "copy"
+          },
+          "mirror": false
+        },
+        {
+          "from": {
+            "path": "/user/hand/right/input/grip"
+          },
+          "to": {
+            "path": "/user/hand/right/input/grip",
+            "parameters_mode": "copy"
+          },
+          "mirror": false
+        }
+      ]
+    },
+    {
+      "priority": 100,
+      "from_controller_type": "oculus_touch",
+      "simulate_controller_type": false,
+      "simulate_render_model": false,
+      "simulate_HMD": false,
+      "autoremappings": [],
+      "remappings": [
+        {
+          "from": {
+            "path": "/user/hand/left/input/trigger"
+          },
+          "to": {
+            "path": "/user/hand/left/input/trigger",
+            "parameters_mode": "copy"
+          },
+          "mirror": false
+        },
+        {
+          "from": {
+            "path": "/user/hand/left/input/grip"
+          },
+          "to": {
+            "path": "/user/hand/left/input/grip",
+            "parameters_mode": "copy"
+          },
+          "mirror": false
+        },
+        {
+          "from": {
+            "path": "/user/hand/right/input/trigger"
+          },
+          "to": {
+            "path": "/user/hand/right/input/trigger",
+            "parameters_mode": "copy"
+          },
+          "mirror": false
+        },
+        {
+          "from": {
+            "path": "/user/hand/right/input/grip"
+          },
+          "to": {
+            "path": "/user/hand/right/input/grip",
+            "parameters_mode": "copy"
+          },
+          "mirror": false
+        }
+      ]
+    }
+  ]
+}

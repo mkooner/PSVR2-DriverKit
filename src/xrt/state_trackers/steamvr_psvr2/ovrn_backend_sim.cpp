@@ -10,7 +10,9 @@
 #include <cstring>
 #include "os/os_time.h"
 #include "ovrn_backend.hpp"
+#include "ovrn_hand_joints.hpp"
 
+#include <atomic>
 #include <cmath>
 
 namespace ovrn {
@@ -101,7 +103,66 @@ public:
 	hasController(Hand hand) override
 	{
 		static const bool late = getenv("OVRN_SIM_LATE_LEFT") != nullptr;
+		if (simHands()) {
+			return false; // bare hands: the controllers are off
+		}
 		return !(late && hand == Hand::Left && m_frames < 5);
+	}
+
+	//! OVRN_SIM_HANDS=1 (tests): two tracked bare hands instead of the controllers.
+	static bool
+	simHands()
+	{
+		static const bool on = getenv("OVRN_SIM_HANDS") != nullptr && strcmp(getenv("OVRN_SIM_HANDS"), "1") == 0;
+		return on;
+	}
+
+	bool
+	hasHandTracking() override
+	{
+		return simHands();
+	}
+
+	/*!
+	 * The reference hand at rest (as OpenXR joints) held in front, left and right; pinching (thumb tip on the index
+	 * tip) every other 10 frames; the right hand lost for frames 20-24 (out of the cameras' view).
+	 */
+	bool
+	handJoints(Hand hand, int64_t at_ns, HandJoints *out) override
+	{
+		if (!simHands()) {
+			return false;
+		}
+		using namespace skel::detail;
+		*out = HandJoints();
+		const int frame = m_frames;
+		if (hand == Hand::Right && frame >= 20 && frame < 25) {
+			return true;
+		}
+		static const skel::JointSkeleton left(builtin_rest(true), true), right(builtin_rest(false), false);
+		skel::Joints j = (hand == Hand::Left ? left : right).openxr_frames_at_rest();
+		const bool pinch = (frame / 10) % 2 == 1;
+		if (pinch) {
+			j.pos[5] = j.pos[10];
+		}
+		const V at = simHandPosition(hand);
+		out->active = true;
+		out->timestamp_ns = at_ns;
+		for (int i = 0; i < HandJoints::kCount; i++) {
+			const V p = j.pos[i] + at;
+			out->joint[i].position = {p.x, p.y, p.z};
+			out->joint[i].orientation = {j.rot[i].x, j.rot[i].y, j.rot[i].z, j.rot[i].w};
+			out->joint_valid[i] = true;
+			out->radius[i] = 0.008f;
+		}
+		return true;
+	}
+
+	//! Where the simulated hands are held (their skeleton root, before the joints' offsets).
+	static skel::detail::V
+	simHandPosition(Hand hand)
+	{
+		return {hand == Hand::Left ? -0.2f : 0.2f, 1.2f, -0.4f};
 	}
 
 	DeviceInfo
@@ -213,7 +274,7 @@ public:
 		return true;
 	}
 
-	int m_frames = 0; //!< RunFrame thread
+	std::atomic<int> m_frames{0}; //!< RunFrame thread (read by the pose thread for the simulated hands)
 };
 
 } // namespace

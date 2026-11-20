@@ -241,6 +241,7 @@ struct Component
 	int kind; //!< 0 boolean, 1 scalar, 2 haptic
 	float value;
 	int updates;
+	float min_value = 1e9f, max_value = -1e9f;
 };
 std::vector<Component> g_components; //!< handle = index + 1
 
@@ -249,6 +250,7 @@ struct Skeleton
 {
 	PropertyContainerHandle_t container;
 	std::string path, skeleton_path;
+	EVRSkeletalTrackingLevel level = VRSkeletalTracking_Estimated;
 	int with_controller = 0, without_controller = 0;
 	std::string problem;
 };
@@ -305,6 +307,8 @@ struct FakeInput : IVRDriverInput
 		}
 		g_components[h - 1].value = v;
 		g_components[h - 1].updates++;
+		g_components[h - 1].min_value = std::min(g_components[h - 1].min_value, v);
+		g_components[h - 1].max_value = std::max(g_components[h - 1].max_value, v);
 		return VRInputError_None;
 	}
 	EVRInputError CreateBooleanComponent(PropertyContainerHandle_t c, const char *n, VRInputComponentHandle_t *h) override { return add(c, n, 0, h); }
@@ -313,10 +317,10 @@ struct FakeInput : IVRDriverInput
 	EVRInputError UpdateScalarComponent(VRInputComponentHandle_t h, float v, double) override { return set(h, v); }
 	EVRInputError CreateHapticComponent(PropertyContainerHandle_t c, const char *n, VRInputComponentHandle_t *h) override { return add(c, n, 2, h); }
 	EVRInputError
-	CreateSkeletonComponent(PropertyContainerHandle_t c, const char *name, const char *skeleton, const char *, EVRSkeletalTrackingLevel, const VRBoneTransform_t *, uint32_t, VRInputComponentHandle_t *h) override
+	CreateSkeletonComponent(PropertyContainerHandle_t c, const char *name, const char *skeleton, const char *, EVRSkeletalTrackingLevel level, const VRBoneTransform_t *, uint32_t, VRInputComponentHandle_t *h) override
 	{
 		std::lock_guard<std::mutex> l(g_mutex);
-		g_skeletons.push_back({c, name, skeleton});
+		g_skeletons.push_back({c, name, skeleton, level});
 		*h = 100000 + g_skeletons.size() - 1;
 		return VRInputError_None;
 	}
@@ -439,6 +443,19 @@ prop(uint32_t device, int id, T *out)
 	return true;
 }
 
+//! A string property ("" if not set).
+std::string
+sprop(uint32_t device, int id)
+{
+	std::lock_guard<std::mutex> l(g_mutex);
+	auto c = g_props.find(1000 + device);
+	if (c == g_props.end() || c->second.find(id) == c->second.end()) {
+		return {};
+	}
+	const std::vector<uint8_t> &b = c->second[id];
+	return std::string(b.begin(), std::find(b.begin(), b.end(), (uint8_t)0));
+}
+
 size_t
 pose_count(uint32_t device)
 {
@@ -519,6 +536,10 @@ main(int argc, char **argv)
 	if (argc > 1 && !strcmp(argv[1], "--late")) {
 		setenv("OVRN_SIM_LATE_LEFT", "1", 1);
 	}
+	const bool hands = argc > 1 && !strcmp(argv[1], "--hands");
+	if (hands) {
+		setenv("OVRN_SIM_HANDS", "1", 1);
+	}
 	const char *path = OVRN_DRIVER_PATH;
 	void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
 	if (lib == nullptr) {
@@ -598,6 +619,100 @@ main(int argc, char **argv)
 			}
 			check(!notes, "see-through: the driver's notes taken out again");
 		}
+		check(dlclose(lib) == 0, "the driver unloads");
+		printf("%s\n", g_fails ? "FAILED" : "all checks passed");
+		return g_fails ? 1 : 0;
+	}
+
+	/*
+	 * --hands: the controllers off and two tracked bare hands (the simulated backend's hand tracking). Each hand is
+	 * its own device (playstation_vr2_hand) with a full skeleton updated every frame in both motion ranges, pinch
+	 * on the trigger, its palm as the pose, which stays put while the head moves.
+	 */
+	if (hands) {
+		check(provider->Init(&context) == VRInitError_None, "hands: Init succeeds");
+		std::vector<Added> added;
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			added = g_added;
+		}
+		const bool three = added.size() == 3;
+		check(three && added[0].cls == TrackedDeviceClass_HMD && added[1].cls == TrackedDeviceClass_Controller &&
+		          added[2].cls == TrackedDeviceClass_Controller,
+		      "hands: the headset and two hand devices (controller class), no Sense controllers");
+		if (!three) {
+			provider->Cleanup();
+			printf("FAILED\n");
+			return 1;
+		}
+		for (uint32_t i = 0; i < added.size(); i++) {
+			check(added[i].driver->Activate(i) == VRInitError_None, "hands: Activate succeeds");
+		}
+		int32_t role_l = 0, role_r = 0;
+		check(prop(1, Prop_ControllerRoleHint_Int32, &role_l) && role_l == TrackedControllerRole_LeftHand &&
+		          prop(2, Prop_ControllerRoleHint_Int32, &role_r) && role_r == TrackedControllerRole_RightHand,
+		      "hands: left and right hand roles");
+		check(sprop(1, Prop_ControllerType_String) == "playstation_vr2_hand" &&
+		          sprop(2, Prop_ControllerType_String) == "playstation_vr2_hand" &&
+		          sprop(1, Prop_InputProfilePath_String) == "{monado_psvr2}/input/playstation_vr2_hand_profile.json",
+		      "hands: their own device type and input profile (not another controller's)");
+		check(added[1].serial != added[2].serial && added[1].serial.find("-hand-left") != std::string::npos,
+		      "hands: their own serials");
+		DriverPose_t first = {};
+		for (int i = 0; i < 40; i++) {
+			provider->RunFrame();
+			sleep_ms(3);
+			if (i == 2) {
+				std::lock_guard<std::mutex> l(g_mutex);
+				first = g_poses[1].last;
+			}
+		}
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			bool paths = g_skeletons.size() == 2, full = true, valid = true, ranges = true;
+			int updates[2] = {0, 0};
+			for (const Skeleton &k : g_skeletons) {
+				const bool left = k.container == 1001;
+				paths = paths && k.path == (left ? "/input/skeleton/left" : "/input/skeleton/right") &&
+				        k.skeleton_path == (left ? "/skeleton/hand/left" : "/skeleton/hand/right");
+				full = full && k.level == VRSkeletalTracking_Full;
+				valid = valid && k.problem.empty();
+				ranges = ranges && k.with_controller == k.without_controller;
+				updates[left ? 0 : 1] = k.with_controller;
+				if (!k.problem.empty()) {
+					printf("    skeleton %s: %s\n", k.path.c_str(), k.problem.c_str());
+				}
+			}
+			printf("    skeleton updates: left %d, right %d (40 frames, the right hand lost for 5)\n", updates[0],
+			       updates[1]);
+			check(paths, "hands: each hand has its skeleton (/input/skeleton/left|right, /skeleton/hand/left|right)");
+			check(full, "hands: the skeletons are full tracking (VRSkeletalTracking_Full)");
+			check(valid, "hands: every skeleton pose has 31 valid bones");
+			check(ranges && updates[0] >= 40 && updates[1] >= 35 && updates[1] < updates[0],
+			      "hands: both motion ranges every frame the hand is tracked (none while it is lost)");
+			float pinch_min = 1e9f, pinch_max = -1e9f, click_max = -1e9f;
+			for (const Component &c : g_components) {
+				if (c.container == 1001 && c.path == "/input/trigger/value") {
+					pinch_min = c.min_value;
+					pinch_max = c.max_value;
+				}
+				if (c.container == 1001 && c.path == "/input/trigger/click") {
+					click_max = c.max_value;
+				}
+			}
+			check(pinch_min < 0.1f && pinch_max > 0.99f && click_max == 1.0f,
+			      "hands: a pinch (thumb tip on the index tip) pulls the trigger, open it is released");
+			const DriverPose_t &last = g_poses[1].last;
+			check(last.poseIsValid && last.deviceIsConnected && last.vecPosition[0] < 0.0 &&
+			          std::fabs(last.vecPosition[1] - 1.2) < 0.15,
+			      "hands: the left hand's pose is valid, at the left, where it is held");
+			const double moved = std::hypot(last.vecPosition[0] - first.vecPosition[0],
+			                                last.vecPosition[1] - first.vecPosition[1],
+			                                last.vecPosition[2] - first.vecPosition[2]);
+			check(first.poseIsValid && moved < 1e-6,
+			      "hands: a hand held still stays put while the head moves (not coupled to the head)");
+		}
+		provider->Cleanup();
 		check(dlclose(lib) == 0, "the driver unloads");
 		printf("%s\n", g_fails ? "FAILED" : "all checks passed");
 		return g_fails ? 1 : 0;

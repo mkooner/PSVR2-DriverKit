@@ -252,3 +252,48 @@ TEST_CASE("hand joints: invalid joints take their rest pose, an invalid wrist gi
 		CHECK_FALSE(js.convert(j, out));
 	}
 }
+
+#include "ovrn_hand_gestures.hpp"
+
+TEST_CASE("hand gestures: open hand, fist and pinch from the joints")
+{
+	for (bool left : {true, false}) {
+		JointSkeleton js(builtin_rest(left), left);
+		const Joints open = js.openxr_frames_at_rest();
+		const float radius[kJointCount] = {};
+		const Gestures g_open = gestures(open, radius);
+		CHECK(g_open.pinch < 0.1f);
+		CHECK(g_open.grab < 0.1f);
+
+		// A fist: every finger's three joints flexed 75 degrees the OpenXR way (about each joint's -X).
+		Joints fist = open;
+		for (int f = 1; f < 5; f++) {
+			for (int b = kFingerFirst[f] + 1; b < kTip[f]; b++) {
+				const Q flex = about(rotate(fist.rot[b], V{1, 0, 0}), deg(-75));
+				for (int i = b + 1; i <= kTip[f]; i++) {
+					fist.pos[i] = fist.pos[b] + rotate(flex, fist.pos[i] - fist.pos[b]);
+				}
+				for (int i = b; i <= kTip[f]; i++) {
+					fist.rot[i] = normalized(flex * fist.rot[i]);
+				}
+			}
+		}
+		const Gestures g_fist = gestures(fist, radius);
+		CHECK(g_fist.grab > 0.9f);
+		for (int f = 1; f < 5; f++) {
+			CHECK(g_fist.curl[f] > 0.8f);
+		}
+
+		// A pinch: the thumb tip on the index tip.
+		Joints pinch = open;
+		pinch.pos[5] = pinch.pos[10];
+		const Gestures g_pinch = gestures(pinch, radius);
+		CHECK(g_pinch.pinch > 0.99f);
+		CHECK(g_pinch.grab < 0.1f);
+		// clicks with hysteresis
+		CHECK(click(0.9f, false));
+		CHECK_FALSE(click(0.8f, false));
+		CHECK(click(0.7f, true));
+		CHECK_FALSE(click(0.6f, true));
+	}
+}
