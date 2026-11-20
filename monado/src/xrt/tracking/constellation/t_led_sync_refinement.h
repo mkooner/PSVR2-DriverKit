@@ -596,6 +596,13 @@ t_led_sync_refinement_init(struct t_led_sync_refinement *refinement,
 void
 t_led_sync_refinement_destroy(struct t_led_sync_refinement *refinement);
 
+/*!
+ * Back to the starting state (as just after init), keeping the options and the mutex: for a controller that
+ * disconnected or reconnected. Gives the count calibration turn back. Takes the refinement's lock.
+ */
+void
+t_led_sync_refinement_restart(struct t_led_sync_refinement *refinement);
+
 void
 t_led_sync_push_timing_event(struct t_led_sync_refinement *refinement,
                              const struct t_timing_event_camera_exposure_start *event);

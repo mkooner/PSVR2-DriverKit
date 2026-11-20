@@ -59,6 +59,7 @@
 #define PSSENSE_TRACE(p, ...) U_LOG_XDEV_IFL_T(&p->base, p->log_level, __VA_ARGS__)
 #define PSSENSE_DEBUG(p, ...) U_LOG_XDEV_IFL_D(&p->base, p->log_level, __VA_ARGS__)
 #define PSSENSE_DEBUG_HEX(p, data, data_size) U_LOG_XDEV_IFL_D_HEX(&p->base, p->log_level, data, data_size)
+#define PSSENSE_INFO(p, ...) U_LOG_XDEV_IFL_I(&p->base, p->log_level, __VA_ARGS__)
 #define PSSENSE_WARN(p, ...) U_LOG_XDEV_IFL_W(&p->base, p->log_level, __VA_ARGS__)
 #define PSSENSE_ERROR(p, ...) U_LOG_XDEV_IFL_E(&p->base, p->log_level, __VA_ARGS__)
 
@@ -307,6 +308,8 @@ struct pssense_device
 		uint64_t device_ticks_total;
 
 		uint32_t last_sent_host_timestamp_us;
+		//! After a reconnect: the next report's tick counters only re-anchor, so timestamps keep going forward.
+		bool resume_ticks;
 		//! When the report carrying the last LED sync sample went out, for the round trip stats.
 		timepoint_ns last_led_sample_send_ns;
 		struct
@@ -890,6 +893,12 @@ pssense_handle_packet(struct pssense_device *pssense,
 
 	// Update IMU data
 	uint32_t imu_ticks = __le32_to_cpu(data->imu_ticks);
+	if (pssense->timing.resume_ticks) {
+		// The first report after a reconnect: one tick on from where the old connection ended.
+		pssense->timing.imu_ticks_last = imu_ticks - 1;
+		pssense->timing.device_ticks_last = __le32_to_cpu(data->device_timestamp_ticks) - 1;
+		pssense->timing.resume_ticks = false;
+	}
 	int64_t imu_ticks_delta = imu_ticks - pssense->timing.imu_ticks_last;
 	if (imu_ticks_delta >= 0) {
 		pssense->timing.imu_ticks_total += imu_ticks_delta;
@@ -1434,6 +1443,9 @@ pssense_run_thread(void *ptr)
 		pssense->disconnected = true;
 		PSSENSE_ERROR(pssense, "Controller disconnected (read thread stopped: %d), reporting it untracked",
 		              result);
+		// Its LED sync starts over, and it gives back the count calibration turn so the other controller can
+		// calibrate meanwhile (it would wait for the whole outage otherwise).
+		t_led_sync_refinement_restart(&pssense->tracking.led_sync_refinement);
 	}
 
 	os_thread_helper_unlock(&pssense->controller_thread);
@@ -2552,6 +2564,82 @@ pssense_T_steamvrroot_xrgrip(const struct pssense_device *pssense)
 	    .orientation = quat_from_x_rot(DEG_TO_RAD(20.6)),
 	    .position = {.x = sx * .007, .y = -.00182941, .z = .1019482},
 	};
+}
+
+bool
+pssense_is_disconnected(struct xrt_device *xdev)
+{
+	struct pssense_device *pssense = from_device(xdev);
+	os_thread_helper_lock(&pssense->controller_thread);
+	const bool d = pssense->disconnected;
+	os_thread_helper_unlock(&pssense->controller_thread);
+	return d;
+}
+
+int
+pssense_reconnect(struct xrt_device *xdev, struct xrt_prober *xp, struct xrt_prober_device *xpdev)
+{
+	struct pssense_device *pssense = from_device(xdev);
+	if (!pssense_is_disconnected(xdev)) {
+		return 0;
+	}
+	struct h_hid_device *hid = NULL;
+	const int iface = xpdev->bus == XRT_BUS_TYPE_USB ? 2 : 0;
+	if (xrt_prober_open_hid_interface(xp, xpdev, iface, &hid) != 0 || hid == NULL) {
+		return -1;
+	}
+
+	/*
+	 * The read thread already ended (that is what marked it disconnected): join it. The helper stays (its mutex is
+	 * what the pose and tracker threads lock); a stopped helper can be started again.
+	 */
+	os_thread_helper_stop_and_wait(&pssense->controller_thread);
+	// Outside the device lock: the LED sync has its own.
+	t_led_sync_refinement_restart(&pssense->tracking.led_sync_refinement);
+
+	os_thread_helper_lock(&pssense->controller_thread);
+	struct h_hid_device *old = pssense->hid;
+	pssense->hid = hid;
+
+	/*
+	 * A fresh link: the controller-to-host clock mapping and LED timing are learned again, the tick totals continue
+	 * (so every timestamp the tracker already has stays in the past), rest detection levels again. The device, its
+	 * LED model, calibration and tracker registration stay as they were.
+	 */
+	const bool clock_long = pssense->timing.clock.use_long, imu_clock_long = pssense->timing.imu_clock.use_long;
+	const uint64_t imu_total = pssense->timing.imu_ticks_total, device_total = pssense->timing.device_ticks_total;
+	const timepoint_ns imu_time = pssense->timing.latest_imu_time_ns, device_time = pssense->timing.latest_device_time_ns;
+	memset(&pssense->timing, 0, sizeof(pssense->timing));
+	pssense->timing.clock.use_long = clock_long;
+	pssense->timing.imu_clock.use_long = imu_clock_long;
+	pssense->timing.imu_ticks_total = imu_total;
+	pssense->timing.device_ticks_total = device_total;
+	pssense->timing.latest_imu_time_ns = imu_time;
+	pssense->timing.latest_device_time_ns = device_time;
+	pssense->timing.resume_ticks = true;
+	pssense->tracking.led_map_valid = false;
+	pssense->tracking.sync_phase = LED_SYNC_PHASE_PRESCAN;
+	pssense->tracking.period_id =
+	    DURATION_NS_TO_PERIOD_ID(pssense->tracking.led_sync_refinement.options.initial_blink_duration_ns);
+	pssense_imu_rest_window_reset(&pssense->tracking.rest, (int64_t)os_monotonic_get_ns());
+	pssense->disconnected = false;
+	os_thread_helper_unlock(&pssense->controller_thread);
+	if (old != NULL) {
+		h_hid_destroy(old);
+	}
+
+	if (os_thread_helper_start(&pssense->controller_thread, pssense_run_thread, pssense) != 0) {
+		PSSENSE_ERROR(pssense, "Reconnected, but the read thread didn't start");
+		os_thread_helper_lock(&pssense->controller_thread);
+		pssense->disconnected = true;
+		os_thread_helper_unlock(&pssense->controller_thread);
+		return -1;
+	}
+	if (debug_get_bool_option_pssense_pc_polling_rate() && !pssense_set_pc_polling_rate(pssense)) {
+		PSSENSE_WARN(pssense, "Reconnected, but setting the PC polling rate failed");
+	}
+	PSSENSE_INFO(pssense, "Controller reconnected (%s): tracking and LED sync start again", pssense->base.serial);
+	return 1;
 }
 
 void

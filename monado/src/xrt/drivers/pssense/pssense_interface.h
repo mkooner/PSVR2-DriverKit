@@ -85,6 +85,27 @@ pssense_get_grip_outline(struct xrt_device *xdev, struct xrt_vec3 *out_points, s
 void
 pssense_get_grip_in_steamvr_root(struct xrt_device *xdev, struct xrt_pose *out_pose);
 
+struct xrt_prober;
+struct xrt_prober_device;
+
+/*!
+ * Whether the controller's connection ended (Bluetooth dropped, turned off); it then reports itself untracked.
+ *
+ * @ingroup drv_pssense
+ */
+bool
+pssense_is_disconnected(struct xrt_device *xdev);
+
+/*!
+ * Give a disconnected controller its new connection (the same controller found again by the prober): the device
+ * stays, with its tracking registration, and its read thread, clock mapping, rest detection and LED sync start again.
+ * Returns 1 when reconnected, 0 when it wasn't disconnected, < 0 on failure.
+ *
+ * @ingroup drv_pssense
+ */
+int
+pssense_reconnect(struct xrt_device *xdev, struct xrt_prober *xp, struct xrt_prober_device *xpdev);
+
 /*!
  * @dir drivers/pssense
  *

@@ -599,3 +599,81 @@ TEST_CASE("ovrd_room chaperone file: a room drawn in the driver's old file moves
 	CHECK(note == "SteamVR's file already has a room drawn there; kept");
 	CHECK(slurp(steamvr) == before);
 }
+
+TEST_CASE("ovrd_room chaperone file: a room drawn before anchoring moves into the saved room at the capture")
+{
+	const std::string dir = temp_dir();
+	const std::string path = dir + "/chaperone_info.vrchap";
+	std::string note;
+
+	// The saved room has the driver's plain origin; nothing drawn in the session universe yet: nothing moves.
+	bool has_room = true;
+	std::string err;
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 0.0f, "5022", "5023"));
+	const xrt_vec3 shift = {0.0f, -0.95f, 0.0f}; // a new room frame: the raw floor (0.95 m) moved to y = 0
+	// The session universe starts with the driver's 2 m square (SteamVR rewrites the file without our marker keys, so
+	// it's recognised by its geometry): not a drawn room, nothing moves.
+	CHECK_FALSE(ovrd_room_universe_drawn(path, "5023", 2.0f));
+	CHECK_FALSE(ovrd_room_move_universe(path, "5023", "5022", shift, 2.0f, &note));
+	CHECK(note == "no room drawn in this session's universe");
+	CHECK(ovrd_room_universe_drawn(path, "5023", 0.0f)); // without a default square the square counts
+
+	// The room drawn on 2026-11-19 at 23:06 in the session universe: its origins as SteamVR wrote them.
+	{
+		cJSON *doc = cJSON_Parse(slurp(path).c_str());
+		REQUIRE(doc != nullptr);
+		cJSON *u = find_universe(doc, "5023");
+		REQUIRE(u != nullptr);
+		cJSON *drawn = cJSON_Parse(universe_with_walls({{-0.99f, -0.99f}, {-0.99f, 0.99f}, {0.99f, 0.99f}, {0.99f, -0.99f}},
+		                                               1.414f, 1.414f)
+		                               .c_str());
+		cJSON_ReplaceItemInObject(drawn, "universeID", cJSON_CreateString("5023"));
+		cJSON_ReplaceItemInObject(drawn, "standing", cJSON_Parse("{\"translation\":[-1.0023458,-0.982480407,0.155073047],"
+		                                                         "\"yaw\":2.16645098}"));
+		cJSON_ReplaceItemInObject(drawn, "seated", cJSON_Parse("{\"translation\":[-1.03729105,-2.28991246,0.425276488],"
+		                                                       "\"yaw\":1.42500734}"));
+		cJSON_ReplaceItemViaPointer(cJSON_GetObjectItem(doc, "universes"), u, drawn);
+		char *text = cJSON_Print(doc);
+		std::ofstream f(path);
+		f << text;
+		cJSON_free(text);
+		cJSON_Delete(doc);
+	}
+	CHECK(ovrd_room_universe_drawn(path, "5023", 2.0f));
+	REQUIRE(ovrd_room_move_universe(path, "5023", "5022", shift, 2.0f, &note));
+	CHECK(note == "room moved");
+
+	ovrd_room_universe_info saved, session;
+	REQUIRE(ovrd_room_read_universe(path, "5022", &saved));
+	REQUIRE(ovrd_room_read_universe(path, "5023", &session));
+	CHECK(saved.walls == 4);
+	CHECK(saved.area_m2 == Approx(session.area_m2));
+	CHECK(saved.play_width == Approx(1.414f));
+
+	// Every physical point keeps its place in the room: a head seen at raw p is reported at p + shift after the
+	// capture, and SteamVR's origin maps it as R(yaw) (p + translation), so p + translation must be unchanged.
+	cJSON *doc = cJSON_Parse(slurp(path).c_str());
+	REQUIRE(doc != nullptr);
+	for (const char *origin : {"standing", "seated"}) {
+		cJSON *before = cJSON_GetObjectItem(find_universe(doc, "5023"), origin);
+		cJSON *after = cJSON_GetObjectItem(find_universe(doc, "5022"), origin);
+		REQUIRE(before != nullptr);
+		REQUIRE(after != nullptr);
+		CHECK(cJSON_GetObjectItem(after, "yaw")->valuedouble == Approx(cJSON_GetObjectItem(before, "yaw")->valuedouble));
+		const float head[3] = {1.019f, 2.300f, -0.155f}; // the head at 23:06:09 (raw)
+		const float reported[3] = {head[0] + shift.x, head[1] + shift.y, head[2] + shift.z};
+		for (int i = 0; i < 3; i++) {
+			const double tb = cJSON_GetArrayItem(cJSON_GetObjectItem(before, "translation"), i)->valuedouble;
+			const double ta = cJSON_GetArrayItem(cJSON_GetObjectItem(after, "translation"), i)->valuedouble;
+			CHECK(reported[i] + ta == Approx(head[i] + tb).margin(1e-5));
+		}
+	}
+	CHECK(std::string(cJSON_GetObjectItem(find_universe(doc, "5022"), "universeID")->valuestring) == "5022");
+	cJSON_Delete(doc);
+
+	// The next start's prepare keeps the moved room (a drawn room is never replaced) and resets the session one.
+	REQUIRE(ovrd_room_prepare_chaperone(path, 2.0f, &has_room, &err, 0.0f, "5022", "5023"));
+	CHECK(has_room);
+	REQUIRE(ovrd_room_read_universe(path, "5022", &saved));
+	CHECK(saved.walls == 4);
+}

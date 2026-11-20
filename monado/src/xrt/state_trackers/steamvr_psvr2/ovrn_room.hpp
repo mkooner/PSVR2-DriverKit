@@ -246,6 +246,32 @@ bool
 ovrd_room_migrate_universe(const std::string &from, const std::string &to, const char *universe, std::string *out_note);
 
 /*!
+ * Move a room drawn in Room Setup in universe @p from_universe of SteamVR's chaperone file @p path into
+ * @p to_universe (replacing what is there), for a session room that becomes the saved room when the floor capture
+ * anchors it. The anchoring moves every pose by @p shift (no turn: a new room frame is the raw frame with the floor
+ * moved), so the origins' translations move by -@p shift and the walls stay where they were drawn. SteamVR's
+ * origins map tracking to origin as p_origin = R(yaw) (p + translation) (checked against the 2026-11-19 room and head
+ * path), so a shift without a turn changes only the translation. Atomic, never over a concurrent SteamVR write.
+ * Returns true when moved; @p out_note says what happened.
+ */
+bool
+ovrd_room_move_universe(const std::string &path,
+                        const char *from_universe,
+                        const char *to_universe,
+                        const struct xrt_vec3 &shift,
+                        float default_size,
+                        std::string *out_note);
+
+/*!
+ * Whether universe @p universe of the chaperone file holds a room drawn in Room Setup: a play area or walls that are
+ * neither the driver's rectangle nor the default square of @p default_size the session universe starts with (compared
+ * by geometry: SteamVR drops the driver's own keys when it rewrites the file). @p default_size 0: no default square.
+ * ovrd_room_move_universe moves only such a room.
+ */
+bool
+ovrd_room_universe_drawn(const std::string &path, const char *universe, float default_size);
+
+/*!
  * One universe of a chaperone file as SteamVR uses it, and what is wrong with it. collision_bounds are quads of four
  * points (bottom, top, top, bottom: SteamVR's own files) relative to the setup-standing origin, which is the standing
  * origin when there is no setup_standing2; the floor is y = 0 there.

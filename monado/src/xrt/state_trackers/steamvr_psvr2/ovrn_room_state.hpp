@@ -103,6 +103,7 @@ public:
 	{
 		m_room_universe = room_universe;
 		m_session_universe = session_universe;
+		m_session_size = session_size;
 		m_published_universe = session_universe;
 		m_enabled = debug_get_bool_option_ovrd_room();
 		if (!m_enabled) {
@@ -259,6 +260,7 @@ public:
 			if (mtime != m_chaperone_mtime) {
 				m_chaperone_mtime = mtime;
 				log_universe("SteamVR changed the chaperone file", m_published_universe);
+				note_session_room(); // also when the commit event came before SteamVR's write
 			}
 		}
 		if (now - m_last_state_log_ns > 30 * U_TIME_1S_IN_NS) {
@@ -308,7 +310,7 @@ public:
 		std::string messages;
 		OvrdRoomCapture::Result result =
 		    m_capture.feed(create_held, grip, outline, outline_count, outline_radius, head_valid ? &head : nullptr,
-		                   m_last_reset_ns, m_have_room ? &m_room.axis : nullptr, now, &messages);
+		                   m_last_reset_ns, matches_saved_room() ? &m_room.axis : nullptr, now, &messages);
 		size_t pos = 0;
 		while (pos < messages.size()) {
 			size_t nl = messages.find('\n', pos);
@@ -340,9 +342,10 @@ public:
 			         (unsigned long long)m_room_universe);
 			return false;
 		}
-		ovrd_log("Room: Room Setup started before the room was anchored: a room drawn now is for this session only. "
-		         "To keep it, first put the left controller on its floor mark, crouch next to it and hold Create "
-		         "for %.1f s (short buzz), then draw the room\n",
+		ovrd_log("Room: Room Setup started before the room was anchored: the room drawn is kept for this session. To "
+		         "keep it for good, anchor it afterwards: put the left controller on a floor spot you can find again "
+		         "(your floor mark), crouch next to it and hold Create for %.1f s (short buzz); the room then moves "
+		         "into the saved room\n",
 		         OvrdRoomCapture::HOLD_NS / 1e9);
 		return true;
 	}
@@ -353,6 +356,7 @@ public:
 	{
 		if (m_enabled) {
 			log_universe("Room Setup committed", m_published_universe);
+			note_session_room();
 		}
 	}
 
@@ -378,6 +382,34 @@ private:
 			return 0;
 		}
 		return (int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+	}
+
+	/*!
+	 * A room drawn in this session's universe before anchoring (2026-11-19: three rooms drawn that way, all lost at
+	 * the next start). The next floor capture then starts a new room frame and moves it into the saved room.
+	 */
+	void
+	note_session_room()
+	{
+		if (m_anchored || m_published_universe != m_session_universe) {
+			return;
+		}
+		const std::string sid = std::to_string(m_session_universe);
+		if (ovrd_room_universe_drawn(m_chaperone_path, sid.c_str(), m_session_size)) {
+			if (!m_session_room_drawn) {
+				ovrd_log("Room: a room was drawn in this session's universe %llu; anchor it (floor capture) to keep "
+				         "it: it then replaces the saved room\n",
+				         (unsigned long long)m_session_universe);
+			}
+			m_session_room_drawn = true;
+		}
+	}
+
+	//! The capture is matched to the saved room (its anchor and axis) unless a new room was drawn this session.
+	bool
+	matches_saved_room() const
+	{
+		return m_have_room && !m_session_room_drawn;
 	}
 
 	//! What universe @p id of the chaperone file holds, and anything wrong with it.
@@ -431,12 +463,32 @@ private:
 		float heading = capture.yaw;
 		float below_head = m_capture.captured_below_head();
 		ovrd_room_yaw_pose anchor;
+		const bool fresh = !matches_saved_room();
 		ovrd_room_transform T =
-		    ovrd_room_transform_from_capture(capture, m_have_room ? &m_room.anchor : nullptr, &anchor);
+		    ovrd_room_transform_from_capture(capture, fresh ? nullptr : &m_room.anchor, &anchor);
+
+		/*
+		 * A room drawn this session: the new room frame is the raw frame with the floor moved (no turn), so the
+		 * drawn room moves into the saved universe with its origins shifted the same way, before SteamVR is
+		 * switched to it (it reads the universe from the file then).
+		 */
+		bool moved_room = false;
+		if (m_session_room_drawn) {
+			std::string note;
+			const std::string from = std::to_string(m_session_universe), to = std::to_string(m_room_universe);
+			moved_room = ovrd_room_move_universe(m_chaperone_path, from.c_str(), to.c_str(), T.translation,
+			                                     m_session_size, &note);
+			ovrd_log("Room: the room drawn this session %s the saved room (universe %llu): %s\n",
+			         moved_room ? "now is" : "could NOT become", (unsigned long long)m_room_universe, note.c_str());
+			if (moved_room) {
+				log_universe("saved room after the move", m_room_universe);
+			}
+			m_session_room_drawn = false;
+		}
 
 		int64_t now_s = (int64_t)time(nullptr);
 		ovrd_room_anchor room = m_room;
-		if (!m_have_room) {
+		if (fresh) {
 			room.created_unix_s = now_s;
 			room.captures = 0;
 		}
@@ -449,7 +501,7 @@ private:
 		ovrd_log("Room: captured: floor %.3f m below the head (raw floor y %.3f), controller at %.3f %.3f heading "
 		         "%.1f deg; %s; room transform turn %.1f deg, shift %.3f %.3f %.3f%s\n",
 		         below_head, floor_y, capture.position.x, capture.position.z, heading * 57.29578f,
-		         m_have_room ? "matched to the saved room" : "new room frame",
+		         !fresh ? "matched to the saved room" : moved_room ? "new room frame for the room drawn this session" : "new room frame",
 		         2.0f * atan2f(T.rotation.y, T.rotation.w) * 57.29578f, T.translation.x, T.translation.y,
 		         T.translation.z, saved ? "" : " (saving the room file FAILED, it won't persist)");
 
@@ -531,6 +583,8 @@ private:
 	bool m_have_room = false;
 	ovrd_room_anchor m_room = {};
 	bool m_anchored = false;
+	bool m_session_room_drawn = false;
+	float m_session_size = 0.0f; //!< the default square the session universe starts with
 	uint64_t m_published_universe = UNIVERSE_SESSION;
 	vr::PropertyContainerHandle_t m_containers[8] = {};
 	size_t m_container_count = 0;
