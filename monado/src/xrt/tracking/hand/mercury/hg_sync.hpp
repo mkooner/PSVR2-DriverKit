@@ -199,6 +199,8 @@ struct keypoint_estimation_run_info
 
 struct ht_view
 {
+	//! Next zoomed-in detection tile to look at (detection_tiles_per_frame of them per frame, cycling).
+	uint32_t tile_cursor = 0;
 	HandTracking *hgt;
 	onnx_state detection;
 	onnx_state keypoint[2];
@@ -293,6 +295,10 @@ public:
 
 	// Used to decide whether to run the keypoint estimator/nonlinear optimizer.
 	bool this_frame_hand_detected[2] = {false, false};
+	//! Why a hand isn't tracked this frame (diagnosis, logged at trace level per frame); NULL: no reason noted.
+	const char *frame_note[2] = {NULL, NULL};
+	//! The reason a view was dropped for a hand during the previous frame's prediction or keypoints (diagnosis).
+	const char *view_drop_note[2] = {NULL, NULL};
 
 	// Used to determine pose-predicted regions of interest. Contains the last 2 hand keypoint positions, or less
 	// if the hand has just started being tracked.

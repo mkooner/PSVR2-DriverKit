@@ -9,6 +9,7 @@
 
 #include "ovrn_backend.hpp"
 #include "ovrn_controller.hpp"
+#include "ovrn_hand.hpp"
 #include "ovrn_hmd.hpp"
 #include "ovrn_interface.h"
 #include "ovrn_log.hpp"
@@ -60,10 +61,12 @@ public:
 				addController(hand);
 			}
 		}
+		addHandsIfTracked();
 		m_universe = m_backend->universe();
 		m_running = true;
 		m_poseThread = std::thread(&Provider::poseLoop, this);
-		log("ovrn: started, backend %s, %zu controllers\n", m_backend->name(), m_controllers.size());
+		log("ovrn: started, backend %s, %zu controllers, %zu tracked hands\n", m_backend->name(), m_controllers.size(),
+		    m_hands.size());
 		return vr::VRInitError_None;
 	}
 
@@ -74,7 +77,9 @@ public:
 			m_poseThread.join();
 		}
 		m_live[0] = m_live[1] = nullptr;
+		m_liveHands[0] = m_liveHands[1] = nullptr;
 		m_controllers.clear();
+		m_hands.clear();
 		m_hmd.reset();
 		if (m_backend) {
 			m_backend->stop();
@@ -110,6 +115,10 @@ public:
 		for (auto &c : m_controllers) {
 			c->updateInputs();
 		}
+		addHandsIfTracked();
+		for (auto &h : m_hands) {
+			h->updateInputs(now);
+		}
 		if (m_hmd) {
 			m_hmd->updateInputs(now);
 		}
@@ -121,6 +130,9 @@ public:
 			}
 			for (auto &c : m_controllers) {
 				c->setUniverse(universe);
+			}
+			for (auto &h : m_hands) {
+				h->setUniverse(universe);
 			}
 		}
 		vr::VREvent_t event;
@@ -340,6 +352,12 @@ private:
 					c->updatePose(now);
 				}
 			}
+			for (auto &live : m_liveHands) {
+				HandDevice *h = live.load();
+				if (h != nullptr && h->active()) {
+					h->updatePose(now);
+				}
+			}
 			next += step;
 			const int64_t after = now_ns();
 			if (next <= after) {
@@ -361,6 +379,25 @@ private:
 		c->registerDevice();
 		m_live[(int)hand] = c;
 	}
+	/*!
+	 * Tracked hands: added once the backend has hand tracking (both hands together), as their own devices next to
+	 * the controllers; each is connected only while its side's controller isn't there (HandDevice::inUse).
+	 */
+	void
+	addHandsIfTracked()
+	{
+		if (!m_hands.empty() || !m_backend->hasHandTracking()) {
+			return;
+		}
+		for (Hand hand : {Hand::Left, Hand::Right}) {
+			m_hands.emplace_back(new HandDevice(m_backend.get(), hand));
+			HandDevice *h = m_hands.back().get();
+			h->registerDevice();
+			m_liveHands[(int)hand] = h;
+		}
+	}
+	std::vector<std::unique_ptr<HandDevice>> m_hands;               //!< owned; added on the Init / RunFrame thread
+	std::atomic<HandDevice *> m_liveHands[2] = {{nullptr}, {nullptr}}; //!< by hand, for the pose thread
 	uint64_t m_universe = 0; //!< RunFrame thread
 	std::atomic<bool> m_running{false};
 	std::thread m_poseThread;

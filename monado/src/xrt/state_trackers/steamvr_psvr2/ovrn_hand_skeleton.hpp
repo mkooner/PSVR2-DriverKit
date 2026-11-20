@@ -405,6 +405,25 @@ steamvr_dir()
 	return d;
 }
 
+/*!
+ * Valve's reference hand from SteamVR's resources, or the built-in hand if it can't be read; @p source says which.
+ */
+inline Rest
+reference_rest(bool left, std::string *source)
+{
+	const std::string dir = steamvr_dir();
+	const std::string path =
+	    dir.empty() ? std::string() : dir + "/resources/skeletons/vr_glove_" + (left ? "left" : "right") + "_skeleton.glb";
+	std::string why;
+	Rest rest;
+	if (!path.empty() && load_glb(path, left, rest, &why)) {
+		*source = "SteamVR's reference hand (" + path + ")";
+		return rest;
+	}
+	*source = "the built-in hand (" + (path.empty() ? std::string("SteamVR's folder not found") : why) + ")";
+	return builtin_rest(left);
+}
+
 /*
  * The Sense's controls in its grip pose (metres, left controller; the right one mirrors x), from Sony's Sense model:
  * each control's position, turned into the grip pose's frame. Sony's model angles turn the opposite way to a
@@ -772,17 +791,7 @@ public:
 	explicit HandSkeleton(bool left)
 	{
 		using namespace detail;
-		const std::string dir = steamvr_dir();
-		const std::string path =
-		    dir.empty() ? std::string() :
-		                  dir + "/resources/skeletons/vr_glove_" + (left ? "left" : "right") + "_skeleton.glb";
-		std::string why;
-		if (!path.empty() && load_glb(path, left, m_rest, &why)) {
-			m_source = "SteamVR's reference hand (" + path + ")";
-		} else {
-			m_rest = builtin_rest(left);
-			m_source = "the built-in hand (" + (path.empty() ? std::string("SteamVR's folder not found") : why) + ")";
-		}
+		m_rest = reference_rest(left, &m_source);
 		m_fit = Fitter(m_rest, left).run();
 		m_current = m_fit.held;
 		m_currentFree = Articulation{};

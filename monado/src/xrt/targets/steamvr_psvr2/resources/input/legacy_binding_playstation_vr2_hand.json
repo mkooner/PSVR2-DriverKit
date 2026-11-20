@@ -1,0 +1,64 @@
+{
+  "bindings": {
+    "/actions/legacy": {
+      "sources": [
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "trigger",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_axis1_press"
+            },
+            "pull": {
+              "output": "/actions/legacy/in/left_axis1_value"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/grip",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_grip_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "trigger",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_axis1_press"
+            },
+            "pull": {
+              "output": "/actions/legacy/in/right_axis1_value"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/grip",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_grip_press"
+            }
+          }
+        }
+      ],
+      "poses": [
+        {
+          "output": "/actions/legacy/in/Left_Pose",
+          "path": "/user/hand/left/pose/raw"
+        },
+        {
+          "output": "/actions/legacy/in/Right_Pose",
+          "path": "/user/hand/right/pose/raw"
+        }
+      ],
+      "haptics": []
+    }
+  },
+  "controller_type": "playstation_vr2_hand",
+  "description": "Legacy (pre-SteamVR Input) apps with tracked hands: the hand poses, pinch (thumb and index) as the trigger, a closed hand as the grip button",
+  "name": "PS VR2 tracked hands legacy bindings"
+}

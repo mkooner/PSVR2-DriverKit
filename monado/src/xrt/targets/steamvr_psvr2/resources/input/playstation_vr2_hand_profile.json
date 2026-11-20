@@ -1,0 +1,129 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "playstation_vr2_hand",
+  "device_class": "TrackedDeviceClass_Controller",
+  "resource_root": "monado",
+  "driver_name": "monado",
+  "legacy_binding": "{monado}/input/legacy_binding_playstation_vr2_hand.json",
+  "remapping": "{monado}/input/playstation_vr2_hand_remapping.json",
+  "input_bindingui_mode": "controller_handed",
+  "should_show_binding_errors": true,
+  "input_bindingui_left": {
+    "image": "{vrlink}/icons/handtracking_left.svg"
+  },
+  "input_bindingui_right": {
+    "image": "{vrlink}/icons/handtracking_right.svg"
+  },
+  "input_source": {
+    "/input/index_pinch": {
+      "type": "trigger",
+      "value": true,
+      "binding_image_point": [
+        15,
+        25
+      ],
+      "order": 1
+    },
+    "/input/middle_pinch": {
+      "type": "trigger",
+      "value": true,
+      "binding_image_point": [
+        35,
+        6
+      ],
+      "order": 1
+    },
+    "/input/ring_pinch": {
+      "type": "trigger",
+      "value": true,
+      "binding_image_point": [
+        47,
+        8
+      ],
+      "order": 1
+    },
+    "/input/pinky_pinch": {
+      "type": "trigger",
+      "value": true,
+      "binding_image_point": [
+        57,
+        15
+      ],
+      "order": 3
+    },
+    "/input/trigger": {
+      "type": "trigger",
+      "value": true,
+      "click": true,
+      "binding_image_point": [
+        15,
+        25
+      ]
+    },
+    "/input/grip": {
+      "type": "trigger",
+      "value": true,
+      "click": true,
+      "binding_image_point": [
+        45,
+        50
+      ],
+      "order": 3
+    },
+    "/input/system": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        72,
+        39
+      ],
+      "order": 0
+    },
+    "/pose/raw": {
+      "type": "pose",
+      "binding_image_point": [
+        14,
+        16
+      ]
+    },
+    "/pose/grip": {
+      "type": "pose",
+      "binding_image_point": [
+        14,
+        16
+      ]
+    },
+    "/pose/tip": {
+      "type": "pose",
+      "binding_image_point": [
+        14,
+        16
+      ]
+    },
+    "/input/skeleton/left": {
+      "type": "skeleton",
+      "side": "left",
+      "skeleton": "/skeleton/hand/left",
+      "binding_image_point": [
+        40,
+        50
+      ]
+    },
+    "/input/skeleton/right": {
+      "type": "skeleton",
+      "side": "right",
+      "skeleton": "/skeleton/hand/right",
+      "binding_image_point": [
+        40,
+        50
+      ]
+    }
+  },
+  "hand_priority": -1,
+  "default_bindings": [
+    {
+      "app_key": "openvr.component.vrcompositor",
+      "binding_url": "vrcompositor_binding_playstation_vr2_hand.json"
+    }
+  ]
+}

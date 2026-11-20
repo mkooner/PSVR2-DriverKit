@@ -55,6 +55,11 @@ struct hg_tuneable_values
 	bool detection_mirror_left = false;
 	//! Detection confidence needed to start tracking a hand (Mercury's fixed value was 0.92).
 	float acquire_confidence = 0.92f;
+	//! Zoomed-in detection: crops per side when a hand isn't found in the whole view (0: off), each this share of it.
+	int detection_tiles = 0;
+	float detection_tile_fraction = 0.6f;
+	int detection_tiles_per_frame = 1; //!< crops looked at per frame, cycling (0: all of them every frame)
+	bool detection_tile_mirror = false; //!< also the mirrored left-hand pass on each crop
 	//! The keypoint model's "is a hand" score needed to keep a view (Mercury's fixed value was 0.97).
 	float keypoint_hand_confidence = 0.97f;
 };

@@ -34,6 +34,10 @@ DEBUG_GET_ONCE_FLOAT_OPTION(mercury_min_detection_confidence, "MERCURY_MIN_DETEC
 DEBUG_GET_ONCE_BOOL_OPTION(mercury_detection_any_view, "MERCURY_DETECTION_ANY_VIEW", false)
 DEBUG_GET_ONCE_BOOL_OPTION(mercury_detection_mirror_left, "MERCURY_DETECTION_MIRROR_LEFT", false)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_acquire_confidence, "MERCURY_ACQUIRE_CONFIDENCE", 0.92)
+DEBUG_GET_ONCE_NUM_OPTION(mercury_detection_tiles, "MERCURY_DETECTION_TILES", 0)
+DEBUG_GET_ONCE_FLOAT_OPTION(mercury_detection_tile_fraction, "MERCURY_DETECTION_TILE_FRACTION", 0.6)
+DEBUG_GET_ONCE_NUM_OPTION(mercury_detection_tiles_per_frame, "MERCURY_DETECTION_TILES_PER_FRAME", 1)
+DEBUG_GET_ONCE_BOOL_OPTION(mercury_detection_tile_mirror, "MERCURY_DETECTION_TILE_MIRROR", false)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_keypoint_hand_confidence, "MERCURY_KEYPOINT_HAND_CONFIDENCE", 0.97)
 
 // Flags to tell state tracker that these are indeed valid joints
@@ -423,6 +427,10 @@ dispatch_and_process_hand_detections(struct HandTracking *hgt)
 	}
 
 
+	// Each view's detection confidence per hand (trace): what decides whether a hand is picked up at all.
+	HG_TRACE(hgt, "Detection: left hand %.3f %.3f, right hand %.3f %.3f (views 0, 1; %d views run)",
+	         infos[0].outputs[0].hand_detection_confidence, infos[1].outputs[0].hand_detection_confidence,
+	         infos[0].outputs[1].hand_detection_confidence, infos[1].outputs[1].hand_detection_confidence, num_views);
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
 		float confidence_sum = (infos[0].outputs[hand_idx].hand_detection_confidence +
 		                        infos[1].outputs[hand_idx].hand_detection_confidence) /
@@ -592,6 +600,7 @@ predict_new_regions_of_interest(struct HandTracking *hgt)
 			} else {
 				hroi.found = false;
 				masks_device.enabled = false;
+				hgt->view_drop_note[hand_idx] = "outside-view";
 			}
 		}
 	}
@@ -629,6 +638,7 @@ stop_everything_if_hands_are_overlapping(struct HandTracking *hgt)
 		float iou = box_iou::boxIOU(this_nbox, other_nbox);
 		if (iou > hgt->tuneable_values.mpiou_any.val) {
 			HG_DEBUG(hgt, "Stopped tracking because iou was %f in view %d", iou, view_idx);
+			hgt->frame_note[0] = hgt->frame_note[1] = "hands-overlap";
 			ok = false;
 			break;
 		}
@@ -803,7 +813,7 @@ callback_process_unsafe(HandTracking *hgt,
 
 	check_new_user_event(hgt);
 
-
+	hgt->frame_note[0] = hgt->frame_note[1] = NULL;
 
 	// Every now and then if we're not already tracking both hands, try to detect new hands.
 	bool saw_both_hands_last_frame = hgt->last_frame_hand_detected[0] && hgt->last_frame_hand_detected[1];
@@ -820,6 +830,11 @@ callback_process_unsafe(HandTracking *hgt,
 		if (!(hgt->views[0].regions_of_interest_this_frame[hand_idx].found ||
 		      hgt->views[1].regions_of_interest_this_frame[hand_idx].found)) {
 			hgt->this_frame_hand_detected[hand_idx] = false;
+			if (hgt->frame_note[hand_idx] == NULL) {
+				hgt->frame_note[hand_idx] = hgt->view_drop_note[hand_idx] != NULL ? hgt->view_drop_note[hand_idx]
+				                            : hgt->last_frame_hand_detected[hand_idx] ? "no-region"
+				                                                                      : "not-detected";
+			}
 		}
 	}
 
@@ -894,17 +909,22 @@ callback_process_unsafe(HandTracking *hgt,
 					// removed whole, 4 of 5 short losses of a slowly moving hand on a PS VR2 recording.
 					HG_DEBUG(hgt, "Dropping view %d of hand %d because keypoint estimator said to", view_idx,
 					         hand_idx);
+					hgt->view_drop_note[hand_idx] = "keypoint-dropped-view";
 					hgt->views[view_idx].regions_of_interest_this_frame[hand_idx].found = false;
 					continue;
 				}
 				HG_DEBUG(hgt, "Removing hand %d because keypoint estimator said to!", hand_idx);
 				hgt->this_frame_hand_detected[hand_idx] = false;
+				hgt->frame_note[hand_idx] = "keypoint-not-hand";
 			} else {
 				views_still_active++;
 			}
 		}
 		if (hgt->tuneable_values.detection_any_view && views_still_active == 0) {
 			hgt->this_frame_hand_detected[hand_idx] = false;
+			if (hgt->frame_note[hand_idx] == NULL) {
+				hgt->frame_note[hand_idx] = "keypoint-dropped-all-views";
+			}
 		}
 
 		if (!hgt->this_frame_hand_detected[hand_idx]) {
@@ -972,12 +992,14 @@ callback_process_unsafe(HandTracking *hgt,
 		if (reprojection_error > reprojection_error_threshold) {
 			HG_DEBUG(hgt, "Reprojection error above threshold!");
 			hgt->this_frame_hand_detected[hand_idx] = false;
+			hgt->frame_note[hand_idx] = "reprojection";
 			continue;
 		}
 
 		if (hand_too_far(hgt, *put_in_set)) {
 			HG_DEBUG(hgt, "Hand too far away");
 			hgt->this_frame_hand_detected[hand_idx] = false;
+			hgt->frame_note[hand_idx] = "too-far";
 			continue;
 		}
 
@@ -1034,6 +1056,7 @@ callback_process_unsafe(HandTracking *hgt,
 	// inactive this frame. This stops issues where our hand detector detects hands that are slightly too close to
 	// the edge, causing flickery hands.
 	if (!hgt->tuneable_values.always_run_detection_model) {
+		hgt->view_drop_note[0] = hgt->view_drop_note[1] = NULL; // the prediction notes why it drops a view
 		predict_new_regions_of_interest(hgt);
 		bool still_found[2] = {hgt->last_frame_hand_detected[0], hgt->last_frame_hand_detected[1]};
 		still_found[0] = hgt->views[0].regions_of_interest_this_frame[0].found ||
@@ -1044,6 +1067,17 @@ callback_process_unsafe(HandTracking *hgt,
 		for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
 			out_xrt_hands[hand_idx]->is_active = still_found[hand_idx];
 		}
+	}
+
+	{
+		// Each hand's outcome this frame (trace): tracked, acquired, or not, and why (diagnosis of losses).
+		char st[2][48];
+		for (int i = 0; i < 2; i++) {
+			const bool now = hgt->this_frame_hand_detected[i], before = hgt->last_frame_hand_detected[i];
+			snprintf(st[i], sizeof(st[i]), "%s%s", now ? (before ? "tracked" : "acquired") : (before ? "LOST:" : "none:"),
+			         now ? "" : (hgt->frame_note[i] != NULL ? hgt->frame_note[i] : "other"));
+		}
+		HG_TRACE(hgt, "Frame %.3f: left %s, right %s", (double)hgt->current_frame_timestamp / 1e9, st[0], st[1]);
 	}
 
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
@@ -1088,8 +1122,10 @@ HandTracking::cCallbackProcess(struct t_hand_tracking_sync *ht_sync,
 	// No filtering, fine to do this now. Also just a reminder that this took you 2 HOURS TO DEBUG THAT ONE TIME.
 	*out_timestamp_ns = hgt->current_frame_timestamp;
 
+	const uint64_t frame_start_ns = os_monotonic_get_ns();
 	try {
 		callback_process_unsafe(hgt, left_frame, right_frame, out_left_hand, out_right_hand, out_timestamp_ns);
+		HG_TRACE(hgt, "Frame time %.2f ms", (double)(os_monotonic_get_ns() - frame_start_ns) / 1e6);
 	} catch (const std::exception &e) {
 		HG_ERROR(hgt, "Exception in hand tracking process callback: %s", e.what());
 
@@ -1269,6 +1305,10 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	hgt->tuneable_values.detection_any_view = debug_get_bool_option_mercury_detection_any_view();
 	hgt->tuneable_values.detection_mirror_left = debug_get_bool_option_mercury_detection_mirror_left();
 	hgt->tuneable_values.acquire_confidence = debug_get_float_option_mercury_acquire_confidence();
+	hgt->tuneable_values.detection_tiles = (int)debug_get_num_option_mercury_detection_tiles();
+	hgt->tuneable_values.detection_tile_fraction = debug_get_float_option_mercury_detection_tile_fraction();
+	hgt->tuneable_values.detection_tiles_per_frame = (int)debug_get_num_option_mercury_detection_tiles_per_frame();
+	hgt->tuneable_values.detection_tile_mirror = debug_get_bool_option_mercury_detection_tile_mirror();
 	hgt->tuneable_values.keypoint_hand_confidence = debug_get_float_option_mercury_keypoint_hand_confidence();
 	hgt->tuneable_values.min_detection_confidence.val = debug_get_float_option_mercury_min_detection_confidence();
 
