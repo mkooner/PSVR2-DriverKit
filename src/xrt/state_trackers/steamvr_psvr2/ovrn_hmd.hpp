@@ -13,6 +13,8 @@
 #include "ovrn_camera.hpp"
 #include "ovrn_device.hpp"
 
+#include "os/os_time.h"
+
 #include <cmath>
 #include <cstdlib>
 #include <chrono>
@@ -51,6 +53,7 @@ public:
 	void
 	updateInputs(int64_t)
 	{
+		updateEyeTracking();
 		if (m_proximityHandle != vr::k_ulInvalidInputComponentHandle) {
 			const bool worn = m_backend->headWorn();
 			if (worn != m_wornSent || !m_wornSentOnce) {
@@ -300,6 +303,7 @@ protected:
 		setupCamera();
 		setupHeadButton();
 		setupProximity();
+		setupEyeTracking();
 		log("ovrn: headset %s (%s), %ux%u at %.2f Hz, render %ux%u per eye, IPD %.1f mm, vsync-to-photons %.5f s, "
 		    "head pose: %s, backend %s\n",
 		    m_info.model.c_str(), m_info.serial.c_str(), m_display.width, m_display.height, m_display.refresh_hz,
@@ -320,6 +324,61 @@ private:
 	 * Prop_ContainsProximitySensor_Bool, as Sony's driver reports them. Games read it for "headset on"; AMID EVIL VR
 	 * asked for it and got "Invalid input type button::click for path (/user/head/proximity)" (2026-11-19).
 	 */
+	/*!
+	 * The headset's eye tracking as SteamVR's eye-tracking input, as Valve's driver API and the working references
+	 * (Pimax-EyeTracker-SteamVR, PSVR2Toolkit) do: Prop_SupportsXrEyeGazeInteraction_Bool and the component
+	 * "/eyetracking" (exactly that path), which SteamVR's OpenXR runtime exposes as XR_EXT_eye_gaze_interaction.
+	 * Only when the backend really tracks the eyes (no capability is reported otherwise).
+	 */
+	void
+	setupEyeTracking()
+	{
+		if (!m_backend->hasEyeTracking() || vr::VRDriverInput() == nullptr) {
+			return;
+		}
+		if (vr::VRDriverInput()->CreateEyeTrackingComponent(m_container, "/eyetracking", &m_eyeHandle) !=
+		    vr::VRInputError_None) {
+			m_eyeHandle = vr::k_ulInvalidInputComponentHandle;
+			log("ovrn: SteamVR refused the eye-tracking component\n");
+			return;
+		}
+		vr::VRProperties()->SetBoolProperty(m_container, vr::Prop_SupportsXrEyeGazeInteraction_Bool, true);
+		log("ovrn: eye tracking as SteamVR's /eyetracking input (XR_EXT_eye_gaze_interaction)\n");
+	}
+
+	/*!
+	 * The latest gaze to SteamVR (RunFrame thread): head-space unit direction as vGazeTarget, origin at the head
+	 * (no per-eye origin from this headset yet), all three flags from the headset's validity, as both references do.
+	 * A sample whose packet is older than kEyeStaleNs is reported as not valid, never as current gaze. The time
+	 * offset says how old the sample is (negative, seconds).
+	 */
+	void
+	updateEyeTracking()
+	{
+		if (m_eyeHandle == vr::k_ulInvalidInputComponentHandle) {
+			return;
+		}
+		static constexpr int64_t kEyeStaleNs = 100'000'000; // 100 ms; the headset streams gaze at ~120 Hz
+		Backend::EyeGaze g{};
+		vr::VREyeTrackingData_t d{};
+		d.vGazeTarget = {0.0f, 0.0f, -1.0f};
+		double offset_s = 0.0;
+		if (m_backend->eyeGaze(&g)) {
+			const bool fresh = g.packet_age_ns >= 0 && g.packet_age_ns < kEyeStaleNs;
+			const bool ok = g.valid && fresh && std::isfinite(g.dir.x) && std::isfinite(g.dir.y) &&
+			                std::isfinite(g.dir.z);
+			d.bActive = d.bValid = d.bTracked = ok;
+			if (ok) {
+				d.vGazeTarget = {(float)g.dir.x, (float)g.dir.y, (float)g.dir.z};
+				const double age_s = (double)((int64_t)os_monotonic_get_ns() - g.sample_ns) / 1e9;
+				offset_s = (age_s > 0.0 && age_s < 0.1) ? -age_s : 0.0;
+			}
+			m_eyeFresh += ok ? 1 : 0;
+		}
+		m_eyeUpdates++;
+		vr::VRDriverInput()->UpdateEyeTrackingComponent(m_eyeHandle, &d, offset_s);
+	}
+
 	void
 	setupProximity()
 	{
@@ -380,6 +439,9 @@ private:
 	vr::VRInputComponentHandle_t m_proximityHandle = vr::k_ulInvalidInputComponentHandle;
 	bool m_wornSent = false;
 	bool m_wornSentOnce = false;
+	vr::VRInputComponentHandle_t m_eyeHandle = vr::k_ulInvalidInputComponentHandle;
+	uint64_t m_eyeUpdates = 0; //!< RunFrame thread: gaze updates sent, and how many carried valid gaze
+	uint64_t m_eyeFresh = 0;
 	std::unique_ptr<Camera> m_camera;
 
 	//! The hidden-area mask from the backend's file, handed to SteamVR as it is (render target UV).

@@ -7,6 +7,8 @@
  */
 
 #include <cstdlib>
+#include <cstring>
+#include "os/os_time.h"
 #include "ovrn_backend.hpp"
 
 #include <cmath>
@@ -185,6 +187,32 @@ public:
 		out->position_valid = out->position_tracked = true;
 		return true;
 	}
+	/*
+	 * Test-only gaze (OVRN_SIM_EYE=1, the driver harness): a known direction 10 deg right and 5 deg up, valid and
+	 * 5 ms old, until frame 30; after that its packet is 200 ms old, so the driver must report it as not valid.
+	 */
+	bool
+	hasEyeTracking() override
+	{
+		const char *e = getenv("OVRN_SIM_EYE");
+		return e != nullptr && strcmp(e, "1") == 0;
+	}
+
+	bool
+	eyeGaze(EyeGaze *out) override
+	{
+		if (!hasEyeTracking()) {
+			return false;
+		}
+		const double yaw = 10.0 * M_PI / 180.0, pitch = 5.0 * M_PI / 180.0;
+		out->dir = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
+		out->valid = true;
+		const int64_t now = (int64_t)os_monotonic_get_ns();
+		out->sample_ns = now - 5'000'000;
+		out->packet_age_ns = m_frames < 30 ? 1'000'000 : 200'000'000;
+		return true;
+	}
+
 	int m_frames = 0; //!< RunFrame thread
 };
 

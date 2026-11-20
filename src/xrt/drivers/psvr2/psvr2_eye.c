@@ -9,6 +9,10 @@
  */
 
 #include "math/m_space.h"
+#include "math/m_api.h"
+#include "os/os_time.h"
+
+#include <math.h>
 
 #include "util/u_trace_marker.h"
 #include "util/u_file.h"
@@ -160,6 +164,8 @@ process_gaze_packet(struct psvr2_hmd *hmd, uint8_t *buf, size_t bytes_read)
 		    XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT;
 	}
 
+	hmd->et_data.last_packet_host_ns = (timepoint_ns)os_monotonic_get_ns();
+
 	os_mutex_unlock(&hmd->et_data.data_mutex);
 
 	m_relation_history_push(hmd->et_data.gaze_relation_history, &gaze_relation, timestamp_ns);
@@ -245,6 +251,37 @@ psvr2_eye_tracking_control_thread(void *usrptr)
 	os_thread_helper_unlock(&hmd->et_data.eye_tracking_thread);
 
 	return NULL;
+}
+
+bool
+psvr2_get_combined_gaze(struct xrt_device *xdev,
+                        struct xrt_vec3 *out_dir,
+                        bool *out_valid,
+                        int64_t *out_sample_host_ns,
+                        int64_t *out_packet_host_ns)
+{
+	struct psvr2_hmd *hmd = psvr2_hmd(xdev);
+
+	os_mutex_lock(&hmd->et_data.data_mutex);
+	const timepoint_ns packet_ns = hmd->et_data.last_packet_host_ns;
+	const struct xrt_vec3 d = hmd->et_data.combined.filtered_gaze_direction;
+	const bool valid = hmd->et_data.combined.gaze_direction_valid;
+	const timepoint_ns sample_ns = hmd->et_data.last_remote_report_sample_time_ns + hmd->hw2mono_vts;
+	os_mutex_unlock(&hmd->et_data.data_mutex);
+
+	if (packet_ns == 0) {
+		return false;
+	}
+	// The same rotation as the gaze pose pushed in process_gaze_packet (the OpenXR eye gaze), applied to the view
+	// direction -Z: the SteamVR eye gaze and Monado's OpenXR one agree.
+	struct xrt_quat q;
+	math_quat_from_euler_angles(&(struct xrt_vec3){.x = atanf(d.y), .y = -atanf(d.x)}, &q);
+	struct xrt_vec3 fwd = {0.0f, 0.0f, -1.0f};
+	math_quat_rotate_vec3(&q, &fwd, out_dir);
+	*out_valid = valid;
+	*out_sample_host_ns = sample_ns;
+	*out_packet_host_ns = packet_ns;
+	return true;
 }
 
 void

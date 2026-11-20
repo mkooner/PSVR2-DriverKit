@@ -16,6 +16,7 @@
 #include "math/m_space.h"
 #include "util/u_builder_helpers.h"
 #include "util/u_debug.h"
+#include "os/os_time.h"
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_instance.h"
 #include "xrt/xrt_space.h"
@@ -258,6 +259,7 @@ public:
 			}
 		}
 		readEyes(m_eyes);
+		startEyeTracking();
 #ifdef OVRN_CONTROLLER_HOTPLUG
 		startHotplug();
 #endif
@@ -270,6 +272,10 @@ public:
 #ifdef OVRN_CONTROLLER_HOTPLUG
 		stopHotplug();
 #endif
+		if (m_eyeTracking && m_head != NULL) {
+			xrt_device_end_feature(m_head, XRT_DEVICE_FEATURE_EYE_TRACKING);
+		}
+		m_eyeTracking = false;
 		m_head = NULL;
 		m_hand[0] = m_hand[1] = NULL;
 		if (m_xso != NULL) {
@@ -630,6 +636,36 @@ public:
 	}
 
 	bool
+	hasEyeTracking() override
+	{
+		return m_eyeTracking;
+	}
+
+	bool
+	eyeGaze(EyeGaze *out) override
+	{
+#ifdef XRT_BUILD_DRIVER_PSVR2
+		if (!m_eyeTracking) {
+			return false;
+		}
+		struct xrt_vec3 d;
+		bool valid = false;
+		int64_t sample_ns = 0, packet_ns = 0;
+		if (!psvr2_get_combined_gaze(m_head, &d, &valid, &sample_ns, &packet_ns)) {
+			return false;
+		}
+		out->dir = {d.x, d.y, d.z};
+		out->valid = valid;
+		out->sample_ns = sample_ns;
+		out->packet_age_ns = (int64_t)os_monotonic_get_ns() - packet_ns;
+		return true;
+#else
+		(void)out;
+		return false;
+#endif
+	}
+
+	bool
 	hasProximity() override
 	{
 		return m_head != NULL && m_head->name == XRT_DEVICE_PSVR2;
@@ -962,6 +998,23 @@ private:
 	int64_t m_promptNextNs = 0;
 	bool m_headButton = false; //!< RunFrame thread
 	bool m_headWorn = false;   //!< RunFrame thread: the headset's wear sensor
+	bool m_eyeTracking = false; //!< the headset's eye tracking was turned on (startEyeTracking)
+
+	/*!
+	 * Turn the PS VR2's eye tracking on for SteamVR (its /eyetracking input, see ovrn_hmd.hpp): the headset then
+	 * streams gaze. OVRN_EYE_TRACKING=0 leaves it off (the eye cameras stay dark, no eye-gaze capability reported).
+	 */
+	void
+	startEyeTracking()
+	{
+		const char *e = getenv("OVRN_EYE_TRACKING");
+		if ((e != NULL && strcmp(e, "0") == 0) || m_head == NULL || m_head->name != XRT_DEVICE_PSVR2 ||
+		    !m_head->supported.eye_gaze) {
+			return;
+		}
+		m_eyeTracking = xrt_device_begin_feature(m_head, XRT_DEVICE_FEATURE_EYE_TRACKING) == XRT_SUCCESS;
+		ovrd_log("ovrn: eye tracking %s (OVRN_EYE_TRACKING=0 off)\n", m_eyeTracking ? "on" : "could not be turned on");
+	}
 	uint32_t m_headPresses = 0; //!< headset button presses (in the 30 s device line)
 	int64_t m_lastDeviceLogNs = 0;
 

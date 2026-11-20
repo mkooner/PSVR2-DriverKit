@@ -213,6 +213,27 @@ public:
 	{
 		return false;
 	}
+	//! The headset's eye tracking (both eyes combined), for SteamVR's /eyetracking input.
+	struct EyeGaze
+	{
+		Vec3 dir;              //!< unit gaze direction in head space, OpenVR axes (-Z forward, +Y up, +X right)
+		bool valid;            //!< the headset marked this sample valid
+		int64_t sample_ns;     //!< the sample's time, host monotonic
+		int64_t packet_age_ns; //!< how long ago its packet arrived (0 = just now)
+	};
+	//! Whether the headset tracks the eyes (and it was turned on); eyeGaze() then gives the latest sample.
+	virtual bool
+	hasEyeTracking()
+	{
+		return false;
+	}
+	//! False when there's no sample yet.
+	virtual bool
+	eyeGaze(EyeGaze *out)
+	{
+		(void)out;
+		return false;
+	}
 	//! Whether the headset has a wear (proximity) sensor; headWorn() is its state, read in runFrame.
 	virtual bool
 	hasProximity()

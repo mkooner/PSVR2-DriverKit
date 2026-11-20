@@ -81,6 +81,7 @@ psvr2_request_bottom_camera_images(struct xrt_device *xdev, bool on);
 
 struct t_camera_calibration;
 struct xrt_pose;
+struct xrt_vec3;
 
 /*!
  * The bottom cameras' calibration (2 entries: left, right of the headset's own lens model) and their poses in the
@@ -128,6 +129,21 @@ psvr2_hmd_add_late_controller(struct xrt_device *hmd_xdev, struct xrt_device *ps
  */
 bool
 psvr2_hand_tracking_enabled(void);
+
+/*!
+ * The latest combined (both eyes) gaze: a unit direction in head space, OpenXR/OpenVR axes (-Z forward, +Y up,
+ * +X right), built exactly as the headset's OpenXR eye gaze pose; whether the headset marked it valid; the sample's
+ * time and the time its packet was processed, both host monotonic ns. False before the first gaze packet (eye
+ * tracking off or not started).
+ *
+ * @ingroup drv_psvr2
+ */
+bool
+psvr2_get_combined_gaze(struct xrt_device *xdev,
+                        struct xrt_vec3 *out_dir,
+                        bool *out_valid,
+                        int64_t *out_sample_host_ns,
+                        int64_t *out_packet_host_ns);
 
 /*!
  * Allow or forbid hand tracking, before the headset is created. The builder forbids it when Sense controllers are
