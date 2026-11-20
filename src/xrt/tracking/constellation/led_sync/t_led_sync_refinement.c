@@ -23,6 +23,9 @@
 #include "constellation/t_led_sync_refinement.h"
 
 #include "led_sync_internal.h"
+
+#include <stddef.h>
+#include <string.h>
 #include "pssense_gray_code.h"
 #include "pssense_count_calibration.h"
 
@@ -536,13 +539,13 @@ handle_constellation_sample_locked(struct t_led_sync_refinement *refinement,
  * Exported functions
  */
 
-int
-t_led_sync_refinement_init(struct t_led_sync_refinement *refinement,
-                           const struct t_led_sync_refinement_options *options)
+/*!
+ * A refinement in its starting state for @p options (no mutex, not initialized): shared by init and restart.
+ */
+static struct t_led_sync_refinement
+fresh_refinement(const struct t_led_sync_refinement_options *options)
 {
-	int result;
-
-	(*refinement) = XRT_C11_COMPOUND(struct t_led_sync_refinement){
+	return XRT_C11_COMPOUND(struct t_led_sync_refinement){
 	    .initialized = false,
 
 	    .log_level = debug_get_log_option_led_sync_refinement_log(),
@@ -582,6 +585,15 @@ t_led_sync_refinement_init(struct t_led_sync_refinement *refinement,
 	            .right_bound_ns = 0,
 	        },
 	};
+}
+
+int
+t_led_sync_refinement_init(struct t_led_sync_refinement *refinement,
+                           const struct t_led_sync_refinement_options *options)
+{
+	int result;
+
+	(*refinement) = fresh_refinement(options);
 
 	result = os_mutex_init(&refinement->lock);
 	if (result < 0) {
@@ -714,6 +726,28 @@ t_led_sync_refinement_destroy(struct t_led_sync_refinement *refinement)
 	atomic_compare_exchange_strong(&count_probe_wanted, &self, NULL);
 
 	os_mutex_destroy(&refinement->lock);
+}
+
+void
+t_led_sync_refinement_restart(struct t_led_sync_refinement *refinement)
+{
+	if (!refinement->initialized) {
+		return;
+	}
+	os_mutex_lock(&refinement->lock);
+	// Give the count calibration turn back first: the other controller must not wait for one that's gone.
+	count_calib_release_token(refinement);
+	struct t_led_sync_refinement *self = refinement;
+	atomic_compare_exchange_strong(&count_probe_wanted, &self, NULL);
+	/*
+	 * Everything after the mutex back to the starting state (the fields before it, the initialized flag, the name,
+	 * the log level and the options, stay); the mutex itself is held and must not be touched.
+	 */
+	const struct t_led_sync_refinement fresh = fresh_refinement(&refinement->options);
+	const size_t from = offsetof(struct t_led_sync_refinement, lock) + sizeof(refinement->lock);
+	memcpy((char *)refinement + from, (const char *)&fresh + from, sizeof(*refinement) - from);
+	LOG_INFO(refinement, "LED sync restarted (the controller reconnected or disconnected)");
+	os_mutex_unlock(&refinement->lock);
 }
 
 void

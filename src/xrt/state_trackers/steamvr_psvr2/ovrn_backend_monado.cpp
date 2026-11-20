@@ -925,13 +925,27 @@ private:
 				break;
 			}
 			const bool missing = (m_hand[0] == NULL && m_late[0] == NULL) || (m_hand[1] == NULL && m_late[1] == NULL);
-			if (!missing) {
+			if (!missing && !anyDisconnected()) {
 				continue;
 			}
 			l.unlock();
 			hotplugScan();
 			l.lock();
 		}
+	}
+
+	//! A controller whose connection ended (Bluetooth dropped, turned off) and that should be reconnected.
+	struct xrt_device *
+	disconnectedHand(int i)
+	{
+		struct xrt_device *xdev = m_hand[i] != NULL ? m_hand[i].load() : m_late[i].load();
+		return xdev != NULL && xdev->name == XRT_DEVICE_PSSENSE && pssense_is_disconnected(xdev) ? xdev : NULL;
+	}
+
+	bool
+	anyDisconnected()
+	{
+		return disconnectedHand(0) != NULL || disconnectedHand(1) != NULL;
 	}
 
 	void
@@ -949,6 +963,21 @@ private:
 		struct xrt_device *made[2] = {NULL, NULL};
 		struct t_timing_event_sink *sinks[2] = {NULL, NULL};
 		for (int i = 0; i < 2; i++) {
+			/*
+			 * A controller that dropped off Bluetooth and came back is a new HID device for the same controller
+			 * (2026-11-19 23:12: the left one reconnected as hidraw11 and stayed dead in SteamVR until restart).
+			 * Hand it the new connection; the device, its SteamVR controller and its LED tracking stay.
+			 */
+			struct xrt_device *gone = disconnectedHand(i);
+			if (gone != NULL) {
+				struct xrt_prober_device *xpdev = u_builder_find_prober_device(
+				    devs, count, PSSENSE_VID, i == 0 ? PSSENSE_PID_LEFT : PSSENSE_PID_RIGHT, XRT_BUS_TYPE_ANY);
+				if (xpdev != NULL && pssense_reconnect(gone, xp, xpdev) > 0) {
+					ovrd_log("ovrn: %s controller reconnected after dropping out: %s (%s)\n", i == 0 ? "left" : "right",
+					         gone->str, gone->serial);
+				}
+				continue;
+			}
 			if (m_hand[i] != NULL || m_late[i] != NULL) {
 				continue;
 			}
