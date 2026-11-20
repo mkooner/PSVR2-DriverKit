@@ -118,6 +118,8 @@ fn headset_settings(target: Target, accel: bool) -> Vec<Setting> {
                  "Keeps the head position continuous when the headset's tracking re-originates (after its first 20 s).", true)),
         t(toggle("PSVR2_SONY_LD_CONFIG", "Sony's LED detector settings",
                  "Send Sony's LED detector settings to the headset (controller tracking in bright rooms).", true)),
+        t(toggle("PSVR2_HAND_TRACKING", "Hand tracking (controllers off)",
+                 "Tracks your bare hands with the headset's cameras while a Sense controller is off: full finger tracking in SteamVR games, pinch as the trigger, a closed hand as the grip. Turn a controller back on to use it again. Uses some CPU while hands are tracked.", false)),
         t(toggle("PSVR2_BASALT", "Basalt referee",
                  "Basalt visual-inertial tracking checks the headset's position jumps in fast turns (~2 CPU cores).", false)),
         t(value("VIT_SYSTEM_LIBRARY_PATH", "Basalt library", "libbasalt.so for the Basalt referee.", "", true)),
@@ -326,7 +328,26 @@ fn save_config(cfg: &Config) -> Result<(), String> {
     if let Some(dir) = p.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    fs::write(&p, serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    fs::write(&p, serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    write_driver_settings(cfg)
+}
+
+/// The settings the SteamVR driver reads itself at start (<config>/PSVR2-DriverKit/settings.conf, KEY=VALUE), so they
+/// apply however SteamVR is started, from Steam too: the launch environment only reaches a DriverKit-started SteamVR.
+fn write_driver_settings(cfg: &Config) -> Result<(), String> {
+    let on = |key: &str| {
+        cfg.settings.iter().any(|s| s.key == key && s.enabled && (s.target == Target::SteamVR || s.target == Target::Both))
+    };
+    let text = format!(
+        "# Written by PSVR2-DriverKit (Settings tab); the SteamVR driver reads it when SteamVR starts.\nHAND_TRACKING={}\n",
+        if on("PSVR2_HAND_TRACKING") { 1 } else { 0 }
+    );
+    let path = config_dir().join("settings.conf");
+    if fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
+        return Ok(());
+    }
+    fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?;
+    fs::write(&path, text).map_err(|e| e.to_string())
 }
 
 impl Config {

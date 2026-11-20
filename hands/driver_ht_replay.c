@@ -4,7 +4,9 @@
 // Drives the driver's own hand tracking module (psvr2_hand_tracking.c) with a PSVR2_RECORD_CAMERA recording in real
 // time, as the USB thread would, with a stand-in head device at identity, and queries the hands as SteamVR would
 // (every 11 ms). Reports how often each hand is active and the right wrist positions.
-// Usage: driver_ht_replay recording.pv2c stereo.json
+// The cameras come from the headset's calibration block, through the driver's own parser (the controller tracker's
+// camera chain, exactly what the driver gives the hand tracker), not from a separate stereo file.
+// Usage: driver_ht_replay recording.pv2c ~/.config/monado/psvr2-calibration-<serial>.bin
 #include "xrt/xrt_device.h"
 #include "os/os_time.h"
 #include "math/m_api.h"
@@ -13,6 +15,8 @@
 #include "util/u_time.h"
 #include "tracking/t_tracking.h"
 #include "psvr2_hand_tracking.h"
+#include "psvr2.h"
+#include "psvr2_constellation_tracking.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,55 +35,59 @@ head_pose(struct xrt_device *xdev, enum xrt_input_name name, int64_t at, struct 
 	return XRT_SUCCESS;
 }
 
-static double
-jnum(cJSON *a, int i)
+static struct t_camera_calibration g_cams[2];
+static struct xrt_pose g_poses[2];
+static int g_have_cams;
+
+//! The parser hands the bottom pair here (as psvr2.c's version passes it to the hand tracker).
+void
+psvr2_hmd_offer_hand_tracking_cameras(struct psvr2_hmd *hmd, const struct t_camera_calibration cams[2],
+                                      const struct xrt_pose poses[2])
 {
-	return cJSON_GetArrayItem(a, i)->valuedouble;
+	(void)hmd;
+	memcpy(g_cams, cams, sizeof(g_cams));
+	memcpy(g_poses, poses, sizeof(g_poses));
+	g_have_cams = 1;
+}
+
+//! The hand tracker asks the headset for the camera images; here the recording is the headset.
+void
+psvr2_request_bottom_camera_images(struct xrt_device *xdev, bool on)
+{
+	(void)xdev;
+	(void)on;
 }
 
 int
 main(int argc, char **argv)
 {
 	if (argc < 3) {
-		fprintf(stderr, "usage: %s recording.pv2c stereo.json\n", argv[0]);
+		fprintf(stderr, "usage: %s recording.pv2c psvr2-calibration-<serial>.bin\n", argv[0]);
 		return 1;
 	}
-	FILE *jf = fopen(argv[2], "rb");
-	static char js[1 << 16];
-	size_t jn = fread(js, 1, sizeof(js) - 1, jf);
-	js[jn] = 0;
-	fclose(jf);
-	cJSON *j = cJSON_Parse(js);
-	struct t_camera_calibration cams[2] = {0};
-	for (int v = 0; v < 2; v++) {
-		cJSON *view = cJSON_GetArrayItem(cJSON_GetObjectItem(j, "views"), v);
-		cams[v].image_size_pixels.w = cams[v].image_size_pixels.h = 1016;
-		cams[v].distortion_model = T_DISTORTION_PSVR2;
-		cJSON *K = cJSON_GetObjectItem(view, "K");
-		for (int r = 0; r < 3; r++)
-			for (int k = 0; k < 3; k++)
-				cams[v].intrinsics[r][k] = jnum(cJSON_GetArrayItem(K, r), k);
-		for (int k = 0; k < 20; k++)
-			cams[v].psvr2.params[k] = jnum(cJSON_GetObjectItem(view, "dist"), k);
+	FILE *cf = fopen(argv[2], "rb");
+	if (cf == NULL) {
+		fprintf(stderr, "can't open %s\n", argv[2]);
+		return 1;
 	}
-	// x_cam1 = R x_cam0 + T (OpenCV) -> cam1 in cam0, OpenXR camera axes. Camera 0 at the head origin.
-	cJSON *R = cJSON_GetObjectItem(j, "R"), *T = cJSON_GetObjectItem(j, "T");
-	const float F[3] = {1, -1, -1};
-	struct xrt_matrix_3x3 m;
-	for (int a = 0; a < 3; a++)
-		for (int b = 0; b < 3; b++)
-			m.v[a * 3 + b] = F[a] * jnum(cJSON_GetArrayItem(R, a), b) * F[b];
-	struct xrt_pose c1_c0;
-	math_quat_from_matrix_3x3(&m, &c1_c0.orientation);
-	c1_c0.position = (struct xrt_vec3){F[0] * jnum(T, 0), F[1] * jnum(T, 1), F[2] * jnum(T, 2)};
-	struct xrt_pose poses[2];
-	poses[0] = (struct xrt_pose)XRT_POSE_IDENTITY;
-	math_pose_invert(&c1_c0, &poses[1]);
+	static uint8_t block[1 << 20];
+	const uint32_t block_size = (uint32_t)fread(block, 1, sizeof(block), cf);
+	fclose(cf);
+	struct psvr2_hmd *hmd = calloc(1, sizeof(*hmd));
+	hmd->log_level = U_LOGGING_WARN;
+	psvr2_parse_gen_calibration_block(hmd, block, block_size);
+	if (!g_have_cams) {
+		fprintf(stderr, "no bottom camera pair in %s\n", argv[2]);
+		return 1;
+	}
+	struct t_camera_calibration *cams = g_cams;
+	struct xrt_pose *poses = g_poses;
 
 	struct xrt_device *head = U_DEVICE_ALLOCATE(struct xrt_device, U_DEVICE_ALLOC_TRACKING_NONE, 1, 0);
 	head->get_tracked_pose = head_pose;
 	struct xrt_device *ht = psvr2_hand_tracking_create(head);
 	psvr2_hand_tracking_set_cameras(ht, cams, poses);
+	psvr2_hand_tracking_set_active(ht, true);
 
 	FILE *in = fopen(argv[1], "rb");
 	char magic[8];
