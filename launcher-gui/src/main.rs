@@ -829,38 +829,18 @@ impl Launcher {
         }
     }
 
-    /// Set Custom Play Area: SteamVR's in-headset Room Setup (as on Steam Frame: floor, then trace the play area in
-    /// the headset). SteamVR running: its room setup is reset (vrcmd --resetroomsetup through SteamVR's vrenv.sh) and
-    /// SteamVR then starts its required setup in the headset (its dashboard's startRequiredRoomSetupIfNeeded); not
-    /// running: started with that (launch-steamvr.sh ROOM_SETUP=hmd). Either way the player is told to put the
-    /// headset on.
+    /// Set Custom Play Area: SteamVR's in-headset Room Setup (as on Steam Frame: floor, then trace the play area).
+    /// Only SteamVR's dashboard can start it (vrcmd --resetroomsetup only reset and recommitted the room, 2026-11-19
+    /// 22:05), so the player gets the steps to open it there; SteamVR is started first if it isn't running.
     fn set_custom_play_area(&mut self, steamvr_running: bool) {
         self.headset_prompt = true;
         if !steamvr_running {
-            self.start_steamvr_with(&[("ROOM_SETUP", "hmd")]);
+            self.start_steamvr_with(&[]);
             if self.steamvr.is_some() {
-                self.message = "SteamVR starting; Room Setup starts in the headset once it is up.".into();
+                self.message = "SteamVR starting; then open Room Setup in the headset (steps on screen).".into();
             }
-            return;
-        }
-        let vr = if self.cfg.steamvr_dir.is_empty() { detect_steam().1 } else { Some(PathBuf::from(&self.cfg.steamvr_dir)) };
-        let Some(vr) = vr else {
-            self.message = "SteamVR not found (Settings: Detect Steam); open Room Setup from SteamVR's dashboard".into();
-            return;
-        };
-        let log = self.logs_dir().join(format!("roomsetup-{}.log", stamp()));
-        let out = fs::File::create(&log).ok();
-        let mut cmd = Command::new(vr.join("bin/vrenv.sh"));
-        cmd.arg(vr.join("bin/linux64/vrcmd")).arg("--resetroomsetup").stdin(Stdio::null());
-        if let Some(f) = out {
-            if let Ok(f2) = f.try_clone() {
-                cmd.stderr(f2);
-            }
-            cmd.stdout(f);
-        }
-        match cmd.spawn() {
-            Ok(_) => self.message = format!("Room Setup starting in the headset (log {}).", log.display()),
-            Err(e) => self.message = format!("Couldn't start SteamVR's Room Setup: {e}"),
+        } else {
+            self.message = "Open Room Setup in the headset (steps on screen).".into();
         }
     }
 
@@ -1392,9 +1372,18 @@ impl eframe::App for Launcher {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .show(ui.ctx(), |ui| {
-                    ui.label(egui::RichText::new("Room Setup is starting in the headset.").font(theme::bold(16.0)).color(theme::GRAPHITE));
+                    ui.label(egui::RichText::new("Open Room Setup in the headset").font(theme::bold(16.0)).color(theme::GRAPHITE));
                     ui.add_space(6.0);
-                    ui.label("Put on your headset and pick up both controllers, then follow SteamVR's steps there: set the floor, then trace the edge of your play area.");
+                    for step in [
+                        "1. Put on your headset and pick up both controllers.",
+                        "2. Press the PS button to open the SteamVR dashboard.",
+                        "3. Select the Playspace button, right of the ☰ menu at the bottom.",
+                        "4. Choose Playspace Setup, then follow the steps: set the floor, then trace the edge of your play area.",
+                    ] {
+                        ui.label(step);
+                    }
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Only the floor height? Choose Adjust Floor Height in step 4 instead.").color(theme::SLATE).size(12.0));
                     ui.add_space(10.0);
                     if ui.add(theme::primary("OK")).clicked() {
                         open = false;
@@ -1541,7 +1530,7 @@ impl Launcher {
                 }
                 if ui
                     .add_enabled(!st.service, egui::Button::new("Set Custom Play Area"))
-                    .on_hover_text("SteamVR's Room Setup in the headset: set the floor, then trace your play area (starts SteamVR if needed).")
+                    .on_hover_text("How to open SteamVR's Room Setup in the headset: set the floor, then trace your play area (starts SteamVR if needed).")
                     .on_disabled_hover_text("Stop monado-service first: SteamVR needs the headset.")
                     .clicked()
                 {
