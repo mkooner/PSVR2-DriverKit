@@ -197,6 +197,15 @@ psvr2_hmd_destroy(struct xrt_device *xdev)
 	os_thread_helper_lock(&hmd->usb_thread);
 	hmd->usb_complete = 1;
 	os_thread_helper_unlock(&hmd->usb_thread);
+	/*
+	 * Wake the USB thread now: it waits in libusb for the next transfer, which a headset that stopped sending never
+	 * completes, and the join below then waited for it; SteamVR's 10 s cleanup watchdog aborted vrserver every time
+	 * (2026-11-20 14:45-14:51), so the transfers were never cancelled and the next session got nothing from the
+	 * headset (grey screen) until it was power-cycled.
+	 */
+	if (hmd->ctx != NULL) {
+		libusb_interrupt_event_handler(hmd->ctx);
+	}
 	os_thread_helper_destroy(&hmd->usb_thread);
 	psvr2_basalt_destroy(&hmd->basalt); // after the USB thread: nothing feeds it any more
 
@@ -518,6 +527,17 @@ bool
 psvr2_usb_xfer_continue(struct libusb_transfer *xfer, const char *type)
 {
 	struct psvr2_hmd *hmd = xfer->user_data;
+
+	// Shutting down: a transfer that completed just before its cancellation isn't submitted again (it would never be
+	// cancelled), it ends here like a cancelled one.
+	os_thread_helper_lock(&hmd->usb_thread);
+	if (hmd->usb_complete) {
+		hmd->usb_active_xfers--;
+		os_thread_helper_signal_locked(&hmd->usb_thread);
+		os_thread_helper_unlock(&hmd->usb_thread);
+		return false;
+	}
+	os_thread_helper_unlock(&hmd->usb_thread);
 
 	switch (xfer->status) {
 	case LIBUSB_TRANSFER_OVERFLOW:
@@ -1534,7 +1554,9 @@ psvr2_usb_thread(void *ptr)
 	while (os_thread_helper_is_running_locked(&hmd->usb_thread) && !hmd->usb_complete) {
 		os_thread_helper_unlock(&hmd->usb_thread);
 
-		libusb_handle_events_completed(hmd->ctx, &hmd->usb_complete);
+		// At most 100 ms per wait, so stopping never depends on the headset sending something.
+		struct timeval wait = {0, 100 * 1000};
+		libusb_handle_events_timeout_completed(hmd->ctx, &wait, &hmd->usb_complete);
 
 		if (!calib_checked &&
 		    os_monotonic_get_ns() - start_ns > time_s_to_ns(debug_get_float_option_psvr2_calib_wait_s())) {
@@ -1552,10 +1574,25 @@ psvr2_usb_thread(void *ptr)
 
 	os_thread_helper_unlock(&hmd->usb_thread);
 
-	// Shut down USB communication
+	// Shut down USB communication: cancel every transfer, then wait until each has called back (cancelled) before
+	// they're freed, at most 1 s (one pass used to be all, and a transfer still in flight could be freed).
 	psvr2_usb_stop(hmd);
 
-	libusb_handle_events(hmd->ctx);
+	const timepoint_ns give_up_ns = os_monotonic_get_ns() + U_TIME_1S_IN_NS;
+	int left = 0;
+	for (;;) {
+		os_thread_helper_lock(&hmd->usb_thread);
+		left = hmd->usb_active_xfers;
+		os_thread_helper_unlock(&hmd->usb_thread);
+		if (left <= 0 || os_monotonic_get_ns() > give_up_ns) {
+			break;
+		}
+		struct timeval wait = {0, 50 * 1000};
+		libusb_handle_events_timeout(hmd->ctx, &wait);
+	}
+	if (left > 0) {
+		PSVR2_WARN(hmd, "USB shutdown: %d transfers still not cancelled after 1 s", left);
+	}
 
 	return NULL;
 }
