@@ -7,6 +7,7 @@
  * @ingroup st_ovrn
  */
 
+#include "xrt/xrt_config_drivers.h"
 #include "ovrn_backend.hpp"
 
 // The room calibration (ovrn_room*, from the previous plugin, removed 2026-11-18): the saved room and its files stay valid.
@@ -634,7 +635,8 @@ public:
 	void
 	switchHandTracking()
 	{
-#ifdef XRT_BUILD_DRIVER_PSVR2
+		// Only with the hand tracker built in (onnxruntime, OpenCV): DriverKit's minimal build has neither.
+#if defined(XRT_BUILD_DRIVER_PSVR2) && defined(XRT_BUILD_DRIVER_HANDTRACKING)
 		if (!m_handTrackingWanted || m_head == NULL || m_head->name != XRT_DEVICE_PSVR2) {
 			return;
 		}
