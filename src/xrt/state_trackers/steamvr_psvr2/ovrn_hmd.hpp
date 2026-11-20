@@ -15,12 +15,6 @@
 
 #include "os/os_time.h"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <cmath>
 #include <cstdlib>
 #include <chrono>
@@ -78,13 +72,6 @@ public:
 		}
 	}
 
-
-	~Hmd()
-	{
-		if (m_previewSock >= 0) {
-			close(m_previewSock);
-		}
-	}
 
 	explicit Hmd(Backend *backend)
 	    : TrackedDevice(vr::TrackedDeviceClass_HMD, backend->headInfo().serial), m_backend(backend),
@@ -396,7 +383,6 @@ private:
 		}
 		m_eyeUpdates++;
 		vr::VRDriverInput()->UpdateEyeTrackingComponent(m_eyeHandle, &d, offset_s);
-		sendEyePreview(d);
 
 		// Every 30 s: how much of the gaze SteamVR got was valid, and the latest direction (+yaw right, +pitch up).
 		const int64_t now = (int64_t)os_monotonic_get_ns();
@@ -415,52 +401,6 @@ private:
 			m_eyeUpdatesAtLog = m_eyeUpdates;
 			m_eyeFreshAtLog = m_eyeFresh;
 		}
-	}
-
-	/*!
-	 * Eye-tracking test (DriverKit's "Eye tracking test"): while the flag file $XDG_RUNTIME_DIR/monado-eye-preview
-	 * exists, every valid gaze sample goes to the EyeTrackVR calibration overlay's preview mode
-	 * (github.com/EyeTrackVR/EyeTrackVR-Calibration-Overlay), which draws a ring where you look over reference dots:
-	 * UDP to 127.0.0.1:2113, 16 bytes big-endian: int32 140, float tan(yaw) (+right), tan(pitch) (+up), openness.
-	 * Not-valid samples aren't sent (the overlay hides the ring after 0.3 s). OVRN_EYE_PREVIEW_PORT: another port.
-	 */
-	void
-	sendEyePreview(const vr::VREyeTrackingData_t &d)
-	{
-		const int64_t now = (int64_t)os_monotonic_get_ns();
-		if (now - m_previewCheckNs > 1'000'000'000LL) {
-			m_previewCheckNs = now;
-			const char *dir = getenv("XDG_RUNTIME_DIR");
-			struct stat st;
-			m_previewOn = dir != nullptr && stat((std::string(dir) + "/monado-eye-preview").c_str(), &st) == 0;
-			if (m_previewOn && m_previewSock < 0) {
-				m_previewSock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-				log("ovrn: eye tracking test: gaze to the EyeTrackVR overlay (UDP 127.0.0.1:%d)\n", previewPort());
-			}
-		}
-		if (!m_previewOn || m_previewSock < 0 || !d.bValid || d.vGazeTarget.v[2] > -0.05f) {
-			return;
-		}
-		const float v[3] = {d.vGazeTarget.v[0] / -d.vGazeTarget.v[2], d.vGazeTarget.v[1] / -d.vGazeTarget.v[2], 1.0f};
-		uint32_t pkt[4] = {htonl(140u), 0, 0, 0};
-		for (int i = 0; i < 3; i++) {
-			uint32_t bits;
-			memcpy(&bits, &v[i], 4);
-			pkt[i + 1] = htonl(bits);
-		}
-		struct sockaddr_in to = {};
-		to.sin_family = AF_INET;
-		to.sin_port = htons((uint16_t)previewPort());
-		to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-		sendto(m_previewSock, pkt, sizeof(pkt), MSG_DONTWAIT, (const struct sockaddr *)&to, sizeof(to));
-	}
-
-	static int
-	previewPort()
-	{
-		const char *e = getenv("OVRN_EYE_PREVIEW_PORT");
-		const int p = e != nullptr ? atoi(e) : 0;
-		return p > 0 && p < 65536 ? p : 2113;
 	}
 
 	static float
@@ -539,9 +479,6 @@ private:
 	uint64_t m_eyeUpdates = 0; //!< RunFrame thread: gaze updates sent, and how many carried valid gaze
 	uint64_t m_eyeFresh = 0;
 	bool m_eyeHadSample = false, m_eyeLoggedFirst = false;
-	int64_t m_previewCheckNs = 0; //!< eye-tracking test: flag file checked once a second
-	bool m_previewOn = false;
-	int m_previewSock = -1;
 	int64_t m_eyeLogNs = 0;
 	uint64_t m_eyeUpdatesAtLog = 0, m_eyeFreshAtLog = 0;
 	std::unique_ptr<Camera> m_camera;

@@ -14,9 +14,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
@@ -460,29 +457,6 @@ sleep_ms(int ms)
 int
 main(int argc, char **argv)
 {
-	// Eye-tracking test check (HARNESS_EYE_PREVIEW=1 with OVRN_SIM_EYE=1): a UDP socket on a free local port stands in
-	// for the EyeTrackVR overlay, and the flag file the driver looks for is created in a temporary runtime dir.
-	if (getenv("HARNESS_EYE_PREVIEW") != nullptr) {
-		const int sock = socket(AF_INET, SOCK_DGRAM, 0);
-		struct sockaddr_in a = {};
-		a.sin_family = AF_INET;
-		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-		socklen_t len = sizeof(a);
-		if (sock >= 0 && bind(sock, (struct sockaddr *)&a, sizeof(a)) == 0 &&
-		    getsockname(sock, (struct sockaddr *)&a, &len) == 0) {
-			char dir[] = "/tmp/ovrn-harness-XXXXXX";
-			if (mkdtemp(dir) != nullptr) {
-				FILE *flag = fopen((std::string(dir) + "/monado-eye-preview").c_str(), "w");
-				if (flag != nullptr) {
-					fclose(flag);
-				}
-				setenv("XDG_RUNTIME_DIR", dir, 1);
-			}
-			setenv("OVRN_EYE_PREVIEW_PORT", std::to_string(ntohs(a.sin_port)).c_str(), 1);
-			setenv("HARNESS_PREVIEW_SOCK", std::to_string(sock).c_str(), 1);
-		}
-	}
-
 	// --monado: Monado's simulated headset through the Monado backend (no hardware is opened); default: the driver's
 	// own simulated backend.
 	// --real: the Monado backend on whatever headset is plugged in (opens it over USB; no display, no SteamVR).
@@ -989,31 +963,6 @@ main(int argc, char **argv)
 					check(g_eye.invalid > 0 && !g_eye.last.bValid,
 					      "gaze whose packet is 200 ms old reaches SteamVR as not valid (never stale)");
 					check(g_eye.mixed_flags == 0, "bActive, bValid and bTracked always agree");
-					// Eye-tracking test: with the flag file, valid gaze went to the overlay port as 140, tan, tan, 1.
-					if (getenv("HARNESS_PREVIEW_SOCK") != nullptr) {
-						const int sock = atoi(getenv("HARNESS_PREVIEW_SOCK"));
-						int packets = 0, good = 0;
-						unsigned char buf[64];
-						ssize_t n;
-						while ((n = recv(sock, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
-							packets++;
-							uint32_t w[4];
-							memcpy(w, buf, 16);
-							float f[3];
-							for (int i = 0; i < 3; i++) {
-								const uint32_t bits = ntohl(w[i + 1]);
-								memcpy(&f[i], &bits, 4);
-							}
-							const float yaw = 10.0f * 3.14159265f / 180.0f, pitch = 5.0f * 3.14159265f / 180.0f;
-							const float tx = std::tan(yaw), ty = std::tan(pitch) / std::cos(yaw);
-							good += n == 16 && ntohl(w[0]) == 140u && std::fabs(f[0] - tx) < 1e-4f &&
-							        std::fabs(f[1] - ty) < 1e-4f && f[2] == 1.0f;
-						}
-						printf("    eye test overlay: %d packets, %d as expected (valid gaze only: %d)\n", packets, good,
-						       g_eye.valid);
-						check(packets > 0 && good == packets && packets <= g_eye.valid,
-						      "eye tracking test: valid gaze reaches the overlay port as 140 tan(yaw) tan(pitch) 1, nothing else");
-					}
 				}
 			}
 			check(trigger == 0.5f && trigger_updates >= 40 && stick_l == -1.0f && stick_r == 1.0f,
