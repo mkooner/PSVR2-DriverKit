@@ -18,7 +18,7 @@
 #                                        SOURCE_DATE: DriverKit's Check compares it with GitHub)
 #
 # Default dest: ~/.local/share/PSVR2-DriverKit. Progress: "STEP n/5" lines and ninja's "[done/total]" (DriverKit's
-# progress bar reads both). The repository is private: git uses your GitHub login (git credential helper / gh).
+# progress bar reads both). The repository is public; a signed-in GitHub CLI (gh) is used if there is one.
 # SteamVR must be closed for the install step: it would still have the old plugin loaded.
 
 set -euo pipefail
@@ -52,13 +52,13 @@ done
 
 echo "STEP 1/5 download the source"
 export GIT_TERMINAL_PROMPT=0
-# The repository is private: when the GitHub CLI is signed in, git gets the login from it for these commands only
+# The repository is public (no login needed); when the GitHub CLI is signed in, git uses its login for these commands only
 # (your global git config is left as it is).
 GIT_AUTH=()
 if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
 	GIT_AUTH=(-c credential.helper= -c "credential.helper=!gh auth git-credential")
 fi
-NO_LOGIN="sign in to GitHub first: gh auth login (or set up a git credential helper)"
+NO_LOGIN="couldn't reach GitHub: check your internet connection"
 if [ -d "$REPO/.git" ]; then
 	if ! git "${GIT_AUTH[@]}" -C "$REPO" fetch --depth 1 origin "$REPO_BRANCH" >"$DEST/download.log" 2>&1 ||
 		! git -C "$REPO" reset --hard FETCH_HEAD >>"$DEST/download.log" 2>&1; then

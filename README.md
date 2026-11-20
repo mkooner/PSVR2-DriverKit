@@ -61,8 +61,6 @@ runs everything.
   icons, so SteamVR shows the real controllers instead of generic ones. Sony's files aren't in this repository: the
   compile step copies them from your Steam library, so **install the app before compiling** (or compile again after
   installing it). Without it everything works, but SteamVR shows other controllers and generic icons.
-- **Access to this repository on GitHub** (it's private): be signed in with `gh auth login` or a git credential
-  helper.
 
 ### Steps
 1. **Install the build packages.** DriverKit's Compile Driver tab lists the command for Arch/CachyOS/Manjaro,
@@ -110,6 +108,9 @@ runs everything.
   - the SteamVR camera interfaces behind Room View, and the passthrough cameras' lens model;
   - the PS VR2 properties SteamVR expects;
   - reporting eye tracking to SteamVR.
+- **Device pictures in PSVR2-DriverKit:** from Wikimedia Commons: the headset by C.Suthorn
+  ([CC BY-SA 4.0](https://commons.wikimedia.org/wiki/File:PSVR2_(Non-Stereoscopic).png)), the controllers by
+  ArlindoPereira ([CC BY 4.0](https://commons.wikimedia.org/wiki/File:PlayStation_VR2.jpg)).
 
 ## Repository layout
 
