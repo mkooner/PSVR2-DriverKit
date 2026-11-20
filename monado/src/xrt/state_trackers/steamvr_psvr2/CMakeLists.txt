@@ -6,6 +6,8 @@ add_library(
 	ovrn_backend.hpp
 	ovrn_backend_monado.cpp
 	ovrn_backend_sim.cpp
+	ovrn_bluetooth.cpp
+	ovrn_bluetooth.hpp
 	ovrn_camera.hpp
 	ovrn_camera_fit.hpp
 	ovrn_controller.hpp
@@ -25,6 +27,12 @@ target_include_directories(st_ovrn INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(
 	st_ovrn PRIVATE xrt-external-openvr xrt-external-bcdec xrt-external-cjson xrt-interfaces aux_math aux_util
 	)
+
+# Disconnecting the Sense controllers through BlueZ when SteamVR closes (system D-Bus).
+if(XRT_HAVE_DBUS)
+	target_link_libraries(st_ovrn PRIVATE ${DBUS_LIBRARIES})
+	target_include_directories(st_ovrn SYSTEM PRIVATE ${DBUS_INCLUDE_DIRS})
+endif()
 
 # The room calibration measures the floor with a resting Sense controller's LED outline.
 if(XRT_BUILD_DRIVER_PSSENSE)

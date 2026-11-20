@@ -9,6 +9,7 @@
 
 #include "xrt/xrt_config_drivers.h"
 #include "ovrn_backend.hpp"
+#include "ovrn_bluetooth.hpp"
 
 // The room calibration (ovrn_room*, from the previous plugin, removed 2026-11-18): the saved room and its files stay valid.
 #include "ovrn_room_state.hpp"
@@ -295,6 +296,19 @@ public:
 			xrt_device_end_feature(m_head, XRT_DEVICE_FEATURE_EYE_TRACKING);
 		}
 		m_eyeTracking = false;
+		// The Sense controllers' Bluetooth addresses (their serials), to disconnect them once their devices are gone.
+		std::vector<std::string> sense;
+		for (int i = 0; i < 2; i++) {
+			struct xrt_device *x = m_hand[i] != NULL ? m_hand[i].load() : NULL;
+#ifdef OVRN_CONTROLLER_HOTPLUG
+			if (x == NULL) {
+				x = m_late[i].load();
+			}
+#endif
+			if (x != NULL && x->name == XRT_DEVICE_PSSENSE && is_bluetooth_address(x->serial)) {
+				sense.push_back(x->serial);
+			}
+		}
 		m_head = NULL;
 		m_hand[0] = m_hand[1] = NULL;
 		if (m_xso != NULL) {
@@ -313,6 +327,18 @@ public:
 		}
 		if (m_xinst != NULL) {
 			xrt_instance_destroy(&m_xinst);
+		}
+		/*
+		 * SteamVR closed: disconnect the Sense controllers so they don't stay on (as Sony's driver does). DriverKit's
+		 * launcher did this with bluetoothctl only for a SteamVR it started; this covers SteamVR started from Steam.
+		 */
+		for (const std::string &address : sense) {
+			std::string why;
+			if (bluetooth_disconnect(address, &why)) {
+				ovrd_log("ovrn: Sense controller %s disconnected (SteamVR closed)\n", address.c_str());
+			} else {
+				ovrd_log("ovrn: Sense controller %s not disconnected: %s\n", address.c_str(), why.c_str());
+			}
 		}
 	}
 
