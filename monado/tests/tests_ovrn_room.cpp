@@ -529,3 +529,73 @@ TEST_CASE("ovrd_room chaperone file: a driver-owned file with its own universes"
 	CHECK(room.area_m2 == Approx(8.0f));
 	CHECK(room.issues.empty());
 }
+
+TEST_CASE("ovrd_room chaperone file: a room drawn in the driver's old file moves into SteamVR's file once")
+{
+	std::string dir = temp_dir();
+	const std::string old_file = dir + "/monado_psvr2/chaperone_info.vrchap";
+	const std::string steamvr = dir + "/chaperone_info.vrchap";
+	std::string note;
+
+	// SteamVR's file with another headset's room (universe 1234) and a plain origin in ours.
+	{
+		std::ofstream f(steamvr);
+		f << "{\"jsonid\":\"chaperone_info\",\"version\":5,\"universes\":[" << universe_with_walls({{-1, -1}, {-1, 1}, {1, 1}, {1, -1}}, 2, 2.0f)
+		  << "]}";
+	}
+	{
+		cJSON *doc = cJSON_Parse(slurp(steamvr).c_str());
+		REQUIRE(doc != nullptr);
+		cJSON *u = cJSON_GetArrayItem(cJSON_GetObjectItem(doc, "universes"), 0);
+		cJSON_ReplaceItemInObject(u, "universeID", cJSON_CreateString("1234"));
+		char *text = cJSON_Print(doc);
+		std::ofstream f(steamvr);
+		f << text;
+		cJSON_free(text);
+		cJSON_Delete(doc);
+	}
+	bool has_room = true;
+	std::string err;
+	REQUIRE(ovrd_room_prepare_chaperone(steamvr, 2.0f, &has_room, &err, 0.0f, "5022", "5023"));
+	CHECK_FALSE(has_room);
+
+	// No old file / an old file without a drawn room: nothing copied.
+	CHECK_FALSE(ovrd_room_migrate_universe(old_file, steamvr, "5022", &note));
+	REQUIRE(ovrd_room_prepare_chaperone(old_file, 2.0f, &has_room, &err, 2.0f, "5022", "5023")); // driver's square
+	CHECK_FALSE(ovrd_room_migrate_universe(old_file, steamvr, "5022", &note));
+	CHECK(note == "no room drawn in the old file");
+
+	// A room drawn in the old file: copied, the other headset's room untouched.
+	{
+		cJSON *doc = cJSON_Parse(slurp(old_file).c_str());
+		REQUIRE(doc != nullptr);
+		cJSON *u = find_universe(doc, "5022");
+		REQUIRE(u != nullptr);
+		cJSON *drawn = cJSON_Parse(universe_with_walls({{-2, -1}, {-2, 1}, {2, 1}, {2, -1}}, 3, 1.5f).c_str());
+		cJSON_ReplaceItemInObject(drawn, "universeID", cJSON_CreateString("5022"));
+		cJSON_ReplaceItemViaPointer(cJSON_GetObjectItem(doc, "universes"), u, drawn);
+		char *text = cJSON_Print(doc);
+		std::ofstream f(old_file);
+		f << text;
+		cJSON_free(text);
+		cJSON_Delete(doc);
+	}
+	REQUIRE(ovrd_room_migrate_universe(old_file, steamvr, "5022", &note));
+	CHECK(note == "room copied");
+	ovrd_room_universe_info room, other;
+	REQUIRE(ovrd_room_read_universe(steamvr, "5022", &room));
+	CHECK(room.walls == 4);
+	CHECK(room.area_m2 == Approx(8.0f));
+	REQUIRE(ovrd_room_read_universe(steamvr, "1234", &other));
+	CHECK(other.walls == 4);
+	CHECK(other.area_m2 == Approx(4.0f));
+	// ... and preparing SteamVR's file afterwards keeps it (a drawn room is never replaced).
+	REQUIRE(ovrd_room_prepare_chaperone(steamvr, 2.0f, &has_room, &err, 2.0f, "5022", "5023"));
+	CHECK(has_room);
+
+	// A room already drawn in SteamVR's file is never replaced by the old one.
+	const std::string before = slurp(steamvr);
+	CHECK_FALSE(ovrd_room_migrate_universe(old_file, steamvr, "5022", &note));
+	CHECK(note == "SteamVR's file already has a room drawn there; kept");
+	CHECK(slurp(steamvr) == before);
+}

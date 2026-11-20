@@ -489,6 +489,21 @@ main(int argc, char **argv)
 		FILE *f = fopen((room_dir + "/openvr/openvrpaths.vrpath").c_str(), "w");
 		fprintf(f, "{\"config\":[\"%s\"],\"version\":1}\n", room_steam_config.c_str());
 		fclose(f);
+		// As on a real PC: SteamVR's file with another headset's room (universe 1234), and the driver's old file
+		// (until 2026-11-19 it kept the rooms there) with a room drawn in Room Setup, to be moved into SteamVR's.
+		const char *quad = "[[[-2,0,-1],[-2,2.43,-1],[-2,2.43,1],[-2,0,1]],[[-2,0,1],[-2,2.43,1],[2,2.43,1],[2,0,1]],"
+		                   "[[2,0,1],[2,2.43,1],[2,2.43,-1],[2,0,-1]],[[2,0,-1],[2,2.43,-1],[-2,2.43,-1],[-2,0,-1]]]";
+		auto universe = [&](const char *id) {
+			return std::string("{\"universeID\":\"") + id + "\",\"play_area\":[4,2],\"collision_bounds\":" + quad +
+			       ",\"seated\":{\"translation\":[0,0,0],\"yaw\":0},\"standing\":{\"translation\":[0,0,0],\"yaw\":0}}";
+		};
+		f = fopen((room_steam_config + "/chaperone_info.vrchap").c_str(), "w");
+		fprintf(f, "{\"jsonid\":\"chaperone_info\",\"version\":5,\"universes\":[%s]}\n", universe("1234").c_str());
+		fclose(f);
+		mkdir((room_steam_config + "/monado_psvr2").c_str(), 0755);
+		f = fopen((room_steam_config + "/monado_psvr2/chaperone_info.vrchap").c_str(), "w");
+		fprintf(f, "{\"jsonid\":\"chaperone_info\",\"version\":5,\"universes\":[%s]}\n", universe("5022").c_str());
+		fclose(f);
 		setenv("XDG_CONFIG_HOME", room_dir.c_str(), 1);
 		unsetenv("OVRD_ROOM");
 	} else {
@@ -760,28 +775,40 @@ main(int argc, char **argv)
 				published.assign(b.begin(), b.end());
 				published = published.c_str(); // up to the terminating NUL
 			}
-			const std::string expected = room_steam_config + "/monado_psvr2/chaperone_info.vrchap";
-			check(published == expected, "the driver publishes its own chaperone file (Prop_DriverProvidedChaperonePath_String)");
+			check(published.empty(),
+			      "the driver leaves the rooms in SteamVR's own file (no Prop_DriverProvidedChaperonePath_String: "
+			      "SteamVR failed to save into the driver's file)");
 			check(prop(0, Prop_CurrentUniverseId_Uint64, &universe) && universe == 5023,
 			      "the session universe (5023) is active until a floor capture anchors the room");
-			FILE *own = fopen(expected.c_str(), "r");
+			const std::string global = room_steam_config + "/chaperone_info.vrchap";
+			FILE *gf = fopen(global.c_str(), "r");
 			std::string text;
-			if (own != nullptr) {
+			if (gf != nullptr) {
 				char buf[4096];
 				size_t n;
-				while ((n = fread(buf, 1, sizeof(buf), own)) > 0) {
+				while ((n = fread(buf, 1, sizeof(buf), gf)) > 0) {
 					text.append(buf, n);
 				}
-				fclose(own);
+				fclose(gf);
 			}
-			check(text.find("\"universeID\":\t\"5022\"") != std::string::npos &&
-			          text.find("\"universeID\":\t\"5023\"") != std::string::npos,
-			      "the driver's file holds the room universe (5022) and the session universe (5023)");
-			FILE *global = fopen((room_steam_config + "/chaperone_info.vrchap").c_str(), "r");
-			check(global == nullptr, "SteamVR's own chaperone file is not touched");
-			if (global != nullptr) {
-				fclose(global);
+			auto has = [&](const char *id) {
+				return text.find(std::string("\"universeID\":\t\"") + id + "\"") != std::string::npos ||
+				       text.find(std::string("\"universeID\":\"") + id + "\"") != std::string::npos;
+			};
+			check(has("5022") && has("5023"),
+			      "SteamVR's file holds the room universe (5022) and the session universe (5023)");
+			check(has("1234"), "another headset's room in SteamVR's file is left alone");
+			// Both 4 x 2 m rooms (the other headset's and the moved one) are in SteamVR's file now.
+			size_t rooms = 0;
+			for (size_t at = text.find("[4, 2]"); at != std::string::npos; at = text.find("[4, 2]", at + 1)) {
+				rooms++;
 			}
+			printf("    SteamVR's chaperone file: %zu bytes, %zu drawn 4 x 2 m rooms\n", text.size(), rooms);
+			check(rooms == 2, "the room drawn in the driver's old file was moved into SteamVR's file");
+			struct stat ost;
+			check(stat((room_steam_config + "/monado_psvr2/chaperone_info.vrchap").c_str(), &ost) != 0 &&
+			          stat((room_steam_config + "/monado_psvr2/chaperone_info.vrchap.moved-to-steamvr").c_str(), &ost) == 0,
+			      "the driver's old file is renamed, so it is moved only once");
 		}
 				check(prop(0, Prop_HasDisplayComponent_Bool, &has_display) && has_display &&
 		          prop(0, Prop_IsOnDesktop_Bool, &on_desktop) && !on_desktop,

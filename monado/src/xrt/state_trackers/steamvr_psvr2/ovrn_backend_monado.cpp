@@ -207,9 +207,12 @@ public:
 		setenv("PSVR2_ACCEL_FUSION", "1", 0);
 		ovrd_log_init(vr::VRDriverLog());
 		/*
-		 * The room, before any device is added: the driver's own chaperone file (as Sony's driver keeps
-		 * playstation_vr2/chaperone_info.vrchap), published to SteamVR as Prop_DriverProvidedChaperonePath_String;
-		 * SteamVR's Room Setup writes the rooms drawn there. Universe kSessionUniverse is this session's frame (the
+		 * The room, before any device is added: SteamVR's own chaperone file, in universes of our own (Sony's driver
+		 * reads SteamVR's file too, it doesn't give SteamVR one). Until 2026-11-19 the driver published its own file
+		 * (<config>/monado_psvr2/chaperone_info.vrchap) as Prop_DriverProvidedChaperonePath_String: SteamVR read it,
+		 * but every Room Setup save failed ("[CVRChaperoneServer] Failed to presiste chaperone data", in every session
+		 * with a commit), so drawn rooms were lost; SteamVR saves its own file fine. A room drawn in the old file is
+		 * copied over once and the old file renamed. Universe kSessionUniverse is this session's frame (the
 		 * headset starts a new tracking world at every start: all 26 recordings of 2026-11-18 began at 0 0 0), with
 		 * a square play area around the start (PLAY_AREA, the DriverKit's default play area; 0: none);
 		 * kRoomUniverse is the saved room, active once a floor capture anchors it: the same default square until a
@@ -218,14 +221,21 @@ public:
 		 */
 		const std::string global = ovrd_room_chaperone_path();
 		if (!global.empty()) {
-			m_chaperonePath = global.substr(0, global.rfind('/')) + "/monado_psvr2/chaperone_info.vrchap";
+			const std::string old_file = global.substr(0, global.rfind('/')) + "/monado_psvr2/chaperone_info.vrchap";
+			struct stat st;
+			if (stat(old_file.c_str(), &st) == 0) {
+				std::string note;
+				const std::string room_id = std::to_string(kRoomUniverse);
+				ovrd_room_migrate_universe(old_file, global, room_id.c_str(), &note);
+				const std::string done = old_file + ".moved-to-steamvr";
+				const bool renamed = rename(old_file.c_str(), done.c_str()) == 0;
+				ovrd_log("Room: the driver's old chaperone file: %s; %s\n", note.c_str(),
+				         renamed ? ("renamed to " + done).c_str() : "could not rename it");
+			}
 		}
 		const float play_area = debug_get_float_option_ovrn_play_area_size();
-		m_room.init(play_area, play_area, m_chaperonePath, kRoomUniverse,
-		            kSessionUniverse);
-		if (m_room.chaperone_path().empty()) {
-			m_chaperonePath.clear(); // the room code is off or couldn't prepare the file: SteamVR's own file
-		}
+		// Empty path: the room code uses SteamVR's own file (openvrpaths.vrpath's config folder).
+		m_room.init(play_area, play_area, std::string(), kRoomUniverse, kSessionUniverse);
 		if (xrt_instance_create(NULL, &m_xinst) != XRT_SUCCESS) {
 			*why = "xrt_instance_create failed";
 			return false;
@@ -770,9 +780,10 @@ public:
 	}
 
 	std::string
+	//! None: SteamVR keeps the rooms in its own file (see start()).
 	chaperonePath() override
 	{
-		return m_chaperonePath;
+		return std::string();
 	}
 
 #ifdef XRT_BUILD_DRIVER_PSVR2
@@ -1024,7 +1035,6 @@ private:
 	std::mutex m_cameraMutex;
 	CameraImageFn m_cameraFn;
 
-	std::string m_chaperonePath;
 	int m_promptPulses = 0;
 	int64_t m_promptNextNs = 0;
 	bool m_headButton = false; //!< RunFrame thread

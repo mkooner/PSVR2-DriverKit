@@ -505,6 +505,89 @@ is_driver_rectangle(cJSON *entry)
 }
 
 bool
+ovrd_room_migrate_universe(const std::string &from, const std::string &to, const char *universe, std::string *out_note)
+{
+	auto note = [&](const std::string &s) {
+		if (out_note != nullptr) {
+			*out_note = s;
+		}
+		return false;
+	};
+	bool from_exists = false;
+	const std::string source_text = read_file(from, 4 * 1024 * 1024, &from_exists);
+	if (!from_exists || source_text.empty()) {
+		return note("no old file");
+	}
+	Json source(cJSON_Parse(source_text.c_str()), cJSON_Delete);
+	cJSON *source_universes = cJSON_GetObjectItemCaseSensitive(source.get(), "universes");
+	if (!cJSON_IsArray(source_universes)) {
+		return note("old file is not a chaperone_info document");
+	}
+	cJSON *drawn = nullptr;
+	cJSON *entry = nullptr;
+	cJSON_ArrayForEach(entry, source_universes)
+	{
+		const char *uid = universe_id(entry);
+		if (uid != nullptr && strcmp(uid, universe) == 0 && has_drawn_room(entry) && !is_driver_rectangle(entry)) {
+			drawn = entry;
+		}
+	}
+	if (drawn == nullptr) {
+		return note("no room drawn in the old file");
+	}
+
+	bool to_exists = false;
+	const std::string target_text = read_file(to, 4 * 1024 * 1024, &to_exists);
+	Json target(nullptr, cJSON_Delete);
+	if (!to_exists) {
+		target.reset(cJSON_Parse("{\"jsonid\":\"chaperone_info\",\"version\":5,\"universes\":[]}"));
+	} else if (target_text.empty()) {
+		return note("SteamVR's file unreadable or too large");
+	} else {
+		target.reset(cJSON_Parse(target_text.c_str()));
+	}
+	cJSON *id = cJSON_GetObjectItemCaseSensitive(target.get(), "jsonid");
+	cJSON *universes = cJSON_GetObjectItemCaseSensitive(target.get(), "universes");
+	if (!cJSON_IsString(id) || strcmp(id->valuestring, "chaperone_info") != 0 || !cJSON_IsArray(universes)) {
+		return note("SteamVR's file is not a chaperone_info document; left untouched");
+	}
+	cJSON *existing = nullptr;
+	cJSON_ArrayForEach(entry, universes)
+	{
+		const char *uid = universe_id(entry);
+		if (uid != nullptr && strcmp(uid, universe) == 0) {
+			existing = entry;
+		}
+	}
+	if (existing != nullptr && has_drawn_room(existing) && !is_driver_rectangle(existing)) {
+		return note("SteamVR's file already has a room drawn there; kept");
+	}
+	cJSON *copy = cJSON_Duplicate(drawn, true);
+	if (copy == nullptr) {
+		return note("internal: copying the room");
+	}
+	const bool ok = existing != nullptr ? cJSON_ReplaceItemViaPointer(universes, existing, copy)
+	                                    : cJSON_AddItemToArray(universes, copy);
+	if (!ok) {
+		cJSON_Delete(copy);
+		return note("internal: inserting the room");
+	}
+	char *printed = cJSON_Print(target.get());
+	if (printed == nullptr) {
+		return note("internal: printing SteamVR's file");
+	}
+	const std::string bytes(printed);
+	cJSON_free(printed);
+	if (!write_file_atomic(to, bytes, &target_text, !to_exists)) {
+		return note("could not write SteamVR's file (or SteamVR changed it meanwhile)");
+	}
+	if (out_note != nullptr) {
+		*out_note = "room copied";
+	}
+	return true;
+}
+
+bool
 ovrd_room_prepare_chaperone(const std::string &path,
                             float session_size,
                             bool *out_has_room,

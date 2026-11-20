@@ -237,6 +237,15 @@ ovrd_room_prepare_chaperone(const std::string &path,
                             const char *session_universe = "3");
 
 /*!
+ * Copy a room drawn in Room Setup in universe @p universe of the chaperone file @p from into the same universe of
+ * @p to (SteamVR's own file), atomically and never over a concurrent SteamVR write. Nothing is copied when @p from has
+ * no drawn room there (the driver's rectangle doesn't count) or @p to already has one (it is never replaced); other
+ * universes of @p to are untouched. Returns true when a room was copied; @p out_note says what happened.
+ */
+bool
+ovrd_room_migrate_universe(const std::string &from, const std::string &to, const char *universe, std::string *out_note);
+
+/*!
  * One universe of a chaperone file as SteamVR uses it, and what is wrong with it. collision_bounds are quads of four
  * points (bottom, top, top, bottom: SteamVR's own files) relative to the setup-standing origin, which is the standing
  * origin when there is no setup_standing2; the floor is y = 0 there.
