@@ -228,6 +228,8 @@ fi
 #                  floor mark, crouch, hold Create until the short buzz): it ties the room to that spot so it comes
 #                  back in place after a restart (SteamVR's own floor step only sets the floor height). No temporary
 #                  square in the session universe meanwhile.
+#   ROOM_SETUP=hmd SteamVR's in-headset Room Setup (as on Steam Frame) once SteamVR is up: SteamVR's room setup is
+#                  reset (vrcmd --resetroomsetup), and SteamVR then starts its required setup in the headset.
 #   ROOM_FORGET=1  delete the saved room anchor before starting (to set the room up again)
 #   OVRD_ROOM=0    the previous behaviour: a fixed 2 m play area handed to SteamVR, nothing saved
 #   PLAY_AREA=<m>  side of the square play area the driver gives SteamVR (default 2). The saved room gets
@@ -238,9 +240,9 @@ fi
 #   SONY_PROPS=<groups>  report Sony's display properties: "all", or a comma list of throttle, framerate,
 #                  syslayer, texindex, supersample, dsc, edid, display, mask (default: none)
 [ -n "${SONY_PROPS:-}" ] && export OVRN_SONY_PROPS="$SONY_PROPS" && echo "  SONY_PROPS=$SONY_PROPS: Sony's display properties reported"
-if [ "${ROOM_SETUP:-0}" = 1 ]; then
+if [ "${ROOM_SETUP:-0}" = 1 ] || [ "${ROOM_SETUP:-0}" = hmd ]; then
 	export OVRD_PLAY_AREA_SIZE=0
-	echo "  ROOM_SETUP=1: Room Setup opens once SteamVR is up"
+	echo "  ROOM_SETUP=${ROOM_SETUP}: Room Setup opens once SteamVR is up"
 fi
 if [ "${ROOM_FORGET:-0}" = 1 ]; then
 	rm -f "$HOME/.config/monado/ovrd_room.json" && echo "  ROOM_FORGET=1: deleted the saved room anchor"
@@ -435,7 +437,16 @@ else
 	# ROOM_SETUP=1: open Room Setup once the compositor is up and the devices have settled (2026-11-19: it waited for
 	# the floor capture first, but the capture can be done inside Room Setup, before accepting).
 	ROOM_SETUP_PID=""
-	if [ "${ROOM_SETUP:-0}" = 1 ]; then
+	if [ "${ROOM_SETUP:-0}" = hmd ]; then
+		(
+			for _ in $(seq 1 60); do pgrep -x vrcompositor >/dev/null && break; sleep 1; done
+			sleep 5
+			pgrep -x vrserver >/dev/null || exit 0
+			echo "  ROOM_SETUP=hmd: starting SteamVR's in-headset Room Setup (put on the headset)"
+			"$STEAMVR/bin/vrenv.sh" "$STEAMVR/bin/linux64/vrcmd" --resetroomsetup 2>&1 | grep -v -i breakpad | sed 's/^/  /'
+		) &
+		ROOM_SETUP_PID=$!
+	elif [ "${ROOM_SETUP:-0}" = 1 ]; then
 		if [ -x "$HERE/tools/vrlaunch" ]; then
 			(
 				from=$(stat -c %s "$STEAM_LOGS/vrserver.txt" 2>/dev/null || echo 0)
