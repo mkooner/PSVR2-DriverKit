@@ -14,7 +14,8 @@
 #                                        (build/openxr_monado-dev.json)
 #   <dest>/kit                           DriverKit (built from the repository), the launch scripts and tools
 #   ~/.config/PSVR2-DriverKit/driver.env where it went: the launch scripts and DriverKit read it, so everything that
-#                                        uses the driver finds this build
+#                                        uses the driver finds this build; also which commit was built (SOURCE_COMMIT,
+#                                        SOURCE_DATE: DriverKit's Check compares it with GitHub)
 #
 # Default dest: ~/.local/share/PSVR2-DriverKit. Progress: "STEP n/5" lines and ninja's "[done/total]" (DriverKit's
 # progress bar reads both). The repository is private: git uses your GitHub login (git credential helper / gh).
@@ -178,6 +179,8 @@ MONADO_BUILD="$BUILD"
 PSVR2_PLUGIN="$PLUGIN"
 PSVR2_KIT="$KIT"
 MONADO_SOURCE="$SRC"
+SOURCE_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
+SOURCE_DATE="$(git -C "$REPO" log -1 --format=%cI)"
 EOF
 echo "  $CONF_DIR/driver.env"
 echo "DONE plugin: $PLUGIN"

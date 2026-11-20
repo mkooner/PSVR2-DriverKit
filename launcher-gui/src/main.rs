@@ -656,6 +656,8 @@ struct Launcher {
     message: String,
     saved_at: Option<Instant>,
     build: Arc<Mutex<BuildState>>,
+    /// The Compile tab's Check: is the installed build the latest on GitHub?
+    check: Arc<Mutex<CheckState>>,
     /// --screenshot <file.png> [launcher|settings|compile]: render one tab, save it, quit (for checking the design).
     screenshot: Option<(PathBuf, Instant, bool)>,
     /// The device pictures (assets/): headset, left and right Sense controller.
@@ -700,6 +702,7 @@ impl Launcher {
             message: String::new(),
             saved_at: None,
             build: Arc::new(Mutex::new(BuildState::default())),
+            check: Arc::new(Mutex::new(CheckState::default())),
             screenshot: None,
             reg_cache: None,
             pictures: [
@@ -981,6 +984,107 @@ impl Launcher {
  */
 
 /// A running or finished compile (build-driver.sh's output, read on a thread).
+/// What Check found (see check_build).
+#[derive(Default)]
+struct CheckState {
+    running: bool,
+    result: Option<CheckResult>,
+}
+
+#[derive(Clone)]
+enum CheckResult {
+    NotInstalled(String),
+    UpToDate(String),
+    NewBuild(String),
+    Failed(String),
+}
+
+/// The build installed in @p dest: (commit, commit date) as build-driver.sh recorded it, or the source folder's commit
+/// for installs made before it recorded one. None: nothing installed there.
+fn installed_build(dest: &Path) -> Option<(String, String)> {
+    if !dest.join("build/steamvr-monado-psvr2/driver.vrdrivermanifest").exists() {
+        return None;
+    }
+    let env = driver_env();
+    let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+    let same = get("PSVR2_DRIVERKIT_HOME").map(|h| Path::new(&h).canonicalize().ok() == dest.canonicalize().ok()).unwrap_or(false);
+    if same {
+        if let Some(c) = get("SOURCE_COMMIT").filter(|c| !c.is_empty()) {
+            return Some((c, get("SOURCE_DATE").unwrap_or_default()));
+        }
+    }
+    let git = |args: &[&str]| {
+        Command::new("git").arg("-C").arg(dest.join("source")).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let c = git(&["rev-parse", "HEAD"])?;
+    Some((c, git(&["log", "-1", "--format=%cI"]).unwrap_or_default()))
+}
+
+/// The latest commit on GitHub's main branch: (commit, date, first line of its message). Asks the GitHub CLI when it's
+/// signed in (the repository is private), else git with your own credentials, never prompting.
+fn latest_on_github() -> Result<(String, String, String), String> {
+    let gh = Command::new("gh")
+        .args(["api", &format!("repos/{}/commits/main", REPO_WEB.trim_start_matches("github.com/")), "--jq", ".sha, .commit.committer.date, (.commit.message | split(\"\\n\") | .[0])"])
+        .stdin(Stdio::null())
+        .output();
+    if let Ok(o) = &gh {
+        if o.status.success() {
+            let t = String::from_utf8_lossy(&o.stdout);
+            let mut l = t.lines();
+            if let (Some(c), Some(d)) = (l.next(), l.next()) {
+                return Ok((c.trim().to_string(), d.trim().to_string(), l.next().unwrap_or("").trim().to_string()));
+            }
+        }
+    }
+    let o = Command::new("git")
+        .args(["ls-remote", &format!("https://{REPO_WEB}.git"), "refs/heads/main"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("couldn't run git: {e}"))?;
+    let t = String::from_utf8_lossy(&o.stdout);
+    match t.split_whitespace().next() {
+        Some(c) if o.status.success() && c.len() >= 7 => Ok((c.to_string(), String::new(), String::new())),
+        _ => Err("couldn't reach GitHub: sign in first (gh auth login) or check your connection".into()),
+    }
+}
+
+/// "2026-11-19 14:32" in local time from an ISO date (GitHub's are UTC, git's carry their offset).
+fn short_date(iso: &str) -> String {
+    if iso.is_empty() {
+        return String::new();
+    }
+    Command::new("date")
+        .args(["-d", iso, "+%Y-%m-%d %H:%M"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| iso.to_string())
+}
+
+fn check_build(dest: &Path) -> CheckResult {
+    let installed = installed_build(dest);
+    let latest = latest_on_github();
+    match (installed, latest) {
+        (None, Ok((c, d, m))) => CheckResult::NotInstalled(format!(
+            "Not installed in {}. Latest on GitHub: {} ({}){}. Press Compile Driver to install it.",
+            dest.display(), &c[..7.min(c.len())], short_date(&d), if m.is_empty() { String::new() } else { format!(", \"{m}\"") })),
+        (None, Err(e)) => CheckResult::NotInstalled(format!("Not installed in {}. ({e})", dest.display())),
+        (Some(_), Err(e)) => CheckResult::Failed(e),
+        (Some((ic, id)), Ok((c, d, m))) => {
+            if ic == c {
+                CheckResult::UpToDate(format!("Up to date: build {} ({}) is the latest on GitHub.", &ic[..7.min(ic.len())], short_date(&id)))
+            } else {
+                CheckResult::NewBuild(format!(
+                    "New build available: installed {} ({}), GitHub has {} ({}){}. Press Compile Driver to update.",
+                    &ic[..7.min(ic.len())], short_date(&id), &c[..7.min(c.len())], short_date(&d),
+                    if m.is_empty() { String::new() } else { format!(", \"{m}\"") }))
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct BuildState {
     running: bool,
@@ -1586,10 +1690,33 @@ impl Launcher {
                 {
                     self.start_compile(steamvr);
                 }
-                if running {
+                let checking = self.check.lock().unwrap().running;
+                if ui
+                    .add_enabled(!running && !checking, egui::Button::new("Check"))
+                    .on_hover_text("Is the installed build the latest on GitHub, is there a newer one, or is nothing installed yet?")
+                    .clicked()
+                {
+                    let dest = PathBuf::from(self.cfg.install_dir.trim());
+                    *self.check.lock().unwrap() = CheckState { running: true, result: None };
+                    let state = self.check.clone();
+                    thread::spawn(move || {
+                        let r = check_build(&dest);
+                        *state.lock().unwrap() = CheckState { running: false, result: Some(r) };
+                    });
+                }
+                if running || checking {
                     ui.spinner();
                 }
             });
+            if let Some(r) = self.check.lock().unwrap().result.clone() {
+                let (color, text) = match r {
+                    CheckResult::UpToDate(t) => (theme::LIT, t),
+                    CheckResult::NewBuild(t) => (theme::PS_BLUE.gamma_multiply(1.4), t),
+                    CheckResult::NotInstalled(t) => (theme::SLATE, t),
+                    CheckResult::Failed(t) => (theme::FAULT, t),
+                };
+                ui.label(egui::RichText::new(text).color(color).font(theme::bold(13.0)));
+            }
             if running || result.is_some() {
                 let text = match (running, &result) {
                     (true, _) if step == 3 && total > 0 => format!("Compiling {done} of {total}"),
@@ -1821,6 +1948,16 @@ const BUILD_SCRIPT: &str = include_str!("../../build-driver.sh");
 const REPO_WEB: &str = "github.com/mkooner/PSVR2-DriverKit";
 
 fn main() -> eframe::Result<()> {
+    // --check [install folder]: what the Compile tab's Check button reports, printed (default: the saved install folder)
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--check") {
+        let dest = args.get(i + 1).cloned().unwrap_or_else(|| load_config().install_dir);
+        let text = match check_build(Path::new(&dest)) {
+            CheckResult::UpToDate(t) | CheckResult::NewBuild(t) | CheckResult::NotInstalled(t) | CheckResult::Failed(t) => t,
+        };
+        println!("{text}");
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--status") {
         // What the launcher sees, without the window (for checks and scripts).
         let st = poll_status();
