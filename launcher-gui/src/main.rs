@@ -457,7 +457,7 @@ fn bt_controllers() -> (Option<bool>, Option<bool>) {
     (left, right)
 }
 
-/// The driver's chaperone file without a room drawn in Room Setup in the saved-room universe (5022): Some(new text),
+/// SteamVR's chaperone file without a room drawn in Room Setup in the saved-room universe (5022): Some(new text),
 /// or None if there is none (the driver's default square, marked monado_rectangle, and other universes are kept).
 fn without_drawn_room(text: &str) -> Result<Option<String>, String> {
     let mut doc: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -762,8 +762,9 @@ impl Launcher {
         }
     }
 
-    /// The driver's own chaperone file (driver_monado_psvr2: <SteamVR config>/monado_psvr2/chaperone_info.vrchap),
-    /// SteamVR's config folder from ~/.config/openvr/openvrpaths.vrpath as the driver finds it.
+    /// SteamVR's chaperone file (<SteamVR config>/chaperone_info.vrchap), where the driver keeps its rooms (universes
+    /// 5022 and 5023) since 2026-11-19: SteamVR couldn't save into the driver's own file (monado_psvr2/...), which the
+    /// driver moves over once. SteamVR's config folder from ~/.config/openvr/openvrpaths.vrpath as the driver finds it.
     fn chaperone_file(&self) -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_default();
         let vrpath = Path::new(&home).join(".config/openvr/openvrpaths.vrpath");
@@ -779,7 +780,7 @@ impl Launcher {
             };
             root.join("config")
         });
-        config.join("monado_psvr2/chaperone_info.vrchap")
+        config.join("chaperone_info.vrchap")
     }
 
     /// Set Default Play Area: take a room drawn in Room Setup out of the driver's saved-room universe (5022,
