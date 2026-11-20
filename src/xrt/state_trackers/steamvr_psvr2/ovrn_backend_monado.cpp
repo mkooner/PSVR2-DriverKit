@@ -241,7 +241,7 @@ public:
 #ifdef XRT_BUILD_DRIVER_PSVR2
 		psvr2_hand_tracking_want(m_handTrackingWanted);
 #endif
-		ovrd_log("ovrn: hand tracking %s (DriverKit's setting, %s)\n",
+		ovrd_log("ovrn: hand tracking (experimental) %s (DriverKit's setting, %s)\n",
 		         m_handTrackingWanted ? "on: the cameras track bare hands while a controller is off" : "off",
 		         driverkitSettingsPath().c_str());
 		if (xrt_instance_create(NULL, &m_xinst) != XRT_SUCCESS) {

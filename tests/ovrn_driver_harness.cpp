@@ -853,12 +853,12 @@ main(int argc, char **argv)
 			      "SteamVR's async reprojection is switched on before the compositor starts");
 		}
 		if (room) {
-			check(g_logText.find("hand tracking on: the cameras track bare hands") != std::string::npos,
+			check(g_logText.find("hand tracking (experimental) on: the cameras track bare hands") != std::string::npos,
 			      "DriverKit's settings file reaches the driver however SteamVR starts (hand tracking on)");
 		} else if (monado && getenv("XDG_CONFIG_HOME") == nullptr &&
 		           access((std::string(getenv("HOME") ? getenv("HOME") : "") + "/.config/PSVR2-DriverKit/settings.conf").c_str(), F_OK) != 0) {
 			// (only without a real DriverKit settings file in the user's config)
-			check(g_logText.find("ovrn: hand tracking off") != std::string::npos,
+			check(g_logText.find("ovrn: hand tracking (experimental) off") != std::string::npos,
 			      "without DriverKit's setting hand tracking stays off");
 		}
 		check(provider->GetInterfaceVersions() != nullptr, "interface versions are reported");
