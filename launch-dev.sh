@@ -9,6 +9,8 @@
 #   ./launch-dev.sh
 #   ./launch-dev.sh --record                   also record the controller tracker's input (blobs, camera poses) with
 #                                              the controllers' and headset's sensors, for offline replay (large)
+#   ./launch-dev.sh --record-camera            also record the bottom camera pair (hand tracking's images) for offline
+#                                              replay (logs/camera-*.pv2c, ~30 MB/s: keep the run short)
 #   DEV_BUILD=/path/to/build ./launch-dev.sh   another build folder
 
 set -eu
@@ -22,6 +24,9 @@ for a in "$@"; do
 	if [ "$a" = "--record" ]; then
 		export RECORD_DATASET=1 TRACKING=1
 		echo "== Recording the controller tracker's input for offline replay (logs/dataset-*, sense-*, record-*)"
+	elif [ "$a" = "--record-camera" ]; then
+		export RECORD_CAMERA=1
+		echo "== Recording the bottom camera pair for offline hand tracking replay (logs/camera-*.pv2c, ~30 MB/s)"
 	else
 		args+=("$a")
 	fi
