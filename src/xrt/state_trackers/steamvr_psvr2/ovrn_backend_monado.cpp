@@ -565,6 +565,67 @@ public:
 		return true;
 	}
 
+	//! The hand tracking device for a hand (optical hand tracking from the headset's cameras), or NULL.
+	struct xrt_device *
+	handTracker(Hand hand) const
+	{
+		if (m_xsysd == NULL) {
+			return NULL;
+		}
+		return hand == Hand::Left ? m_xsysd->static_roles.hand_tracking.unobstructed.left
+		                          : m_xsysd->static_roles.hand_tracking.unobstructed.right;
+	}
+
+	bool
+	hasHandTracking() override
+	{
+		return handTracker(Hand::Left) != NULL || handTracker(Hand::Right) != NULL;
+	}
+
+	/*!
+	 * The tracked hand from Monado's hand tracking (xrt_hand_joint_set: the hand pose in the tracker's space, the
+	 * joints relative to it), in the backend's tracking space like the device poses (the tracking origin's offset
+	 * applied). The tracker answers from its latest result without waiting for a camera frame.
+	 */
+	bool
+	handJoints(Hand hand, int64_t at_ns, HandJoints *out) override
+	{
+		struct xrt_device *xdev = handTracker(hand);
+		if (xdev == NULL) {
+			return false;
+		}
+		*out = HandJoints();
+		struct xrt_hand_joint_set set = {};
+		int64_t ts = 0;
+		const enum xrt_input_name name =
+		    hand == Hand::Left ? XRT_INPUT_HT_UNOBSTRUCTED_LEFT : XRT_INPUT_HT_UNOBSTRUCTED_RIGHT;
+		if (xrt_device_get_hand_tracking(xdev, name, at_ns, &set, &ts) != XRT_SUCCESS) {
+			return true; // a tracker, but no hand now
+		}
+		const int need = XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_VALID_BIT;
+		if (!set.is_active || (set.hand_pose.relation_flags & need) != need) {
+			return true;
+		}
+		struct xrt_pose hand_pose = set.hand_pose.pose;
+		if (xdev->tracking_origin != NULL) {
+			struct xrt_pose world;
+			math_pose_transform(&xdev->tracking_origin->initial_offset, &hand_pose, &world);
+			hand_pose = world;
+		}
+		out->active = true;
+		out->timestamp_ns = ts;
+		for (int i = 0; i < HandJoints::kCount; i++) {
+			const struct xrt_hand_joint_value &v = set.values.hand_joint_set_default[i];
+			struct xrt_pose p;
+			math_pose_transform(&hand_pose, &v.relation.pose, &p);
+			out->joint[i].orientation = {p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w};
+			out->joint[i].position = {p.position.x, p.position.y, p.position.z};
+			out->joint_valid[i] = (v.relation.relation_flags & need) == need;
+			out->radius[i] = v.radius;
+		}
+		return true;
+	}
+
 	//! Where the grip is in the controller's SteamVR root (identity without the Sense driver).
 	Pose
 	gripInRoot(Hand hand)

@@ -56,6 +56,20 @@ struct TrackedPose
 	bool position_tracked = false;
 };
 
+/*!
+ * One tracked hand's joints at one time: OpenXR's 26 (XR_EXT_hand_tracking order and axes), each in the backend's
+ * tracking space (as TrackedPose), the same source OpenXR apps get.
+ */
+struct HandJoints
+{
+	static constexpr int kCount = 26;
+	bool active = false;      //!< the hand is tracked now (else nothing below is meaningful)
+	int64_t timestamp_ns = 0; //!< when the joints were seen or predicted for (monotonic)
+	Pose joint[kCount];
+	bool joint_valid[kCount] = {}; //!< position and orientation valid
+	float radius[kCount] = {};     //!< metres
+};
+
 //! Half angles in radians, signed as OpenXR's XrFovf (left and down negative).
 struct Fov
 {
@@ -239,6 +253,22 @@ public:
 	controllerInputs(Hand hand, float *out, size_t max) = 0;
 	virtual void
 	haptic(Hand hand, float duration_s, float frequency_hz, float amplitude) = 0;
+
+	//! Whether the backend can track bare hands (optical hand tracking).
+	virtual bool
+	hasHandTracking()
+	{
+		return false;
+	}
+	//! The hand's joints at @p at_ns (predicted or the latest), never blocking. False: no hand tracking at all.
+	virtual bool
+	handJoints(Hand hand, int64_t at_ns, HandJoints *out)
+	{
+		(void)hand;
+		(void)at_ns;
+		(void)out;
+		return false;
+	}
 
 	//! The room: the same transform for every device, and SteamVR's universe it belongs to (2: the saved room).
 	virtual WorldTransform
