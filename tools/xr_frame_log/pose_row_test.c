@@ -1,11 +1,15 @@
 // Offline check of the V (projection layer pose) rows: feeds xrEndFrame a two-view projection layer through the layer.
 #include "xr_frame_log.c"
 #include <assert.h>
+#include <stdlib.h>
+#include <unistd.h>
 static XRAPI_ATTR XrResult XRAPI_CALL fake_end(XrSession s, const XrFrameEndInfo *ei) { (void)s; (void)ei; return XR_SUCCESS; }
 int main(void)
 {
-	char path[] = "/tmp/claude-1000/-home-mehrab-Documents-Claude-Monado/40a7e3ad-ab88-46b0-b8d6-1a1ce7ba5ad9/scratchpad/pose_row.csv";
-	log_file = fopen(path, "w");
+	char path[] = "/tmp/pose_row_test-XXXXXX";
+	int fd = mkstemp(path);
+	assert(fd >= 0);
+	log_file = fdopen(fd, "w");
 	next_end = fake_end;
 	XrCompositionLayerProjectionView v[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
 	v[0].pose = (XrPosef){{0, 0.1305262f, 0, 0.9914449f}, {-0.032f, 1.6f, 0.0f}};
