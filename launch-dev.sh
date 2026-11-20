@@ -7,6 +7,8 @@
 # Sony's, whatever was there). Anything after the script name is passed on, e.g. ./launch-dev.sh with LOG_LEVEL=debug.
 #
 #   ./launch-dev.sh
+#   ./launch-dev.sh --record                   also record the controller tracker's input (blobs, camera poses) with
+#                                              the controllers' and headset's sensors, for offline replay (large)
 #   DEV_BUILD=/path/to/build ./launch-dev.sh   another build folder
 
 set -eu
@@ -15,4 +17,13 @@ DEV_BUILD="${DEV_BUILD:-$HERE/../trial/build}"
 [ -f "$DEV_BUILD/steamvr-monado-psvr2/bin/linux64/driver_monado_psvr2.so" ] ||
 	{ echo "No SteamVR plugin in $DEV_BUILD (build it: ninja -C $DEV_BUILD)"; exit 1; }
 echo "== Development build: $DEV_BUILD"
-MONADO_BUILD="$DEV_BUILD" exec "$HERE/launch-steamvr.sh" "$@"
+args=()
+for a in "$@"; do
+	if [ "$a" = "--record" ]; then
+		export RECORD_DATASET=1 TRACKING=1
+		echo "== Recording the controller tracker's input for offline replay (logs/dataset-*, sense-*, record-*)"
+	else
+		args+=("$a")
+	fi
+done
+MONADO_BUILD="$DEV_BUILD" exec "$HERE/launch-steamvr.sh" ${args[@]+"${args[@]}"}

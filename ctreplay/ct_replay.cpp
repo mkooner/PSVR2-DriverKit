@@ -293,6 +293,18 @@ main(int argc, char **argv)
 		fprintf(stderr, "expected one mosaic with samples\n");
 		return 1;
 	}
+	/*
+	 * Pair the IMU files with the devices by hand: the tracker numbers the controllers in the order they joined, so
+	 * device 0 is the right one when it connected first (2026-11-19 21:18: replayed with the files the other way
+	 * round, each controller got the other's IMU and the fix rate read 31% / 19% instead of 91% / 91%). The Sense LED
+	 * models are mirror images: LED 0 at x < 0 is the left controller's.
+	 */
+	if (reader.devices.size() >= 2 && reader.devices[0].leds[0].position.x > 0 &&
+	    reader.devices[1].leds[0].position.x < 0) {
+		std::swap(imu[0], imu[1]);
+		printf("device 0 is the right controller (it joined first): IMU files paired as device 0 = %s, device 1 = %s\n",
+		       argv[3], argv[2]);
+	}
 	auto &samples = reader.samples;
 	std::stable_sort(samples.begin(), samples.end(), [](const CameraSample &a, const CameraSample &b) {
 		return a.timestamp_ns < b.timestamp_ns;
@@ -707,6 +719,7 @@ main(int argc, char **argv)
 	// Up direction of each fix vs the device's IMU (the gravity gate's test), to spot flipped LED correspondences.
 	for (size_t di = 0; di < devs.size(); di++) {
 		int over = 0, n = 0;
+		std::vector<double> angs, pitches;
 		for (auto &f : devs[di]->fixes) {
 			xrt_quat q_imu;
 			if (!device_imu_orientation(&devs[di]->base, f.t, &q_imu))
@@ -720,8 +733,76 @@ main(int argc, char **argv)
 			double ang = acos(std::clamp((double)(a.x * b.x + a.y * b.y + a.z * b.z), -1.0, 1.0)) * 180 / M_PI;
 			over += ang > 35;
 			n++;
+			angs.push_back(ang);
+			if (getenv("CT_REPLAY_DUMP_UP")) {
+				// per fix: device, time, optical vs IMU up angle, the turn rate then (gyro, deg/s)
+				auto it = std::lower_bound(imu[di].begin(), imu[di].end(), f.t,
+				                           [](const ImuRow &r, int64_t tt) { return r.t < tt; });
+				double gn = 0;
+				if (it != imu[di].end())
+					gn = sqrt(it->g[0] * it->g[0] + it->g[1] * it->g[1] + it->g[2] * it->g[2]) * 180 / M_PI;
+				printf("UP,%zu,%lld,%.2f,%.1f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n", di, (long long)f.t, ang, gn, a.x, a.y,
+				       a.z, b.x, b.y, b.z);
+			}
+			// signed tilt about the device's X axis (what PSSENSE_IMU_REF_CORRECTION_DEG turns): optical up vs IMU up
+			pitches.push_back((atan2(a.z, a.y) - atan2(b.z, b.y)) * 180 / M_PI);
 		}
 		printf("device %zu: %d of %d fixes more than 35 deg from the IMU up\n", di, over, n);
+		/*
+		 * The IMU's mounting angle about the LED model's X axis (PSSENSE_IMU_ANGLE_DEG), from gravity at rest: the
+		 * accelerometer (IMU frame) turned by Rx(theta) should point along the optical pose's up in the LED frame.
+		 */
+		{
+			std::vector<std::pair<xrt_vec3, xrt_vec3>> pairs; // (accel unit in IMU frame, optical up in LED frame)
+			const auto &rows = imu[di];
+			for (auto &f : devs[di]->fixes) {
+				auto it = std::lower_bound(rows.begin(), rows.end(), f.t,
+				                           [](const ImuRow &r, int64_t tt) { return r.t < tt; });
+				if (it == rows.end())
+					continue;
+				const double an = sqrt(it->a[0] * it->a[0] + it->a[1] * it->a[1] + it->a[2] * it->a[2]);
+				const double gn = sqrt(it->g[0] * it->g[0] + it->g[1] * it->g[1] + it->g[2] * it->g[2]);
+				if (fabs(an - 9.81) > 0.4 || gn > 0.05)
+					continue; // not at rest
+				xrt_quat inv;
+				math_quat_invert(&f.pose.orientation, &inv);
+				xrt_vec3 up = {0, 1, 0}, up_led;
+				math_quat_rotate_vec3(&inv, &up, &up_led);
+				pairs.push_back({{(float)(it->a[0] / an), (float)(it->a[1] / an), (float)(it->a[2] / an)}, up_led});
+			}
+			if (pairs.size() > 50) {
+				auto err = [&](double deg) {
+					xrt_quat q;
+					const xrt_vec3 xaxis = {1, 0, 0};
+					math_quat_from_angle_vector((float)(deg * M_PI / 180), &xaxis, &q);
+					std::vector<double> e;
+					for (auto &pr : pairs) {
+						xrt_vec3 v;
+						math_quat_rotate_vec3(&q, &pr.first, &v);
+						e.push_back(acos(std::clamp((double)(v.x * pr.second.x + v.y * pr.second.y + v.z * pr.second.z),
+						                            -1.0, 1.0)) *
+						            180 / M_PI);
+					}
+					std::sort(e.begin(), e.end());
+					return e[e.size() / 2];
+				};
+				double best = 0, best_e = 1e9;
+				for (double d = -180; d < 180; d += 0.25) {
+					double e = err(d);
+					if (e < best_e)
+						best_e = e, best = d;
+				}
+				printf("device %zu: IMU mount from gravity at rest (%zu fixes): best Rx %+.2f deg (median %.1f deg off); "
+				       "at -50.27: %.1f, at -79.77: %.1f, at +50.27: %.1f, at +79.77: %.1f\n",
+				       di, pairs.size(), best, best_e, err(-50.27), err(-79.77), err(50.27), err(79.77));
+			}
+		}
+		if (!angs.empty()) {
+			std::sort(angs.begin(), angs.end());
+			std::sort(pitches.begin(), pitches.end());
+			printf("device %zu: optical vs IMU up: median %.1f deg, p90 %.1f deg; tilt about X median %+.1f deg\n", di,
+			       angs[angs.size() / 2], angs[angs.size() * 9 / 10], pitches[pitches.size() / 2]);
+		}
 	}
 	// Replay vs live pose for the same device, camera and frame.
 	{
