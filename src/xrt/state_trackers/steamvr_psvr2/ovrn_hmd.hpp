@@ -374,9 +374,45 @@ private:
 				offset_s = (age_s > 0.0 && age_s < 0.1) ? -age_s : 0.0;
 			}
 			m_eyeFresh += ok ? 1 : 0;
+			m_eyeHadSample = true;
+			if (ok && !m_eyeLoggedFirst) {
+				m_eyeLoggedFirst = true;
+				log("ovrn: eye tracking: first valid gaze (yaw %+.1f, pitch %+.1f deg)\n", gazeYawDeg(d.vGazeTarget),
+				    gazePitchDeg(d.vGazeTarget));
+			}
 		}
 		m_eyeUpdates++;
 		vr::VRDriverInput()->UpdateEyeTrackingComponent(m_eyeHandle, &d, offset_s);
+
+		// Every 30 s: how much of the gaze SteamVR got was valid, and the latest direction (+yaw right, +pitch up).
+		const int64_t now = (int64_t)os_monotonic_get_ns();
+		if (m_eyeLogNs == 0) {
+			m_eyeLogNs = now;
+		} else if (now - m_eyeLogNs >= 30'000'000'000LL) {
+			const uint64_t n = m_eyeUpdates - m_eyeUpdatesAtLog, v = m_eyeFresh - m_eyeFreshAtLog;
+			if (!m_eyeHadSample) {
+				log("ovrn: eye tracking: no gaze from the headset in the last 30 s\n");
+			} else {
+				log("ovrn: eye tracking: %.0f%% of %llu gaze updates valid in 30 s; last %s yaw %+.1f, pitch %+.1f deg\n",
+				    n ? 100.0 * (double)v / (double)n : 0.0, (unsigned long long)n, d.bValid ? "valid" : "(not valid)",
+				    gazeYawDeg(d.vGazeTarget), gazePitchDeg(d.vGazeTarget));
+			}
+			m_eyeLogNs = now;
+			m_eyeUpdatesAtLog = m_eyeUpdates;
+			m_eyeFreshAtLog = m_eyeFresh;
+		}
+	}
+
+	static float
+	gazeYawDeg(const vr::HmdVector3_t &t)
+	{
+		return std::atan2(t.v[0], -t.v[2]) * 57.2958f;
+	}
+
+	static float
+	gazePitchDeg(const vr::HmdVector3_t &t)
+	{
+		return std::atan2(t.v[1], std::sqrt(t.v[0] * t.v[0] + t.v[2] * t.v[2])) * 57.2958f;
 	}
 
 	void
@@ -442,6 +478,9 @@ private:
 	vr::VRInputComponentHandle_t m_eyeHandle = vr::k_ulInvalidInputComponentHandle;
 	uint64_t m_eyeUpdates = 0; //!< RunFrame thread: gaze updates sent, and how many carried valid gaze
 	uint64_t m_eyeFresh = 0;
+	bool m_eyeHadSample = false, m_eyeLoggedFirst = false;
+	int64_t m_eyeLogNs = 0;
+	uint64_t m_eyeUpdatesAtLog = 0, m_eyeFreshAtLog = 0;
 	std::unique_ptr<Camera> m_camera;
 
 	//! The hidden-area mask from the backend's file, handed to SteamVR as it is (render target UV).
