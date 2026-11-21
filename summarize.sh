@@ -102,6 +102,18 @@ echo "== Camera poses"
 grep -E "camera [0-9] pose position" "$LOG" | tail -4 | cut -c1-200
 
 echo
+echo "== Controller tracker (every 5 s: blobs, searches, poses found, rejected, accepted per controller)"
+if [ "$(count "Tracker report")" -gt 0 ]; then
+	echo "  totals over the run:"
+	grep -E "Tracker report device" "$LOG" | sed -E 's/.*Tracker report device ([0-9]+): searches ([0-9]+) found ([0-9]+), fast path ([0-9]+), refinement failed ([0-9]+), rejected by IMU up ([0-9]+) \/ gyro ([0-9]+), accepted ([0-9]+).*/\1 \2 \3 \4 \5 \6 \7 \8/' |
+		awk '{s[$1]+=$2; f[$1]+=$3; p[$1]+=$4; r[$1]+=$5; u[$1]+=$6; g[$1]+=$7; a[$1]+=$8} END {for (d in s) printf "    device %s: searches %d found %d, fast path %d, refinement failed %d, rejected up %d / gyro %d, accepted %d\n", d, s[d], f[d], p[d], r[d], u[d], g[d], a[d]}' | sort
+	echo "  last reports:"
+	grep -E "Tracker report" "$LOG" | tail -6 | sed -E 's/^.*Tracker report/    Tracker report/' | cut -c1-200
+else
+	echo "  no tracker reports (driver older than the report, or the tracker never started)"
+fi
+
+echo
 echo "== USB streams (a stopped stream sends nothing more this session; commands that failed)"
 n=$(count "USB stream stopped|Failed to send report|Failed to get report|cannot cancel")
 if [ "$n" -gt 0 ]; then

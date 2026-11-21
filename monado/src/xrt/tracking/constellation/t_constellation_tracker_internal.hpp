@@ -520,11 +520,40 @@ struct EurocRecorderSession
 	~EurocRecorderSession();
 };
 
+/*!
+ * Counters for the tracker report, logged at info level every 5 s (diag_maybe_report): where a controller's tracking
+ * stops (no blobs, searches that find nothing, refinement failing, poses rejected by the IMU gates, or accepted), so a
+ * normal run shows it without the debug log. Relaxed atomics, bumped on the camera threads; no per-blob work.
+ */
+struct TrackerDiag
+{
+	static constexpr int kDevices = 4;
+	std::atomic<uint64_t> observations{0}; //!< Blob observations received (all cameras).
+	std::atomic<uint64_t> blobs{0};        //!< Blobs in them, for the average.
+	std::atomic<uint64_t> max_blobs{0};    //!< Most blobs in one observation.
+	std::atomic<uint64_t> fast_drops{0};   //!< Samples dropped because the fast thread was still busy.
+	std::atomic<uint64_t> slow_drops{0};   //!< Samples dropped because the slow thread was still busy.
+	struct Dev
+	{
+		std::atomic<uint64_t> slow_searches{0}; //!< Correspondence searches run.
+		std::atomic<uint64_t> slow_found{0};    //!< ... that found a pose.
+		std::atomic<uint64_t> fast_found{0};    //!< Poses found by the fast path (prediction, recovery, snap).
+		std::atomic<uint64_t> refine_failed{0}; //!< Found poses whose RANSAC refinement failed.
+		std::atomic<uint64_t> rejected_up{0};   //!< Rejected: up direction disagrees with the IMU.
+		std::atomic<uint64_t> rejected_gyro{0}; //!< Rejected: rotation disagrees with the gyro.
+		std::atomic<uint64_t> accepted{0};      //!< Poses accepted ("Found pose for device").
+	} dev[kDevices];
+	std::atomic<int64_t> last_report_ns{0};
+};
+
 struct ConstellationTracker : public ConstellationTrackerBase
 {
 public: // Fields
 	//! Whether the constellation tracker is running
 	bool running = true;
+
+	//! Counters for the periodic tracker report.
+	TrackerDiag diag;
 
 	enum u_logging_level log_level;
 

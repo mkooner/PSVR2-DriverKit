@@ -114,6 +114,77 @@ DEBUG_GET_ONCE_BOOL_OPTION(constellation_tracker_rerun_spawn, "CONSTELLATION_TRA
  *
  */
 
+//! The report counters of device @p id, or NULL for an id past TrackerDiag::kDevices.
+static TrackerDiag::Dev *
+diag_dev(ConstellationTracker *tracker, int id)
+{
+	return (id >= 0 && id < TrackerDiag::kDevices) ? &tracker->diag.dev[id] : nullptr;
+}
+
+static void
+diag_dev_inc(ConstellationTracker *tracker, int id, std::atomic<uint64_t> TrackerDiag::Dev::*field)
+{
+	TrackerDiag::Dev *d = diag_dev(tracker, id);
+	if (d != nullptr) {
+		(d->*field).fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+static void
+diag_count_observation(ConstellationTracker *tracker, uint32_t num_blobs)
+{
+	TrackerDiag &g = tracker->diag;
+	g.observations.fetch_add(1, std::memory_order_relaxed);
+	g.blobs.fetch_add(num_blobs, std::memory_order_relaxed);
+	uint64_t prev = g.max_blobs.load(std::memory_order_relaxed);
+	while (num_blobs > prev && !g.max_blobs.compare_exchange_weak(prev, num_blobs, std::memory_order_relaxed)) {
+	}
+}
+
+/*!
+ * Every 5 s, one camera thread logs the tracker report and resets the counters: blobs per observation, dropped
+ * samples, and per controller what the searches found and why poses were turned down.
+ */
+static void
+diag_maybe_report(ConstellationTracker *tracker)
+{
+	TrackerDiag &g = tracker->diag;
+	const int64_t now_ns = (int64_t)os_monotonic_get_ns();
+	int64_t last_ns = g.last_report_ns.load(std::memory_order_relaxed);
+	if (last_ns == 0) {
+		g.last_report_ns.compare_exchange_strong(last_ns, now_ns, std::memory_order_relaxed);
+		return;
+	}
+	if (now_ns - last_ns < (int64_t)U_TIME_1S_IN_NS * 5 ||
+	    !g.last_report_ns.compare_exchange_strong(last_ns, now_ns, std::memory_order_relaxed)) {
+		return;
+	}
+	const double secs = (double)(now_ns - last_ns) / (double)U_TIME_1S_IN_NS;
+	const uint64_t obs = g.observations.exchange(0, std::memory_order_relaxed);
+	const uint64_t blobs = g.blobs.exchange(0, std::memory_order_relaxed);
+	CT_INFO(tracker,
+	        "Tracker report (%.0fs): %" PRIu64 " observations, %.1f blobs each (max %" PRIu64 "), dropped %" PRIu64
+	        " fast / %" PRIu64 " slow samples",
+	        secs, obs, obs > 0 ? (double)blobs / (double)obs : 0.0, g.max_blobs.exchange(0, std::memory_order_relaxed),
+	        g.fast_drops.exchange(0, std::memory_order_relaxed), g.slow_drops.exchange(0, std::memory_order_relaxed));
+	const int n = std::min<int>((int)tracker->next_device_id, TrackerDiag::kDevices);
+	for (int i = 0; i < n; i++) {
+		TrackerDiag::Dev &d = g.dev[i];
+		const uint64_t searches = d.slow_searches.exchange(0, std::memory_order_relaxed);
+		const uint64_t found = d.slow_found.exchange(0, std::memory_order_relaxed);
+		const uint64_t fast = d.fast_found.exchange(0, std::memory_order_relaxed);
+		const uint64_t refine = d.refine_failed.exchange(0, std::memory_order_relaxed);
+		const uint64_t up = d.rejected_up.exchange(0, std::memory_order_relaxed);
+		const uint64_t gyro = d.rejected_gyro.exchange(0, std::memory_order_relaxed);
+		const uint64_t accepted = d.accepted.exchange(0, std::memory_order_relaxed);
+		CT_INFO(tracker,
+		        "Tracker report device %d: searches %" PRIu64 " found %" PRIu64 ", fast path %" PRIu64
+		        ", refinement failed %" PRIu64 ", rejected by IMU up %" PRIu64 " / gyro %" PRIu64
+		        ", accepted %" PRIu64,
+		        i, searches, found, fast, refine, up, gyro, accepted);
+	}
+}
+
 //! Gets the gravity vector of a pose, in the pose's local frame.
 static void
 get_pose_gravity_vector(xrt_pose &T_world_pose, xrt_vec3 &gravity)
@@ -458,6 +529,7 @@ Camera::deferSampleToSlowThread(CameraSample &sample)
 	{
 		if (this->slow_processing_thread_data.sample.has_value()) {
 			// Warn that we're dropping a frame.
+			this->tracker->diag.slow_drops.fetch_add(1, std::memory_order_relaxed);
 			CT_WARN(this->tracker,
 			        "Dropping slow sample %" PRIu64 " at ts %" PRIi64 ". Tracker is likely running slow.",
 			        this->slow_processing_thread_data.sample->id,
@@ -1120,6 +1192,7 @@ Camera::processSampleSlow(CameraSample &sample)
 			}
 
 			pose_metrics score;
+			diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::slow_searches);
 			bool found_pose = correspondence_search_find_one_pose( //
 			    data.cs,                                           //
 			    device->search_model,                              //
@@ -1134,6 +1207,7 @@ Camera::processSampleSlow(CameraSample &sample)
 			    DEG_TO_RAD(tracker->gravity_gate_deg),             //
 			    &score);                                           //
 			if (found_pose) {
+				diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::slow_found);
 				const auto solve_type = shallow ? CONSTELLATION_SOLVE_TYPE_SHALLOW_CORRESPONDENCE_SEARCH
 				                                : CONSTELLATION_SOLVE_TYPE_DEEP_CORRESPONDENCE_SEARCH;
 
@@ -1275,6 +1349,7 @@ Camera::processSampleFast(CameraSample &sample)
 		                        std::nullopt,                          //
 		                        Tcv_cam_device_predicted.value().pose, //
 		                        CONSTELLATION_SOLVE_TYPE_PREDICTED_PRIOR)) {
+			diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::fast_found);
 			CT_DEBUG(tracker, "Fast processing for device %d succeeded with predicted pose", device->id);
 			continue; // try the next device, we found a pose!
 		}
@@ -1286,6 +1361,7 @@ Camera::processSampleFast(CameraSample &sample)
 		                                sample,       //
 		                                device_state, //
 		                                Tcv_cam_device_predicted)) {
+			diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::fast_found);
 			CT_DEBUG(tracker, "Fast processing for device %d succeeded with blob recovery", device->id);
 			continue; // try the next device, we found a pose!
 		} else {
@@ -1294,6 +1370,7 @@ Camera::processSampleFast(CameraSample &sample)
 
 		if (debug_get_bool_option_constellation_tracker_prior_snap() && Tcv_cam_device_predicted.has_value() &&
 		    this->tryDevicePriorSnap(device, sample, device_state, Tcv_cam_device_predicted.value())) {
+			diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::fast_found);
 			CT_DEBUG(tracker, "Fast processing for device %d succeeded with a prior snap", device->id);
 			continue;
 		}
@@ -1318,6 +1395,7 @@ Camera::processSampleFast(CameraSample &sample)
 		                        Tcv_cam_device_predicted,          //
 		                        Tcv_cam_device_last_known.value(), //
 		                        CONSTELLATION_SOLVE_TYPE_LAST_KNOWN_POSE)) {
+			diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::fast_found);
 			CT_DEBUG(tracker, "Fast processing for device %d succeeded with last known pose", device->id);
 			continue; // try the next device, we found a pose!
 		}
@@ -1371,6 +1449,7 @@ Camera::processSampleFast(CameraSample &sample)
 				this->pushPose(sample, device_state, device, score, Tcv_cam_device, false,
 				               CONSTELLATION_SOLVE_TYPE_SHALLOW_CORRESPONDENCE_SEARCH);
 				if (device_state.found_pose.has_value()) {
+					diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::fast_found);
 					CT_DEBUG(tracker, "Fast processing for device %d succeeded with a prior-seeded search",
 					         device->id);
 					continue;
@@ -1473,6 +1552,7 @@ Camera::pushPose(CameraSample &camera_sample,
 		    Tcv_cam_device_optimized); //
 
 		if (!success) {
+			diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::refine_failed);
 			CT_DEBUG(tracker,
 			         "Camera %d (group %d) RANSAC-PnP refinement for device %d from %u "
 			         "blobs failed",
@@ -1577,6 +1657,7 @@ Camera::pushPose(CameraSample &camera_sample,
 			imu_up = device->imuUpInDevice(q_imu);
 			float angle_deg = RAD_TO_DEG(acosf(CLAMP(m_vec3_dot(optical_up, imu_up), -1.0f, 1.0f)));
 			if (angle_deg > tracker->gravity_gate_deg) {
+				diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::rejected_up);
 				CT_DEBUG(tracker,
 				         "Rejecting pose for device %d: up direction %.1f deg from its IMU (gate %.1f deg)",
 				         device->id, angle_deg, tracker->gravity_gate_deg);
@@ -1611,6 +1692,7 @@ Camera::pushPose(CameraSample &camera_sample,
 				if (err_deg > tracker->gyro_gate_deg) {
 					if (++device->gyro_rejects_in_a_row < 5) {
 						reject = true;
+						diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::rejected_gyro);
 						CT_DEBUG(tracker,
 						         "Rejecting pose for device %d: rotated %.1f deg differently from its "
 						         "IMU since the last accepted pose (gate %.1f deg)",
@@ -1702,6 +1784,7 @@ Camera::pushPose(CameraSample &camera_sample,
 		    DeviceLastPose(Txr_world_device.value(), Tcv_cam_device, camera_sample.timestamp_ns);
 	}
 
+	diag_dev_inc(tracker, device->id, &TrackerDiag::Dev::accepted);
 	CT_DEBUG(tracker, "Found pose for device %d", device->id);
 }
 
@@ -2423,6 +2506,8 @@ constellation_tracker_camera_push_blobs(t_blob_sink *tbs, t_blob_observation *tb
 		}
 	}
 
+	diag_maybe_report(tracker);
+	diag_count_observation(tracker, tbo->num_blobs);
 	if (tbo->num_blobs == 0) {
 		CT_TRACE(tracker, "No blobs in observation, skipping processing");
 		// We own the trace log reference, release it.
@@ -2447,6 +2532,7 @@ constellation_tracker_camera_push_blobs(t_blob_sink *tbs, t_blob_observation *tb
 		{
 			if (camera->fast_processing_thread_data.sample.has_value()) {
 				// Warn that we're dropping a frame
+				tracker->diag.fast_drops.fetch_add(1, std::memory_order_relaxed);
 				CT_WARN(tracker,
 				        "Dropping fast sample %" PRIu64 " at ts %" PRIi64
 				        ". Tracker is likely running slow.",
