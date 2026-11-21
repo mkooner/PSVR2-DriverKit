@@ -201,6 +201,14 @@ struct ht_view
 {
 	//! Next zoomed-in detection tile to look at (detection_tiles_per_frame of them per frame, cycling).
 	uint32_t tile_cursor = 0;
+	//! Runs this view's tiles in parallel on the hand tracking pool (one detector input each, detection.wraps[1..]).
+	struct u_worker_group *tile_group = nullptr;
+	//! Tile cost over the last ~10 s, logged at debug level.
+	struct
+	{
+		uint32_t frames, tiles;
+		uint64_t ns, since_ns;
+	} tile_stats = {};
 	HandTracking *hgt;
 	onnx_state detection;
 	onnx_state keypoint[2];

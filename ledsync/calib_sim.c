@@ -16,6 +16,12 @@
  * pssense_reconnect does it (t_led_sync_refinement_restart at the drop and at the reconnect). Its hold time is then
  * counted from the reconnect; the run passes when both hold.
  *
+ * SIM_ACQUIRE_S=<s> (with SIM_TRACKER=1): the tracker needs on average that long, with the LEDs lit in the pictures,
+ * to find a controller it doesn't have (each frame a 1 / (60 * s) chance), and loses it after 0.5 s without them;
+ * reports how long after the start each controller is tracked (found, LEDs lit, 15 frames in a row) and how many
+ * calibrations that took. In a user's cluttered room (2026-11-21, 50-150 background blobs) the left controller
+ * wasn't found for 60 s, over 5 calibrations that each found the same window.
+ *
  * SIM_SHIFT_US=<us> [SIM_SHIFT_S=<s>] (with SIM_TRACKER=1): 40 s after both hold (probe intervals grown), the left
  * controller's clock relation shifts by that much, as a ramp over SIM_SHIFT_S (0: a step); its LED window moves with
  * it and so does the Bluetooth clock offset the driver reports (with noise). SIM_BTERR_US=<us> [SIM_BTERR_S=<s>]:
@@ -99,6 +105,12 @@ struct sim_ctrl
 	uint64_t pending_seq;
 	double pending_bright;
 	double bt_ns; // the driver's host -> controller offset estimate (true part)
+	bool acquired;  // SIM_ACQUIRE_S: the tracker has found this controller
+	int dark_frames; // frames in a row without enough LEDs in the pictures
+	int match_streak;
+	int64_t tracked_at_ns;
+	int calibrations;
+	int prev_phase;
 	double hold_centre_err_us;
 	uint32_t steps;
 };
@@ -168,6 +180,9 @@ main(int argc, char **argv)
 	const double bterr_us = getenv("SIM_BTERR_US") ? atof(getenv("SIM_BTERR_US")) : 0;
 	const double bterr_s = getenv("SIM_BTERR_S") ? atof(getenv("SIM_BTERR_S")) : 0;
 	const bool shift_mode = shift_us != 0 || bterr_us != 0 || getenv("SIM_SHIFT_BASE") != NULL;
+	const double acquire_s = getenv("SIM_ACQUIRE_S") ? atof(getenv("SIM_ACQUIRE_S")) : 0;
+	double acq_sum = 0, acq_worst = 0, acq_cal_sum = 0;
+	int acq_n = 0, acq_never = 0, acq_cal_max = 0;
 	double sh_tracked = 0, sh_worst_tracked = 1, sh_err_worst = 0, sh_err_sum = 0;
 	int sh_runs = 0, sh_recal = 0, sh_recal_max = 0, sh_jumps = 0, sh_undone = 0;
 	double sum_rec = 0, worst_rec = 0, sum_recal = 0;
@@ -209,7 +224,7 @@ main(int argc, char **argv)
 		long ev_frames = 0, ev_tracked = 0;
 		for (int i = 0; i < 2; i++)
 			c[i].bt_ns = 3e6 + urand() * 1e6;
-		const int64_t run_limit = (outage_for > 0 || shift_mode ? 220LL : 60LL) * 1000000000LL;
+		const int64_t run_limit = (outage_for > 0 || shift_mode || acquire_s > 0 ? 220LL : 60LL) * 1000000000LL;
 		while (g_now_ns - start_ns < run_limit) {
 			// Advance to this frame's processing time, applying LED commands due before it.
 			exposure_start += FRAME_NS;
@@ -343,7 +358,25 @@ main(int argc, char **argv)
 						smp2.average_brightness = (float)(s->pending_bright * (0.85 + 0.3 * urand()));
 						t_led_sync_push_constellation_sample(&s->r, &smp2);
 					}
-					s->pending_match = (vis[i] >= 4 && urand() < 0.7) ? vis[i] : 0;
+					if (acquire_s > 0) {
+						if (vis[i] >= 4) {
+							s->dark_frames = 0;
+							if (!s->acquired && urand() < 1.0 / (acquire_s * 60.0))
+								s->acquired = true;
+						} else if (++s->dark_frames > 30) {
+							s->acquired = false;
+						}
+						s->pending_match = (s->acquired && vis[i] >= 4 && urand() < 0.7) ? vis[i] : 0;
+						s->match_streak = (s->acquired && vis[i] >= 4) ? s->match_streak + 1 : 0;
+						if (s->tracked_at_ns == 0 && s->match_streak >= 15)
+							s->tracked_at_ns = proc - start_ns;
+						const int ph = (int)s->r.phase;
+						if (ph == T_LED_SYNC_PHASE_COUNT_CALIBRATE && s->prev_phase != ph)
+							s->calibrations++;
+						s->prev_phase = ph;
+					} else {
+						s->pending_match = (vis[i] >= 4 && urand() < 0.7) ? vis[i] : 0;
+					}
 					s->pending_seq = ev.sequence_id;
 					s->pending_bright = led_brightness(s, exposure_ns, exposure_start);
 				}
@@ -368,6 +401,11 @@ main(int argc, char **argv)
 						d += FRAME_NS;
 					s->hold_centre_err_us = d / 1000.0;
 				}
+			}
+			if (acquire_s > 0 && !shift_mode && outage_for <= 0) {
+				if (c[0].tracked_at_ns > 0 && c[1].tracked_at_ns > 0)
+					break;
+				continue;
 			}
 			if (shift_mode && ev_start >= 0 && proc >= ev_start) {
 				const int ph = (int)c[0].r.phase;
@@ -421,6 +459,20 @@ main(int argc, char **argv)
 				break;
 			if (drop_at >= 0 && c[0].reconnect_ns == 0 && proc - start_ns > (int64_t)((drop_at + drop_for + 1) * 1e9))
 				break; // can't happen: guard
+		}
+		if (acquire_s > 0 && !shift_mode && outage_for <= 0) {
+			for (int i = 0; i < 2; i++) {
+				if (c[i].tracked_at_ns > 0) {
+					double t = c[i].tracked_at_ns / 1e9;
+					acq_sum += t;
+					acq_worst = fmax(acq_worst, t);
+					acq_n++;
+				} else {
+					acq_never++;
+				}
+				acq_cal_sum += c[i].calibrations;
+				acq_cal_max = c[i].calibrations > acq_cal_max ? c[i].calibrations : acq_cal_max;
+			}
 		}
 		if (shift_mode && ev_frames > 0) {
 			double f = (double)ev_tracked / ev_frames;
@@ -486,6 +538,12 @@ main(int argc, char **argv)
 	       "held centre error mean %.0fus worst %.0fus (half room %.0fus); %d/%d never finished\n",
 	       exposure_us, dropout, n_ok ? times[n_ok / 2] : 0, n_ok ? sum_both / n_ok : 0, worst_both,
 	       n_ok ? sum_err / (2 * n_ok) : 0, worst_err, exposure_us / 2, failed, runs);
+	if (acquire_s > 0 && (acq_n + acq_never) > 0) {
+		printf("acquire mean %.0fs: controller tracked after mean %.1fs worst %.1fs, never within 220s %d of %d; "
+		       "calibrations mean %.1f max %d\n",
+		       acquire_s, acq_n ? acq_sum / acq_n : 0, acq_worst, acq_never, acq_n + acq_never,
+		       acq_cal_sum / (acq_n + acq_never), acq_cal_max);
+	}
 	if (shift_mode && sh_runs > 0) {
 		printf("shift %+.0fus over %.0fs, BT error %+.0fus over %.0fs: tracked %.1f%% (worst run %.1f%%), "
 		       "recalibrations %.2f/run (max %d), worst centre error mean %.0fus max %.0fus, BT moves %.2f/run "

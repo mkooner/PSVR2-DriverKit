@@ -102,6 +102,12 @@ struct DeviceInfo
 	std::string controller_type; //!< SteamVR's name for the device type (empty: none)
 	std::string input_profile;   //!< path of its input profile in the driver's resources (empty: none)
 	std::string render_model;    //!< empty: none
+	/*!
+	 * Controllers: what legacy (pre-SteamVR Input) games are shown, the input profile's legacy binding (touch, vive,
+	 * knuckles or native) and how it was chosen, for the compatibility line in the log. Empty: not a controller.
+	 */
+	std::string legacy_mode;
+	std::string legacy_mode_source;
 	//! More string properties (SteamVR's property number, value), e.g. the status icons.
 	std::vector<std::pair<int, std::string>> string_props;
 	//! More properties by SteamVR's property number.

@@ -1,0 +1,212 @@
+{
+  "bindings": {
+    "/actions/legacy": {
+      "sources": [
+        {
+          "path": "/user/hand/left/input/left_ps",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_system_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/l2",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/legacy/in/left_axis1_value"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_axis1_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/l2",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_axis1_press"
+            }
+          },
+          "parameters": {
+            "click_activate_threshold": "0.55",
+            "click_deactivate_threshold": "0.5",
+            "haptic_amplitude": "0",
+            "touch_activate_threshold": "0.1",
+            "touch_deactivate_threshold": "0.05"
+          }
+        },
+        {
+          "path": "/user/hand/left/input/square",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_grip_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_grip_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/triangle",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_applicationmenu_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_applicationmenu_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/left_stick",
+          "mode": "joystick",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_axis0_press"
+            },
+            "position": {
+              "output": "/actions/legacy/in/left_axis0_value"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_axis0_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/l1",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_grip_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_grip_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/right_ps",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_system_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/r2",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/legacy/in/right_axis1_value"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_axis1_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/r2",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_axis1_press"
+            }
+          },
+          "parameters": {
+            "click_activate_threshold": "0.55",
+            "click_deactivate_threshold": "0.5",
+            "haptic_amplitude": "0",
+            "touch_activate_threshold": "0.1",
+            "touch_deactivate_threshold": "0.05"
+          }
+        },
+        {
+          "path": "/user/hand/right/input/cross",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_grip_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_grip_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/circle",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_applicationmenu_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_applicationmenu_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/right_stick",
+          "mode": "joystick",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_axis0_press"
+            },
+            "position": {
+              "output": "/actions/legacy/in/right_axis0_value"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_axis0_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/r1",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_grip_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_grip_touch"
+            }
+          }
+        }
+      ],
+      "poses": [
+        {
+          "output": "/actions/legacy/in/Left_Pose",
+          "path": "/user/hand/left/pose/raw"
+        },
+        {
+          "output": "/actions/legacy/in/Right_Pose",
+          "path": "/user/hand/right/pose/raw"
+        }
+      ],
+      "haptics": [
+        {
+          "output": "/actions/legacy/out/left_haptic",
+          "path": "/user/hand/left/output/haptic"
+        },
+        {
+          "output": "/actions/legacy/out/right_haptic",
+          "path": "/user/hand/right/output/haptic"
+        }
+      ]
+    }
+  },
+  "controller_type": "playstation_vr2_sense",
+  "description": "Legacy (pre-SteamVR Input) apps on the PS VR2 Sense, shown as Index controllers (as Valve's Index legacy binding): stick, trigger L2/R2, square/cross (A) and L1/R1 as the grip, triangle/circle (B) as the menu button, the PS button as the system button. No finger curl or grip force (the Sense has neither). The headset stays the PS VR2 (simulate_hmd off). Chosen with OVRN_LEGACY_CONTROLLER=knuckles / DriverKit's legacy controller setting.",
+  "name": "PS VR2 Sense legacy bindings, Index controller mode (Monado)",
+  "options": {
+    "simulated_controller_type": "knuckles",
+    "simulate_rendermodel": true,
+    "simulate_hmd": false
+  }
+}

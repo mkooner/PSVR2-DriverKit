@@ -16,6 +16,9 @@ stage() { # name, pattern, hint-if-missing
 	fi
 }
 
+build=$(grep -m1 -oE "ovrn: driver build [^ ]+" "$LOG" | sed 's/ovrn: //')
+echo "== ${build:-driver build not logged (driver older than the build line)}"
+echo
 echo "== Stages ($LOG)"
 # Stages 1b-5 match the driver's info-level messages (the older patterns, kept as alternatives, are debug-level or
 # gone: a normal run showed the calibration block, the tracker and LED data missing while they worked).
@@ -25,11 +28,19 @@ stage "2 Calibration block parsed"      "psvr2_parse_gen_calibration_block\] Cam
 stage "3 LED tracker created"           "Creating the LED tracker|creating the LED tracker|added to the running LED tracker|camera [0-9] pose position" "tracker not created: no calibration block, or no controllers connected"
 stage "4 LD (LED) data arriving"        "Headset LED detector now|LD stats:"    "no LED detector data from the headset: see USB streams below"
 stage "5 LEDs seen by cameras"          "Count calibration done|LEDs per camera \[[^0]|LEDs per camera \[[0-9]+ [1-9]|LEDs per camera \[[0-9]+ [0-9]+ [1-9]|LEDs per camera \[[0-9]+ [0-9]+ [0-9]+ [1-9]" "cameras see no LEDs: controllers not in view, or LEDs not lit (LED sync)"
-stage "6 Controllers seen by LED sync"  "Device has been seen"                   "LEDs never identified: LED sync / timing"
+# Stages 6-10 also match the count calibration (search phases 9 -> 10) and the tracker's 5 s report, both info-level:
+# the gray-code and "Found pose" lines are debug-level, so a normal run showed no poses while both controllers tracked.
+stage "6 Controllers seen by LED sync"  "Device has been seen|Tracker report device [0-9]+: searches [0-9]+ found [1-9]|Tracker report device .*accepted [1-9]" "LEDs never identified: LED sync / timing"
 stage "7 LED sync phase changes"        "Transitioning from search phase"       "LED sync stuck in its first phase"
-stage "8 Gray code accepted"            "Accepting gray code"                   "gray code never locked"
-stage "9 LED sync STABLE"               "Entering STABLE"                       "LED sync never reached STABLE"
-stage "10 Controller poses solved"      "Found pose for device|succeeded with"  "no 6DoF poses solved: camera placement / LED model"
+stage "8 LED timing found"              "Accepting gray code|Count calibration done" "LED timing never found (count calibration / gray code)"
+stage "9 LED timing held"               "Entering STABLE|Transitioning from search phase 9 -> 10" "LED timing never held (STABLE / count hold)"
+stage "10 Controller poses solved"      "Found pose for device|succeeded with|Tracker report device .*accepted [1-9]" "no 6DoF poses solved: camera placement / LED model"
+
+# Per controller, from the tracker's 5 s reports: accepted poses per second, and the share of reports with any.
+awk '/Tracker report device [0-9]+:/ {d = $0; sub(/.*Tracker report device /, "", d); sub(/:.*/, "", d);
+	a = $NF + 0; n[d]++; sum[d] += a; if (a > 0) with[d]++}
+	END {for (d in n) printf "  device %s: %.0f poses/s accepted on average, poses in %d of %d reports (%.0f%%, 5 s each)\n",
+		d, sum[d] / (5 * n[d]), with[d], n[d], 100 * with[d] / n[d]}' "$LOG" | sort
 
 echo
 echo "== Clock check (ts host-now should be a few ms negative)"
@@ -100,6 +111,15 @@ grep -E "LD stats:" "$LOG" | tail -3 | cut -c1-220
 echo
 echo "== Camera poses"
 grep -E "camera [0-9] pose position" "$LOG" | tail -4 | cut -c1-200
+
+echo
+echo "== Controller compatibility (what legacy games are shown; inputs created; inputs that never changed)"
+if [ "$(count "controller compatibility:|controller inputs (after|at shutdown)|not created by SteamVR")" -gt 0 ]; then
+	grep -E "controller compatibility:|controller inputs (after 2 minutes|at shutdown):|not created by SteamVR|legacy controller mode" "$LOG" |
+		sed -E 's/^.*ovrn: /  /' | sort -u | cut -c1-240
+else
+	echo "  not logged (driver older than the compatibility lines)"
+fi
 
 echo
 echo "== Controller tracker (every 5 s: blobs, searches, poses found, rejected, accepted per controller)"
