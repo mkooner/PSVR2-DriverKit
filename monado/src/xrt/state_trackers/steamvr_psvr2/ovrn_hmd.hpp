@@ -146,14 +146,13 @@ public:
 			m_eyeCheckNs = now_ns;
 			Pose eyes[2];
 			if (m_backend->eyePoses(eyes)) {
-				// The pose thread: under withActive, so not after Deactivate.
-				withActive([&](uint32_t id, vr::PropertyContainerHandle_t container) {
+				const uint32_t id = m_objectId.load();
+				if (id != vr::k_unTrackedDeviceIndexInvalid) {
 					const float ipd = (float)(eyes[1].position.x - eyes[0].position.x);
 					vr::VRServerDriverHost()->SetDisplayEyeToHead(id, toMatrix(eyes[0]), toMatrix(eyes[1]));
-					vr::VRProperties()->SetFloatProperty(container, vr::Prop_UserIpdMeters_Float,
-					                                     ipd);
+					vr::VRProperties()->SetFloatProperty(m_container, vr::Prop_UserIpdMeters_Float, ipd);
 					log("ovrn: IPD %.1f mm\n", ipd * 1000.0f);
-				});
+				}
 			}
 		}
 	}
@@ -245,15 +244,6 @@ public:
 	}
 
 protected:
-	//! The camera's threads, stream and SteamVR frame queue end here, not when Cleanup destroys the headset.
-	void
-	deactivate() override
-	{
-		if (m_camera) {
-			m_camera->shutdown();
-		}
-	}
-
 	vr::EVRInitError
 	activate(uint32_t object_id) override
 	{

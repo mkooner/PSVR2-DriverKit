@@ -574,11 +574,7 @@ public:
 			d.serial += left ? "-left" : "-right";
 		}
 		d.controller_type = "playstation_vr2_sense";
-		// The controller type stays the Sense's own; only the profile's legacy binding (what legacy games are
-		// shown) differs per mode. A game's own binding in SteamVR still takes priority over this default.
-		legacyMode(&d.legacy_mode, &d.legacy_mode_source);
-		const std::string profile = "{monado_psvr2}/input/playstation_vr2_sense_controller_profile";
-		d.input_profile = d.legacy_mode == "touch" ? profile + ".json" : profile + "_" + d.legacy_mode + ".json";
+		d.input_profile = "{monado_psvr2}/input/playstation_vr2_sense_controller_profile.json";
 		d.grip_in_root = gripInRoot(hand);
 		if (use_sense_render_models()) {
 			d.render_model = left ? "{monado_psvr2}playstation_vr2_sense_left" : "{monado_psvr2}playstation_vr2_sense_right";
@@ -633,36 +629,6 @@ public:
 		                         : home != NULL           ? std::string(home) + "/.config"
 		                                                  : std::string();
 		return base.empty() ? std::string() : base + "/PSVR2-DriverKit/settings.conf";
-	}
-
-	/*!
-	 * What legacy games are shown on the Sense controllers: OVRN_LEGACY_CONTROLLER (DriverKit's launch), else
-	 * LEGACY_CONTROLLER in DriverKit's settings file (SteamVR started from Steam), else touch. touch, vive, knuckles
-	 * or native; anything else is logged and treated as touch.
-	 */
-	static void
-	legacyMode(std::string *out_mode, std::string *out_source)
-	{
-		const char *env = getenv("OVRN_LEGACY_CONTROLLER");
-		std::string mode = env != nullptr ? env : "";
-		std::string source = "OVRN_LEGACY_CONTROLLER";
-		if (mode.empty()) {
-			mode = driverkitSetting("LEGACY_CONTROLLER");
-			source = "DriverKit's setting";
-		}
-		if (mode.empty()) {
-			mode = "touch";
-			source = "default";
-		}
-		if (mode != "touch" && mode != "vive" && mode != "knuckles" && mode != "native") {
-			ovrd_log("ovrn: legacy controller mode '%s' (%s) is not touch, vive, knuckles or native: using "
-			         "touch\n",
-			         mode.c_str(), source.c_str());
-			mode = "touch";
-			source = "default, the setting wasn't valid";
-		}
-		*out_mode = mode;
-		*out_source = source;
 	}
 
 	static std::string

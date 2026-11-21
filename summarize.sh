@@ -16,9 +16,6 @@ stage() { # name, pattern, hint-if-missing
 	fi
 }
 
-build=$(grep -m1 -oE "ovrn: driver build [^ ]+" "$LOG" | sed 's/ovrn: //')
-echo "== ${build:-driver build not logged (driver older than the build line)}"
-echo
 echo "== Stages ($LOG)"
 # Stages 1b-5 match the driver's info-level messages (the older patterns, kept as alternatives, are debug-level or
 # gone: a normal run showed the calibration block, the tracker and LED data missing while they worked).
@@ -111,15 +108,6 @@ grep -E "LD stats:" "$LOG" | tail -3 | cut -c1-220
 echo
 echo "== Camera poses"
 grep -E "camera [0-9] pose position" "$LOG" | tail -4 | cut -c1-200
-
-echo
-echo "== Controller compatibility (what legacy games are shown; inputs created; inputs that never changed)"
-if [ "$(count "controller compatibility:|controller inputs (after|at shutdown)|not created by SteamVR")" -gt 0 ]; then
-	grep -E "controller compatibility:|controller inputs (after 2 minutes|at shutdown):|not created by SteamVR|legacy controller mode" "$LOG" |
-		sed -E 's/^.*ovrn: /  /' | sort -u | cut -c1-240
-else
-	echo "  not logged (driver older than the compatibility lines)"
-fi
 
 echo
 echo "== Controller tracker (every 5 s: blobs, searches, poses found, rejected, accepted per controller)"
