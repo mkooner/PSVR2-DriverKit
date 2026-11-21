@@ -7,9 +7,6 @@
 // The cameras come from the headset's calibration block, through the driver's own parser (the controller tracker's
 // camera chain, exactly what the driver gives the hand tracker), not from a separate stereo file.
 // Usage: driver_ht_replay recording.pv2c ~/.config/monado/psvr2-calibration-<serial>.bin
-// Also reports each hand's active share in HT_REPLAY_HANDS=<from>-<to> s (default 2-35, the hands-over-the-desk part
-// of camera-20261120-105225) and in HT_REPLAY_EMPTY=<from>-<to> s (default 37-43, no hands: false detections), and
-// the CPU used (cores on average over the replay).
 #include "xrt/xrt_device.h"
 #include "os/os_time.h"
 #include "math/m_api.h"
@@ -25,7 +22,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/resource.h>
 
 static xrt_result_t
 head_pose(struct xrt_device *xdev, enum xrt_input_name name, int64_t at, struct xrt_space_relation *out)
@@ -103,14 +99,6 @@ main(int argc, char **argv)
 	static uint8_t buf[1040640];
 	int64_t first_rec = 0, start = 0, next_query = 0;
 	int queries = 0, act[2] = {0, 0}, pushed = 0;
-	double h_lo = 2, h_hi = 35, e_lo = 37, e_hi = 43;
-	if (getenv("HT_REPLAY_HANDS"))
-		sscanf(getenv("HT_REPLAY_HANDS"), "%lf-%lf", &h_lo, &h_hi);
-	if (getenv("HT_REPLAY_EMPTY"))
-		sscanf(getenv("HT_REPLAY_EMPTY"), "%lf-%lf", &e_lo, &e_hi);
-	int q_hands = 0, q_empty = 0, act_hands[2] = {0, 0}, act_empty[2] = {0, 0};
-	struct rusage ru0;
-	getrusage(RUSAGE_SELF, &ru0);
 	double sx = 0, sy = 0, sz = 0;
 	for (;;) {
 		uint64_t ns;
@@ -143,11 +131,6 @@ main(int argc, char **argv)
 					                             h ? XRT_INPUT_HT_UNOBSTRUCTED_RIGHT
 					                               : XRT_INPUT_HT_UNOBSTRUCTED_LEFT,
 					                             now, &s, &t);
-					const double ts = (now - start) / 1e9;
-					if (s.is_active && ts >= h_lo && ts <= h_hi)
-						act_hands[h]++;
-					if (s.is_active && ts >= e_lo && ts <= e_hi)
-						act_empty[h]++;
 					if (s.is_active) {
 						act[h]++;
 						if (h == 1) {
@@ -163,11 +146,6 @@ main(int argc, char **argv)
 					}
 				}
 				queries++;
-				{
-					const double ts = (now - start) / 1e9;
-					q_hands += ts >= h_lo && ts <= h_hi;
-					q_empty += ts >= e_lo && ts <= e_hi;
-				}
 				next_query += 11 * U_TIME_1MS_IN_NS;
 			}
 			if (now >= due)
@@ -184,15 +162,6 @@ main(int argc, char **argv)
 	if (act[1])
 		printf("; right wrist mean (head frame) %.3f %.3f %.3f m", sx / act[1], sy / act[1], sz / act[1]);
 	printf("\n");
-	struct rusage ru1;
-	getrusage(RUSAGE_SELF, &ru1);
-	const double cpu = (ru1.ru_utime.tv_sec - ru0.ru_utime.tv_sec) + (ru1.ru_utime.tv_usec - ru0.ru_utime.tv_usec) / 1e6 +
-	                   (ru1.ru_stime.tv_sec - ru0.ru_stime.tv_sec) + (ru1.ru_stime.tv_usec - ru0.ru_stime.tv_usec) / 1e6;
-	printf("hands in view %.0f-%.0f s: left %.0f%%, right %.0f%%; no hands %.0f-%.0f s: false left %.0f%%, right %.0f%%; "
-	       "CPU %.2f cores on average\n",
-	       h_lo, h_hi, q_hands ? 100.0 * act_hands[0] / q_hands : 0, q_hands ? 100.0 * act_hands[1] / q_hands : 0, e_lo,
-	       e_hi, q_empty ? 100.0 * act_empty[0] / q_empty : 0, q_empty ? 100.0 * act_empty[1] / q_empty : 0,
-	       cpu / ((os_monotonic_get_ns() - start) / 1e9));
 	xrt_device_destroy(&ht);
 	return 0;
 }

@@ -194,14 +194,9 @@ psvr2_hmd_destroy(struct xrt_device *xdev)
 
 	psvr2_free_et_data(hmd);
 
-	// A failed create can get here before the mutex exists (and before the USB thread does).
-	if (hmd->xfer_lock_ok) {
-		os_mutex_lock(&hmd->xfer_lock);
-		hmd->usb_complete = 1;
-		os_mutex_unlock(&hmd->xfer_lock);
-	} else {
-		hmd->usb_complete = 1;
-	}
+	os_thread_helper_lock(&hmd->usb_thread);
+	hmd->usb_complete = 1;
+	os_thread_helper_unlock(&hmd->usb_thread);
 	/*
 	 * Wake the USB thread now: it waits in libusb for the next transfer, which a headset that stopped sending never
 	 * completes, and the join below then waited for it; SteamVR's 10 s cleanup watchdog aborted vrserver every time
@@ -248,9 +243,6 @@ psvr2_hmd_destroy(struct xrt_device *xdev)
 	 */
 	os_mutex_destroy(&hmd->data_lock);
 	os_mutex_destroy(&hmd->calib_lock);
-	if (hmd->xfer_lock_ok) {
-		os_mutex_destroy(&hmd->xfer_lock);
-	}
 	free(hmd->calib_block);
 	u_device_free(&hmd->base);
 }
@@ -546,24 +538,6 @@ psvr2_xfer_status_name(enum libusb_transfer_status status)
 	return "unknown";
 }
 
-//! A transfer was submitted: count it, so the shutdown waits for its cancellation (see xfer_lock).
-static void
-psvr2_usb_count_xfer(struct psvr2_hmd *hmd)
-{
-	os_mutex_lock(&hmd->xfer_lock);
-	hmd->usb_active_xfers++;
-	os_mutex_unlock(&hmd->xfer_lock);
-}
-
-static bool
-psvr2_usb_is_complete(struct psvr2_hmd *hmd)
-{
-	os_mutex_lock(&hmd->xfer_lock);
-	bool complete = hmd->usb_complete != 0;
-	os_mutex_unlock(&hmd->xfer_lock);
-	return complete;
-}
-
 bool
 psvr2_usb_xfer_continue(struct libusb_transfer *xfer, const char *type)
 {
@@ -571,13 +545,14 @@ psvr2_usb_xfer_continue(struct libusb_transfer *xfer, const char *type)
 
 	// Shutting down: a transfer that completed just before its cancellation isn't submitted again (it would never be
 	// cancelled), it ends here like a cancelled one.
-	os_mutex_lock(&hmd->xfer_lock);
+	os_thread_helper_lock(&hmd->usb_thread);
 	if (hmd->usb_complete) {
 		hmd->usb_active_xfers--;
-		os_mutex_unlock(&hmd->xfer_lock);
+		os_thread_helper_signal_locked(&hmd->usb_thread);
+		os_thread_helper_unlock(&hmd->usb_thread);
 		return false;
 	}
-	os_mutex_unlock(&hmd->xfer_lock);
+	os_thread_helper_unlock(&hmd->usb_thread);
 
 	switch (xfer->status) {
 	case LIBUSB_TRANSFER_OVERFLOW:
@@ -586,9 +561,10 @@ psvr2_usb_xfer_continue(struct libusb_transfer *xfer, const char *type)
 	case LIBUSB_TRANSFER_CANCELLED:
 	case LIBUSB_TRANSFER_STALL:
 	case LIBUSB_TRANSFER_NO_DEVICE:
-		os_mutex_lock(&hmd->xfer_lock);
+		os_thread_helper_lock(&hmd->usb_thread);
 		hmd->usb_active_xfers--;
-		os_mutex_unlock(&hmd->xfer_lock);
+		os_thread_helper_signal_locked(&hmd->usb_thread);
+		os_thread_helper_unlock(&hmd->usb_thread);
 		/*
 		 * Not shutting down (that returned above), so this stream has stopped for the rest of the session: it
 		 * isn't submitted again. Logged as an error with the reason, so a run summary shows which stream died
@@ -1595,7 +1571,7 @@ psvr2_usb_thread(void *ptr)
 	timepoint_ns start_ns = os_monotonic_get_ns();
 	bool calib_checked = false;
 	os_thread_helper_lock(&hmd->usb_thread);
-	while (os_thread_helper_is_running_locked(&hmd->usb_thread) && !psvr2_usb_is_complete(hmd)) {
+	while (os_thread_helper_is_running_locked(&hmd->usb_thread) && !hmd->usb_complete) {
 		os_thread_helper_unlock(&hmd->usb_thread);
 
 		// At most 100 ms per wait, so stopping never depends on the headset sending something.
@@ -1625,9 +1601,9 @@ psvr2_usb_thread(void *ptr)
 	const timepoint_ns give_up_ns = os_monotonic_get_ns() + U_TIME_1S_IN_NS;
 	int left = 0;
 	for (;;) {
-		os_mutex_lock(&hmd->xfer_lock);
+		os_thread_helper_lock(&hmd->usb_thread);
 		left = hmd->usb_active_xfers;
-		os_mutex_unlock(&hmd->xfer_lock);
+		os_thread_helper_unlock(&hmd->usb_thread);
 		if (left <= 0 || os_monotonic_get_ns() > give_up_ns) {
 			break;
 		}
@@ -1935,7 +1911,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 		PSVR2_ERROR(hmd, "Could not submit USB transfer for status reports");
 		goto out;
 	}
-	psvr2_usb_count_xfer(hmd);
+	hmd->usb_active_xfers++;
 
 	/* Camera data */
 	hmd->camera_enable = true;
@@ -1981,7 +1957,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 			PSVR2_ERROR(hmd, "Could not submit USB transfer %d for camera data", i);
 			goto out;
 		}
-		psvr2_usb_count_xfer(hmd);
+		hmd->usb_active_xfers++;
 	}
 
 	/* SLAM endpoint */
@@ -2000,7 +1976,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 		PSVR2_ERROR(hmd, "Could not submit USB transfer for SLAM data");
 		goto out;
 	}
-	psvr2_usb_count_xfer(hmd);
+	hmd->usb_active_xfers++;
 
 	/* LD endpoint */
 	hmd->led_detector_xfer = libusb_alloc_transfer(0);
@@ -2018,7 +1994,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 		PSVR2_ERROR(hmd, "Could not submit USB transfer for LED Detector data");
 		goto out;
 	}
-	psvr2_usb_count_xfer(hmd);
+	hmd->usb_active_xfers++;
 
 	/* RP endpoint */
 	hmd->relocalizer_xfer = libusb_alloc_transfer(0);
@@ -2036,7 +2012,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 		PSVR2_ERROR(hmd, "Could not submit USB transfer for RP data");
 		goto out;
 	}
-	psvr2_usb_count_xfer(hmd);
+	hmd->usb_active_xfers++;
 
 	/* VD endpoint */
 	hmd->vd_xfer = libusb_alloc_transfer(0);
@@ -2054,7 +2030,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 		PSVR2_ERROR(hmd, "Could not submit USB transfer for VD data");
 		goto out;
 	}
-	psvr2_usb_count_xfer(hmd);
+	hmd->usb_active_xfers++;
 
 	res = psvr2_start_gaze_tracking(hmd);
 	if (res < 0) {
@@ -2390,11 +2366,6 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		PSVR2_ERROR(hmd, "Failed to init calibration mutex!");
 		goto cleanup;
 	}
-	if (os_mutex_init(&hmd->xfer_lock) != 0) {
-		PSVR2_ERROR(hmd, "Failed to init USB transfer mutex!");
-		goto cleanup;
-	}
-	hmd->xfer_lock_ok = true;
 
 	if (os_thread_helper_init(&hmd->usb_thread) != 0) {
 		PSVR2_ERROR(hmd, "Failed to initialise threading");
@@ -2626,9 +2597,7 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	}
 
 	// Start USB communications
-	os_mutex_lock(&hmd->xfer_lock);
 	hmd->usb_complete = 0;
-	os_mutex_unlock(&hmd->xfer_lock);
 	if (os_thread_helper_start(&hmd->usb_thread, psvr2_usb_thread, hmd) != 0) {
 		PSVR2_ERROR(hmd, "Failed to start USB thread");
 		goto cleanup;

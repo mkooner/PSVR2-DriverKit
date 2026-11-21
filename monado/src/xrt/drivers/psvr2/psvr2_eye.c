@@ -347,9 +347,7 @@ psvr2_start_gaze_tracking(struct psvr2_hmd *hmd)
 		PSVR2_ERROR(hmd, "Could not submit USB transfer for gaze data");
 		return ret;
 	}
-	os_mutex_lock(&hmd->xfer_lock);
 	hmd->usb_active_xfers++;
-	os_mutex_unlock(&hmd->xfer_lock);
 
 	m_relation_history_create(&hmd->et_data.gaze_relation_history);
 	if (hmd->et_data.gaze_relation_history == NULL) {
