@@ -1251,6 +1251,9 @@ pssense_set_pc_polling_rate(struct pssense_device *pssense)
 	return true;
 }
 
+static bool
+pssense_get_calibration_data(struct pssense_device *pssense);
+
 static void *
 pssense_run_thread(void *ptr)
 {
@@ -1275,8 +1278,45 @@ pssense_run_thread(void *ptr)
 	// freezing LED sync. Only give up when sending keeps failing, which means the controller is gone.
 	uint32_t failed_sends = 0;
 	const uint32_t max_failed_sends = 200; // ~2s at the output rate
+
+	// Feature requests, here rather than at create (see there): the polling rate on every (re)start, the
+	// calibration until it's read. Each can block this thread for up to 5 s if the controller doesn't answer.
+	bool polling_rate_pending = debug_get_bool_option_pssense_pc_polling_rate();
+	timepoint_ns next_setup_ns = 0;
+	const timepoint_ns setup_start_ns = os_monotonic_get_ns();
+	uint32_t calib_attempts = 0;
+	bool calib_warned = false;
+
 	while (os_thread_helper_is_running_locked(&pssense->controller_thread) && result >= 0) {
 		os_thread_helper_unlock(&pssense->controller_thread);
+
+		if ((polling_rate_pending || !pssense->has_calibration) && os_monotonic_get_ns() >= next_setup_ns) {
+			if (polling_rate_pending) {
+				if (!pssense_set_pc_polling_rate(pssense)) {
+					PSSENSE_WARN(pssense, "Setting the PC polling rate failed, the controller keeps its own");
+				}
+				polling_rate_pending = false;
+			}
+			if (!pssense->has_calibration) {
+				calib_attempts++;
+				if (pssense_get_calibration_data(pssense)) {
+					if (calib_attempts > 1) {
+						PSSENSE_INFO(pssense, "Calibration read after %u attempts (%.1fs)", calib_attempts,
+						             (double)(os_monotonic_get_ns() - setup_start_ns) / U_TIME_1S_IN_NS);
+					}
+				} else if (!calib_warned &&
+				           os_monotonic_get_ns() - setup_start_ns > U_TIME_1S_IN_NS * 3) {
+					// Over Bluetooth the read can fail transiently while both controllers connect.
+					PSSENSE_ERROR(pssense,
+					              "No calibration from the controller after %u attempts (%.1fs), still "
+					              "trying; it isn't tracked until then",
+					              calib_attempts,
+					              (double)(os_monotonic_get_ns() - setup_start_ns) / U_TIME_1S_IN_NS);
+					calib_warned = true;
+				}
+			}
+			next_setup_ns = os_monotonic_get_ns() + U_TIME_1MS_IN_NS * 200;
+		}
 
 		/*
 		 * Drain what's queued rather than one report per loop: the loop sleeps up to 1ms between passes and
@@ -1856,8 +1896,17 @@ pssense_get_calibration_data(struct pssense_device *pssense)
 {
 	struct pssense_calibration_data calibration_data = {0};
 
+	/*
+	 * A bad checksum is read again, at most 3 times: this used to loop for as long as the checksum stayed wrong, and
+	 * each read can wait up to 5 s for a controller that doesn't answer (the kernel's Bluetooth report timeout).
+	 */
 	bool invalid_crc;
+	int crc_tries = 0;
 	do {
+		if (++crc_tries > 3) {
+			PSSENSE_WARN(pssense, "Calibration report checksum wrong 3 times, trying again later");
+			return false;
+		}
 		invalid_crc = false;
 
 		// Calibration has to be read in two parts with two feature reads.
@@ -2635,9 +2684,7 @@ pssense_reconnect(struct xrt_device *xdev, struct xrt_prober *xp, struct xrt_pro
 		os_thread_helper_unlock(&pssense->controller_thread);
 		return -1;
 	}
-	if (debug_get_bool_option_pssense_pc_polling_rate() && !pssense_set_pc_polling_rate(pssense)) {
-		PSSENSE_WARN(pssense, "Reconnected, but setting the PC polling rate failed");
-	}
+	// The polling rate is set again by the read thread (see pssense_run_thread), not here in the hotplug thread.
 	PSSENSE_INFO(pssense, "Controller reconnected (%s): tracking and LED sync start again", pssense->base.serial);
 	return 1;
 }
@@ -3059,29 +3106,13 @@ pssense_create(struct xrt_prober *xp,
 		return NULL;
 	}
 
-	// Try to set the PC polling rate if the user requested it.
-	if (debug_get_bool_option_pssense_pc_polling_rate() && //
-	    !pssense_set_pc_polling_rate(pssense)) {
-		PSSENSE_ERROR(pssense, "PC polling rate requested, but got error when attempting to apply.");
-	}
-
 	/*
-	 * Over Bluetooth the feature read can fail transiently (-1 on hardware, for one controller, while both were
-	 * connecting), which dropped that controller for the whole session. Retry for a few seconds first.
+	 * The polling rate and the calibration are feature requests, which over Bluetooth can each wait up to 5 s for a
+	 * controller that doesn't answer (the kernel's report timeout). They used to run here, 15 calibration attempts:
+	 * up to ~78 s inside SteamVR's driver start, which it aborts after 20 s (and then starts in safe mode without
+	 * our driver), or inside the hotplug thread that SteamVR's 10 s shutdown waits for. The controller thread does
+	 * them now (pssense_run_thread); until the calibration arrives its IMU samples are skipped, as before.
 	 */
-	bool got_calibration = false;
-	for (int attempt = 0; attempt < 15 && !got_calibration; attempt++) {
-		if (attempt > 0) {
-			PSSENSE_WARN(pssense, "Retrying calibration read (attempt %d)", attempt + 1);
-			os_nanosleep(U_TIME_1MS_IN_NS * 200);
-		}
-		got_calibration = pssense_get_calibration_data(pssense);
-	}
-	if (!got_calibration) {
-		PSSENSE_ERROR(pssense, "Failed to retrieve calibration data");
-		pssense_device_destroy(&pssense->base);
-		return NULL;
-	}
 
 	u_var_add_root(pssense, pssense->base.str, false);
 	u_var_add_log_level(pssense, &pssense->log_level, "Log level");
