@@ -85,9 +85,11 @@ echo "STEP 2/5 configure"
 # Only the PS VR2 drivers (headset, Sense controllers) plus the simulated ones the tests use; OpenCV, GStreamer, onnx,
 # SDL2, the debug GUI and Basalt off, so the plugin's libraries are few enough to bundle (bundle_libs.py) and SteamVR
 # can load it inside Steam's runtime container as well as on the host. monado-service stays on (OpenXR games).
+# RealSense off too: the PS VR2 doesn't use it, and with a librealsense installed that lacks
+# rs2::device::get_device_time_ms() (Monado's RealSense driver calls it) the build failed.
 OFF=(-DXRT_HAVE_OPENCV=OFF -DXRT_HAVE_GST=OFF -DXRT_HAVE_ONNXRUNTIME=OFF -DXRT_HAVE_SDL2=OFF
 	-DXRT_FEATURE_DEBUG_GUI=OFF -DXRT_FEATURE_SLAM=OFF -DXRT_FEATURE_RENDERDOC=OFF
-	-DXRT_HAVE_BLUETOOTH=OFF -DXRT_HAVE_HIDAPI=OFF)
+	-DXRT_HAVE_BLUETOOTH=OFF -DXRT_HAVE_HIDAPI=OFF -DXRT_HAVE_REALSENSE=OFF)
 cmake -S "$SRC" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 	-DXRT_FEATURE_STEAMVR_PLUGIN=ON -DXRT_FEATURE_SERVICE=ON -DXRT_FEATURE_OPENXR=ON \
 	-DXRT_BUILD_DRIVER_PSVR2=ON -DXRT_BUILD_DRIVER_PSSENSE=ON -DXRT_BUILD_DRIVER_SIMULATED=ON \
