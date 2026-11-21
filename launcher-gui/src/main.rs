@@ -144,6 +144,8 @@ fn default_settings() -> Vec<Setting> {
         toggle_values("OVRN_POSE_MODEL", "Driver-predicted head pose (ALVR model)",
                       "Off (default): the pose for now with velocities, SteamVR predicts. On: the plugin predicts and sends no velocity (worse with games that ask for the pose more than once a frame).",
                       "predicted", "", false).steamvr(),
+        value("OVRN_LEGACY_CONTROLLER", "Legacy games' controllers",
+              "What games without SteamVR Input (legacy games such as Skyrim VR) are shown: touch (the default, Oculus Touch, as Sony's driver), vive (Vive controllers), knuckles (Index controllers) or native (the PS VR2 Sense as it is). The headset always stays the PS VR2. A game's own binding in SteamVR's controller settings still wins.", "touch", true).steamvr(),
         value("OVRN_SONY_PROPS", "Sony's extra display properties",
               "Which of Sony's headset properties to report: all (the plugin's default, as Sony's driver and PSVR2Toolkit), none, or a list of throttle, framerate, syslayer, texindex, supersample, dsc, edid, display, mask.", "all", false).steamvr(),
         toggle("RECORD_DATASET", "Record controller dataset", "Record LED tracking data (logs/).", false).steamvr(),
@@ -338,9 +340,21 @@ fn write_driver_settings(cfg: &Config) -> Result<(), String> {
     let on = |key: &str| {
         cfg.settings.iter().any(|s| s.key == key && s.enabled && (s.target == Target::SteamVR || s.target == Target::Both))
     };
+    // A value setting's text while it's on (empty when off: the driver's default).
+    let value_of = |key: &str| -> String {
+        cfg.settings
+            .iter()
+            .find(|s| s.key == key && s.enabled && (s.target == Target::SteamVR || s.target == Target::Both))
+            .and_then(|s| match &s.kind {
+                Kind::Value { value } => Some(value.trim().to_string()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
     let text = format!(
-        "# Written by PSVR2-DriverKit (Settings tab); the SteamVR driver reads it when SteamVR starts.\nHAND_TRACKING={}\n",
-        if on("PSVR2_HAND_TRACKING") { 1 } else { 0 }
+        "# Written by PSVR2-DriverKit (Settings tab); the SteamVR driver reads it when SteamVR starts.\nHAND_TRACKING={}\nLEGACY_CONTROLLER={}\n",
+        if on("PSVR2_HAND_TRACKING") { 1 } else { 0 },
+        value_of("OVRN_LEGACY_CONTROLLER")
     );
     let path = config_dir().join("settings.conf");
     if fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {

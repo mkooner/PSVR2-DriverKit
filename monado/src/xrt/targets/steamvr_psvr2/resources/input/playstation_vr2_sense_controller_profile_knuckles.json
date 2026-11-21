@@ -1,0 +1,299 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "playstation_vr2_sense",
+  "device_class": "TrackedDeviceClass_Controller",
+  "resource_root": "monado",
+  "driver_name": "monado",
+  "legacy_binding": "{monado}/input/legacy_binding_playstation_vr2_sense_controller_knuckles.json",
+  "remapping": "{monado}/input/playstation_vr2_sense_controller_remapping.json",
+  "input_bindingui_mode": "controller_handed",
+  "should_show_binding_errors": true,
+  "input_bindingui_left": {
+    "image": "{monado}/icons/playstation_vr2/playstation_vr2_sense_left.svg"
+  },
+  "input_bindingui_right": {
+    "image": "{monado}/icons/playstation_vr2/playstation_vr2_sense_right.svg"
+  },
+  "mirror_mappings": [
+    [
+      "/user/hand/left/input/l1",
+      "/user/hand/right/input/r1"
+    ],
+    [
+      "/user/hand/left/input/l1_sensor",
+      "/user/hand/right/input/r1_sensor"
+    ],
+    [
+      "/user/hand/left/input/l2",
+      "/user/hand/right/input/r2"
+    ],
+    [
+      "/user/hand/left/input/l2_sensor",
+      "/user/hand/right/input/r2_sensor"
+    ],
+    [
+      "/user/hand/left/input/square",
+      "/user/hand/right/input/cross"
+    ],
+    [
+      "/user/hand/left/input/triangle",
+      "/user/hand/right/input/circle"
+    ],
+    [
+      "/user/hand/left/input/create",
+      "/user/hand/right/input/options"
+    ],
+    [
+      "/user/hand/left/input/left_ps",
+      "/user/hand/right/input/right_ps"
+    ],
+    [
+      "/user/hand/left/input/left_stick",
+      "/user/hand/right/input/right_stick"
+    ]
+  ],
+  "input_source": {
+    "/input/l2": {
+      "type": "trigger",
+      "side": "left",
+      "value": true,
+      "touch": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/l2_sensor": {
+      "type": "trigger",
+      "side": "left",
+      "value": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/l1": {
+      "type": "trigger",
+      "side": "left",
+      "value": true,
+      "touch": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/l1_sensor": {
+      "type": "trigger",
+      "side": "left",
+      "value": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/left_stick": {
+      "type": "joystick",
+      "side": "left",
+      "click": true,
+      "touch": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/square": {
+      "type": "button",
+      "side": "left",
+      "click": true,
+      "touch": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/triangle": {
+      "type": "button",
+      "side": "left",
+      "click": true,
+      "touch": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/create": {
+      "type": "button",
+      "side": "left",
+      "click": true,
+      "touch": false,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/left_ps": {
+      "type": "button",
+      "side": "left",
+      "click": true,
+      "touch": false,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/r2": {
+      "type": "trigger",
+      "side": "right",
+      "value": true,
+      "touch": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/r2_sensor": {
+      "type": "trigger",
+      "side": "right",
+      "value": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/r1": {
+      "type": "trigger",
+      "side": "right",
+      "value": true,
+      "touch": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/r1_sensor": {
+      "type": "trigger",
+      "side": "right",
+      "value": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/right_stick": {
+      "type": "joystick",
+      "side": "right",
+      "click": true,
+      "touch": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/cross": {
+      "type": "button",
+      "side": "right",
+      "click": true,
+      "touch": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/circle": {
+      "type": "button",
+      "side": "right",
+      "click": true,
+      "touch": true,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/options": {
+      "type": "button",
+      "side": "right",
+      "click": true,
+      "touch": false,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/right_ps": {
+      "type": "button",
+      "side": "right",
+      "click": true,
+      "touch": false,
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/output/haptic": {
+      "type": "vibration",
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/pose/raw": {
+      "type": "pose",
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/pose/base": {
+      "type": "pose",
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/pose/handgrip": {
+      "type": "pose",
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/pose/tip": {
+      "type": "pose",
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/pose/openxr_aim": {
+      "type": "pose",
+      "binding_image_point": [
+        0,
+        0
+      ]
+    },
+    "/input/skeleton/left": {
+      "type": "skeleton",
+      "side": "left",
+      "skeleton": "/skeleton/hand/left",
+      "binding_image_point": [
+        75,
+        75
+      ]
+    },
+    "/input/skeleton/right": {
+      "type": "skeleton",
+      "side": "right",
+      "skeleton": "/skeleton/hand/right",
+      "binding_image_point": [
+        75,
+        75
+      ]
+    }
+  },
+  "default_bindings": [
+    {
+      "app_key": "openvr.component.vrcompositor",
+      "binding_url": "vrcompositor_binding_playstation_vr2_sense_controller.json"
+    }
+  ]
+}
