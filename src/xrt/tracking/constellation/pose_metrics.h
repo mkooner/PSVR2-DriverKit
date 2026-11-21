@@ -135,48 +135,6 @@ pose_metrics_evaluate_pose(struct pose_metrics *score,
                            struct camera_model *calib,
                            struct pose_rect *out_bounds);
 
-/*!
- * The _ranked variants take @p by_distance: device IDs nearest the camera first (XRT_CONSTELLATION_MAX_DEVICES long,
- * XRT_CONSTELLATION_INVALID_DEVICE_ID padded), or NULL. With it, a device may use a blob already matched to a device
- * farther from the camera (upstream 026c4ab4e); without, as the plain ones: never another device's blob.
- */
-bool
-pose_metrics_match_pose_to_blobs_ranked(const struct xrt_pose *pose,
-                                        struct t_blob *blobs,
-                                        int num_blobs,
-                                        struct t_constellation_tracker_led_model *led_model,
-                                        t_constellation_device_id_t device_id,
-                                        const t_constellation_device_id_t *by_distance,
-                                        struct camera_model *calib,
-                                        struct pose_metrics_blob_match_info *match_info);
-
-bool
-pose_metrics_evaluate_pose_ranked(struct pose_metrics *score,
-                                  const struct xrt_pose *pose,
-                                  struct t_blob *blobs,
-                                  int num_blobs,
-                                  struct t_constellation_tracker_led_model *led_model,
-                                  t_constellation_device_id_t device_id,
-                                  const t_constellation_device_id_t *by_distance,
-                                  struct camera_model *calib,
-                                  struct pose_rect *out_bounds);
-
-XRT_CHECK_RESULT
-bool
-pose_metrics_evaluate_pose_with_prior_ranked(struct pose_metrics *score,
-                                             const struct xrt_pose *pose,
-                                             bool prior_must_match,
-                                             const struct xrt_pose *pose_prior,
-                                             const struct xrt_vec3 *pos_error_thresh,
-                                             const struct xrt_vec3 *rot_error_thresh,
-                                             struct t_blob *blobs,
-                                             int num_blobs,
-                                             struct t_constellation_tracker_led_model *led_model,
-                                             t_constellation_device_id_t device_id,
-                                             const t_constellation_device_id_t *by_distance,
-                                             struct camera_model *calib,
-                                             struct pose_rect *out_bounds);
-
 XRT_CHECK_RESULT
 bool
 pose_metrics_evaluate_pose_with_prior(struct pose_metrics *score,

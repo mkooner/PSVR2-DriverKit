@@ -254,9 +254,6 @@ normalizeGrayscaleImage(cv::Mat &data_in, cv::Mat &data_out)
 	return true;
 }
 
-//! Most zoomed-in tiles a frame (detection_tiles up to 4 per side), each with its own detector input.
-static constexpr int kMaxDetectionTiles = 16;
-
 void
 setup_ort_api(HandTracking *hgt, onnx_state *state, const std::filesystem::path &path)
 {
@@ -306,10 +303,6 @@ init_hand_detection(HandTracking *hgt, onnx_state *wrap)
 	setup_ort_api(hgt, wrap, path);
 
 	setup_model_image_input(hgt, wrap, "inputImg", kDetectionInputSize, kDetectionInputSize);
-	// One more input per zoomed-in tile, so they can run at the same time on the one session (Run is thread-safe).
-	for (int i = 0; i < kMaxDetectionTiles; i++) {
-		setup_model_image_input(hgt, wrap, "inputImg", kDetectionInputSize, kDetectionInputSize);
-	}
 }
 
 
@@ -320,7 +313,6 @@ init_hand_detection(HandTracking *hgt, onnx_state *wrap)
 static void
 detect_in(HandTracking *hgt,
           onnx_state *state,
-          int input_idx,
           const cv::Mat &img,
           enum t_camera_orientation rot,
           float out_conf[2],
@@ -338,11 +330,11 @@ detect_in(HandTracking *hgt,
 	cv::Matx23f go_back = blackbar(img, rot, binned_uint8, desired_bin_size);
 
 	cv::Mat binned_float_wrapper_mat(cv::Size(kDetectionInputSize, kDetectionInputSize), CV_32FC1, //
-	                                 state->wraps[input_idx].data, kDetectionInputSize * sizeof(float));
+	                                 state->wraps[0].data, kDetectionInputSize * sizeof(float));
 	normalizeGrayscaleImage(binned_uint8, binned_float_wrapper_mat);
 
-	const OrtValue *inputs[] = {state->wraps[input_idx].tensor};
-	const char *input_names[] = {state->wraps[input_idx].name};
+	const OrtValue *inputs[] = {state->wraps[0].tensor};
+	const char *input_names[] = {state->wraps[0].name};
 	OrtValue *output_tensors[] = {nullptr, nullptr, nullptr, nullptr};
 	const char *output_names[] = {"hand_exists", "cx", "cy", "size"};
 	{
@@ -408,35 +400,6 @@ detect_in(HandTracking *hgt,
 	}
 }
 
-struct detection_tile_job
-{
-	ht_view *view;
-	int input_idx;
-	int x0, y0, tw, th;
-	float conf[2];
-	xrt_vec2 center[2];
-	float size[2];
-};
-
-static void
-run_detection_tile(void *ptr)
-{
-	detection_tile_job *job = (detection_tile_job *)ptr;
-	ht_view *view = job->view;
-	HandTracking *hgt = view->hgt;
-	job->conf[0] = job->conf[1] = 0.0f;
-	try {
-		cv::Mat crop = view->run_model_on_this(cv::Rect(job->x0, job->y0, job->tw, job->th));
-		// No mirrored pass on the crops: the left hand wasn't missed for being a left hand (mirrored, it wasn't
-		// found as a right hand either), only for being small; it halves their cost.
-		detect_in(hgt, &view->detection, job->input_idx, crop, view->camera_info.camera_orientation, job->conf,
-		          job->center, job->size, nullptr, hgt->tuneable_values.detection_tile_mirror);
-	} catch (const std::exception &e) {
-		HG_ERROR(hgt, "Exception while running a detection tile: %s", e.what());
-		job->conf[0] = job->conf[1] = 0.0f;
-	}
-}
-
 static void
 run_hand_detection_unsafe(hand_detection_run_info *info)
 {
@@ -450,7 +413,7 @@ run_hand_detection_unsafe(hand_detection_run_info *info)
 	xrt_vec2 center[2];
 	float size[2];
 	cv::Mat binned_uint8;
-	detect_in(hgt, state, 0, orig_data, rot, conf, center, size, &binned_uint8, true);
+	detect_in(hgt, state, orig_data, rot, conf, center, size, &binned_uint8, true);
 
 	// Offline diagnosis: MERCURY_DUMP_DIR saves every 30th detector input per view (PGM, as the model gets it).
 	{
@@ -490,54 +453,25 @@ run_hand_detection_unsafe(hand_detection_run_info *info)
 		const int per_frame = hgt->tuneable_values.detection_tiles_per_frame > 0
 		                          ? hgt->tuneable_values.detection_tiles_per_frame
 		                          : tiles * tiles;
-		/*
-		 * The tiles of a frame run in parallel, each on its own detector input (all nine every frame took ~20 ms
-		 * one after another; 1 per frame found the left hand in 27% of the labelled frames, all nine in 41%).
-		 */
-		const int n = std::min({per_frame, tiles * tiles, kMaxDetectionTiles});
-		detection_tile_job jobs[kMaxDetectionTiles];
-		for (int k = 0; k < n; k++) {
+		for (int k = 0; k < per_frame && k < tiles * tiles; k++) {
 			const int t = (int)(view->tile_cursor++ % (uint32_t)(tiles * tiles));
 			const int ix = t % tiles, iy = t / tiles;
-			jobs[k] = {};
-			jobs[k].view = view;
-			jobs[k].input_idx = 1 + k;
-			jobs[k].x0 = (W - tw) * ix / (tiles - 1);
-			jobs[k].y0 = (H - th) * iy / (tiles - 1);
-			jobs[k].tw = tw;
-			jobs[k].th = th;
-		}
-		const uint64_t tiles_start_ns = os_monotonic_get_ns();
-		if (n > 1 && view->tile_group != nullptr) {
-			for (int k = 0; k < n; k++) {
-				u_worker_group_push(view->tile_group, run_detection_tile, &jobs[k]);
-			}
-			u_worker_group_wait_all(view->tile_group);
-		} else {
-			for (int k = 0; k < n; k++) {
-				run_detection_tile(&jobs[k]);
-			}
-		}
-		// Every 10 s at debug level: how many tiles ran and their time per frame, to keep their cost in view.
-		view->tile_stats.frames++;
-		view->tile_stats.tiles += (uint32_t)n;
-		view->tile_stats.ns += os_monotonic_get_ns() - tiles_start_ns;
-		if (view->tile_stats.since_ns == 0) {
-			view->tile_stats.since_ns = tiles_start_ns;
-		} else if (tiles_start_ns - view->tile_stats.since_ns > 10ULL * U_TIME_1S_IN_NS) {
-			HG_DEBUG(hgt, "View %d detection tiles: %u frames searched, %u tiles, %.2f ms per frame (%s)", view->view,
-			         view->tile_stats.frames, view->tile_stats.tiles,
-			         view->tile_stats.ns / 1e6 / view->tile_stats.frames,
-			         n > 1 && view->tile_group != nullptr ? "parallel" : "one after another");
-			view->tile_stats = {};
-			view->tile_stats.since_ns = tiles_start_ns;
-		}
-		for (int k = 0; k < n; k++) {
-			for (int h = 0; h < 2; h++) {
-				if (jobs[k].conf[h] > conf[h]) {
-					conf[h] = jobs[k].conf[h];
-					center[h] = {jobs[k].center[h].x + jobs[k].x0, jobs[k].center[h].y + jobs[k].y0};
-					size[h] = jobs[k].size[h];
+			{
+				const int x0 = (W - tw) * ix / (tiles - 1), y0 = (H - th) * iy / (tiles - 1);
+				cv::Mat crop = orig_data(cv::Rect(x0, y0, tw, th));
+				float tconf[2];
+				xrt_vec2 tcenter[2];
+				float tsize[2];
+				// No mirrored pass on the crops: the left hand wasn't missed for being a left hand (mirrored, it
+				// wasn't found as a right hand either), only for being small; it halves their cost.
+				detect_in(hgt, state, crop, rot, tconf, tcenter, tsize, nullptr,
+				          hgt->tuneable_values.detection_tile_mirror);
+				for (int h = 0; h < 2; h++) {
+					if (tconf[h] > conf[h]) {
+						conf[h] = tconf[h];
+						center[h] = {tcenter[h].x + x0, tcenter[h].y + y0};
+						size[h] = tsize[h];
+					}
 				}
 			}
 		}

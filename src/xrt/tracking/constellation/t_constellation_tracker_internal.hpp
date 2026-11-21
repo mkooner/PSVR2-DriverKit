@@ -151,20 +151,6 @@ public: // Fields
 	std::array<DeviceState, XRT_CONSTELLATION_MAX_DEVICES> device_states{};
 	uint32_t device_count{};
 
-	/*!
-	 * Devices with a predicted pose in this camera, nearest first (XRT_CONSTELLATION_INVALID_DEVICE_ID padded), for
-	 * the pose metrics' nearer-device blob rule (T_CONSTELLATION_NEAR_TAKES_BLOBS, upstream 026c4ab4e).
-	 */
-	std::array<t_constellation_device_id_t, XRT_CONSTELLATION_MAX_DEVICES> device_ids_by_distance{};
-	bool have_ranking{false};
-
-	//! The ranking for the pose metrics, nullptr when off or not made yet (then no device takes another's blobs).
-	const t_constellation_device_id_t *
-	nearRanking() const
-	{
-		return have_ranking ? device_ids_by_distance.data() : nullptr;
-	}
-
 	uint32_t mosaic_index;
 	uint32_t camera_index;
 

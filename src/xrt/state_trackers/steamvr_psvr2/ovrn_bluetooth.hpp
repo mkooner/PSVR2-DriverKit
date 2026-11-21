@@ -17,7 +17,7 @@ namespace ovrn {
 
 /*!
  * Ask BlueZ to disconnect the device with Bluetooth address @p address ("88:03:4C:C1:17:6F"), on whichever adapter
- * has it (all adapters asked at once). Blocks for at most about 1 s. False with a reason in @p why if it couldn't (no D-Bus support built,
+ * has it. Blocks for at most a few seconds. False with a reason in @p why if it couldn't (no D-Bus support built,
  * no system bus, no such device).
  */
 bool

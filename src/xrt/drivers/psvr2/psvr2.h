@@ -293,15 +293,6 @@ struct psvr2_hmd
 	libusb_device_handle *dev;
 
 	struct os_thread_helper usb_thread;
-	/*!
-	 * Guards usb_complete and usb_active_xfers. Transfer callbacks take only this lock, never usb_thread's: that one is
-	 * held by psvr2_usb_start across synchronous control transfers, which only complete through the USB thread's
-	 * event handling. A callback waiting for it there deadlocked startup (a user's 2026-11-21 log: 3 of 11 starts
-	 * froze after "Camera mode 0xa" until SteamVR's 20 s watchdog aborted the driver). Never hold it across a libusb
-	 * call.
-	 */
-	struct os_mutex xfer_lock;
-	bool xfer_lock_ok;
 	int usb_complete;
 	int usb_active_xfers;
 
