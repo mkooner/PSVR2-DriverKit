@@ -843,14 +843,33 @@ main(int argc, char **argv)
 			g_events.clear();
 		}
 		unsetenv("DISABLE_STEAMVR_LINUX_FIXES");
+		// Odd rounds ask for async reprojection (OVRN_ASYNC=1, DriverKit's setting on); even rounds use the default.
+		const bool asyncAsked = round % 2 == 1;
+		if (asyncAsked) {
+			setenv("OVRN_ASYNC", "1", 1);
+		} else {
+			unsetenv("OVRN_ASYNC");
+		}
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			g_bools["steamvr/useFacetRenderer"] = true; // the user's own setting, turned on by hand
+		}
 		check(provider->Init(&context) == VRInitError_None, "Init succeeds");
 		{
 			const char *off = getenv("DISABLE_STEAMVR_LINUX_FIXES");
 			std::lock_guard<std::mutex> l(g_mutex);
 			check(off != nullptr && strcmp(off, "1") == 0,
 			      "the SteamVRLinuxFixes layer is switched off for the compositor (environment it inherits)");
-			check(g_bools.count("steamvr/enableLinuxVulkanAsync") && g_bools["steamvr/enableLinuxVulkanAsync"],
-			      "SteamVR's async reprojection is switched on before the compositor starts");
+			if (asyncAsked) {
+				check(g_bools.count("steamvr/enableLinuxVulkanAsync") && g_bools["steamvr/enableLinuxVulkanAsync"],
+				      "OVRN_ASYNC=1: SteamVR's async reprojection is switched on before the compositor starts");
+			} else {
+				check(!g_bools.count("steamvr/enableLinuxVulkanAsync"),
+				      "by default SteamVR's async reprojection setting is left alone");
+			}
+			check(g_bools.count("steamvr/useFacetRenderer") && !g_bools["steamvr/useFacetRenderer"] &&
+			          g_bools["driver_monado_psvr2/facetRendererTurnedOffByDriver"],
+			      "SteamVR's Facet renderer is off before the compositor starts (noted in our section)");
 		}
 		if (room) {
 			check(g_logText.find("hand tracking (experimental) on: the cameras track bare hands") != std::string::npos,
@@ -1309,6 +1328,8 @@ main(int argc, char **argv)
 			std::lock_guard<std::mutex> l(g_mutex);
 			check(!g_bools.count("steamvr/enableLinuxVulkanAsync") && !g_bools.count("driver_monado_psvr2/asyncReprojectionSetByDriver"),
 			      "Cleanup takes the async reprojection setting out again (other drivers keep SteamVR's default)");
+			check(g_bools["steamvr/useFacetRenderer"] && !g_bools.count("driver_monado_psvr2/facetRendererTurnedOffByDriver"),
+			      "Cleanup puts the user's Facet renderer setting back on");
 		}
 		const size_t total = pose_count(0) + pose_count(1) + pose_count(2);
 		sleep_ms(100);

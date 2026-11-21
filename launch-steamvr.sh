@@ -39,12 +39,13 @@ fi
 # (steamvr_drv, driver_monado) was removed on 2026-11-18.
 PLUGIN="$BUILD/steamvr-monado-psvr2"
 DRIVER=driver_monado_psvr2
-# Defaults, the user's best run (2026-11-18 17:44): SteamVR's async reprojection on and the SteamVRLinuxFixes layer off.
-# The driver applies them itself however SteamVR is started (ovrn_provider.cpp applyCompositorDefaults); ASYNC=0 /
-# LINUX_FIXES=1 here tell it not to (OVRN_ASYNC / OVRN_LINUX_FIXES).
-export ASYNC="${ASYNC:-1}"
+# Defaults: SteamVR's own async reprojection setting (ASYNC=1 asks the driver to turn it on for the session, as in the
+# 2026-11-18 17:44 run; off by default since 2026-11-21) and the SteamVRLinuxFixes layer off. The driver applies them
+# itself however SteamVR is started (ovrn_provider.cpp applyCompositorDefaults); ASYNC=1 / LINUX_FIXES=1 reach it as
+# OVRN_ASYNC=1 / OVRN_LINUX_FIXES=1.
+export ASYNC="${ASYNC:-0}"
 LINUX_FIXES="${LINUX_FIXES:-0}"
-[ "$ASYNC" = 0 ] && export OVRN_ASYNC=0
+[ "$ASYNC" = 1 ] && export OVRN_ASYNC=1
 [ "$LINUX_FIXES" = 1 ] && export OVRN_LINUX_FIXES=1
 VRPATH="$HOME/.config/openvr/openvrpaths.vrpath"
 BACKUP="$VRPATH.psvr2-test-backup"
@@ -182,12 +183,11 @@ if drv.get("blocked_by_safe_mode"):
 drv["blocked_by_safe_mode"] = False
 drv["enable"] = True
 # Async reprojection: SteamVR's own default on NVIDIA under Linux is off ("Async: Automatically disabled as default
-# based on the detected Vulkan environment" in vrcompositor.txt, RTX 5080). The driver asks SteamVR for it itself
-# (IVRSettings, ovrn_provider.cpp applyCompositorDefaults) and takes it out again at shutdown; ASYNC=0 reaches it as
-# OVRN_ASYNC=0.
+# based on the detected Vulkan environment" in vrcompositor.txt, RTX 5080). With ASYNC=1 (OVRN_ASYNC=1) the driver asks
+# SteamVR for it itself (IVRSettings, ovrn_provider.cpp applyCompositorDefaults) and takes it out again at shutdown.
 import os
-print("  async reprojection: " + ("asked for by the driver" if os.environ.get("ASYNC", "1") == "1"
-                                  else "SteamVR default (ASYNC=0)"))
+print("  async reprojection: " + ("asked for by the driver (ASYNC=1)" if os.environ.get("ASYNC", "0") == "1"
+                                  else "SteamVR's own setting (ASYNC=0, the default)"))
 with open(path, "w") as f:
     json.dump(cfg, f, indent=3)
 EOF

@@ -132,7 +132,7 @@ fn default_settings() -> Vec<Setting> {
     let mut v = vec![
         // SteamVR plugin (driver_monado_psvr2)
         toggle("ASYNC", "SteamVR async reprojection",
-               "On (default): the plugin asks SteamVR for it for the session; late frames are moved to the new head pose instead of shown again. Off: SteamVR's own default (off on NVIDIA under Linux).", true).steamvr(),
+               "Off (default): SteamVR's own setting is left as it is. On: the plugin asks SteamVR for it for the session; late frames are moved to the new head pose instead of shown again.", false).steamvr(),
         toggle("LINUX_FIXES", "SteamVRLinuxFixes layer",
                "Off (default): the plugin switches the layer off for SteamVR's compositor (on SteamVR 2.19.3 it patches the compositor with offsets from an older build: more judder). On: keep it.", false).steamvr(),
         value("XRT_COMPOSITOR_SCALE_PERCENTAGE", "Render size per eye (%)",
@@ -179,7 +179,7 @@ struct Config {
     version: u32,
 }
 
-const CONFIG_VERSION: u32 = 8;
+const CONFIG_VERSION: u32 = 9;
 
 impl Default for Config {
     fn default() -> Self {
@@ -313,6 +313,12 @@ fn load_config() -> Config {
                     *value = "140".into();
                 }
             }
+        }
+    }
+    if cfg.version < 9 {
+        // 2026-11-21: async reprojection off by default (SteamVR's own setting is left as it is).
+        for s in cfg.settings.iter_mut().filter(|s| s.key == "ASYNC") {
+            s.enabled = false;
         }
     }
     cfg.version = CONFIG_VERSION;
