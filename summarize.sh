@@ -25,11 +25,19 @@ stage "2 Calibration block parsed"      "psvr2_parse_gen_calibration_block\] Cam
 stage "3 LED tracker created"           "Creating the LED tracker|creating the LED tracker|added to the running LED tracker|camera [0-9] pose position" "tracker not created: no calibration block, or no controllers connected"
 stage "4 LD (LED) data arriving"        "Headset LED detector now|LD stats:"    "no LED detector data from the headset: see USB streams below"
 stage "5 LEDs seen by cameras"          "Count calibration done|LEDs per camera \[[^0]|LEDs per camera \[[0-9]+ [1-9]|LEDs per camera \[[0-9]+ [0-9]+ [1-9]|LEDs per camera \[[0-9]+ [0-9]+ [0-9]+ [1-9]" "cameras see no LEDs: controllers not in view, or LEDs not lit (LED sync)"
-stage "6 Controllers seen by LED sync"  "Device has been seen"                   "LEDs never identified: LED sync / timing"
+# Stages 6-10 also match the count calibration (search phases 9 -> 10) and the tracker's 5 s report, both info-level:
+# the gray-code and "Found pose" lines are debug-level, so a normal run showed no poses while both controllers tracked.
+stage "6 Controllers seen by LED sync"  "Device has been seen|Tracker report device [0-9]+: searches [0-9]+ found [1-9]|Tracker report device .*accepted [1-9]" "LEDs never identified: LED sync / timing"
 stage "7 LED sync phase changes"        "Transitioning from search phase"       "LED sync stuck in its first phase"
-stage "8 Gray code accepted"            "Accepting gray code"                   "gray code never locked"
-stage "9 LED sync STABLE"               "Entering STABLE"                       "LED sync never reached STABLE"
-stage "10 Controller poses solved"      "Found pose for device|succeeded with"  "no 6DoF poses solved: camera placement / LED model"
+stage "8 LED timing found"              "Accepting gray code|Count calibration done" "LED timing never found (count calibration / gray code)"
+stage "9 LED timing held"               "Entering STABLE|Transitioning from search phase 9 -> 10" "LED timing never held (STABLE / count hold)"
+stage "10 Controller poses solved"      "Found pose for device|succeeded with|Tracker report device .*accepted [1-9]" "no 6DoF poses solved: camera placement / LED model"
+
+# Per controller, from the tracker's 5 s reports: accepted poses per second, and the share of reports with any.
+awk '/Tracker report device [0-9]+:/ {d = $0; sub(/.*Tracker report device /, "", d); sub(/:.*/, "", d);
+	a = $NF + 0; n[d]++; sum[d] += a; if (a > 0) with[d]++}
+	END {for (d in n) printf "  device %s: %.0f poses/s accepted on average, poses in %d of %d reports (%.0f%%, 5 s each)\n",
+		d, sum[d] / (5 * n[d]), with[d], n[d], 100 * with[d] / n[d]}' "$LOG" | sort
 
 echo
 echo "== Clock check (ts host-now should be a few ms negative)"
