@@ -81,6 +81,14 @@ fi
 echo "  $(git -C "$REPO" log -1 --format='commit %h, %cd: %s' --date=format:'%Y-%m-%d %H:%M')"
 [ -f "$SRC/CMakeLists.txt" ] || { echo "ERROR: no Monado source in $SRC"; exit 1; }
 
+# DriverKit runs the copy of this script built into it, which can be older than the one just downloaded (a DriverKit
+# built before a build fix kept failing with the fix already downloaded): hand over to the downloaded copy when it
+# differs, so build fixes reach older DriverKits. Once only: PSVR2_DK_HANDED_OVER stops a loop.
+if [ -z "${PSVR2_DK_HANDED_OVER:-}" ] && [ -f "$REPO/build-driver.sh" ] && ! cmp -s "$0" "$REPO/build-driver.sh"; then
+	echo "  this DriverKit's build script is older than the downloaded one: using the downloaded one"
+	PSVR2_DK_HANDED_OVER=1 exec bash "$REPO/build-driver.sh" --dest "$DEST"
+fi
+
 echo "STEP 2/5 configure"
 # Only the PS VR2 drivers (headset, Sense controllers) plus the simulated ones the tests use; OpenCV, GStreamer, onnx,
 # SDL2, the debug GUI and Basalt off, so the plugin's libraries are few enough to bundle (bundle_libs.py) and SteamVR
