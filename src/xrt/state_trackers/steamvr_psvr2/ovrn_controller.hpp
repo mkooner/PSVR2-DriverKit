@@ -82,6 +82,11 @@ public:
 			} else {
 				vr::VRDriverInput()->UpdateScalarComponent(m_handles[i], m_values[i], 0.0);
 			}
+			noteInputValue(i, m_values[i]);
+		}
+		m_updates += n > 0 ? 1 : 0;
+		if (!m_inputsReported && now_ns() - m_activateNs >= kInputReportAfterNs) {
+			reportInputs("after 2 minutes");
 		}
 		updateSkeleton(n);
 	}
@@ -143,10 +148,105 @@ protected:
 		setupSkeleton(descs);
 		log("ovrn: %s controller %s (%s), %zu inputs%s\n", m_hand == Hand::Left ? "left" : "right",
 		    m_info.model.c_str(), m_info.serial.c_str(), m_handles.size(), haptic_path.empty() ? "" : ", haptics");
+		m_paths.clear();
+		size_t failed = 0;
+		for (size_t i = 0; i < descs.size(); i++) {
+			m_paths.push_back(descs[i].path);
+			if (m_handles[i] == vr::k_ulInvalidInputComponentHandle) {
+				log("ovrn: %s controller: input %s not created by SteamVR\n",
+				    m_hand == Hand::Left ? "left" : "right", descs[i].path.c_str());
+				failed++;
+			}
+		}
+		m_first.assign(descs.size(), 0.0f);
+		m_seen.assign(descs.size(), false);
+		m_changed.assign(descs.size(), false);
+		m_updates = 0;
+		m_inputsReported = false;
+		m_activateNs = now_ns();
+		/*
+		 * The compatibility line: the native identity SteamVR keeps, the input profile, and what legacy games
+		 * are shown (the profile's legacy binding; a game's own binding in SteamVR's settings still wins, which
+		 * the driver can't see).
+		 */
+		const bool has_haptic = m_haptic != vr::k_ulInvalidInputComponentHandle;
+		const bool has_skeleton = m_skeletonHandle != vr::k_ulInvalidInputComponentHandle;
+		log("ovrn: %s controller compatibility: type %s, input profile %s, legacy games see %s (%s), headset "
+		    "not simulated; %zu of %zu inputs created%s%s\n",
+		    m_hand == Hand::Left ? "left" : "right", m_info.controller_type.c_str(),
+		    m_info.input_profile.c_str(), legacyDescription(m_info.legacy_mode),
+		    m_info.legacy_mode_source.c_str(), descs.size() - failed, descs.size(),
+		    has_haptic ? ", haptics" : ", NO haptics", has_skeleton ? ", skeleton" : ", no skeleton");
 		return vr::VRInitError_None;
 	}
 
+	//! SteamVR deactivates the controller: the input summary, if the 2 minutes weren't up yet.
+	void
+	deactivate() override
+	{
+		if (!m_inputsReported && !m_paths.empty()) {
+			reportInputs("at shutdown");
+		}
+	}
+
 private:
+	static constexpr int64_t kInputReportAfterNs = 120LL * 1000000000LL;
+
+	static const char *
+	legacyDescription(const std::string &mode)
+	{
+		if (mode == "touch") {
+			return "Oculus Touch controllers";
+		}
+		if (mode == "vive") {
+			return "Vive controllers";
+		}
+		if (mode == "knuckles") {
+			return "Index controllers";
+		}
+		if (mode == "native") {
+			return "the PS VR2 Sense (no emulation)";
+		}
+		return "the profile's default";
+	}
+
+	//! Notes whether input @p i ever moved from its first value (RunFrame thread).
+	void
+	noteInputValue(size_t i, float v)
+	{
+		if (i >= m_seen.size()) {
+			return;
+		}
+		if (!m_seen[i]) {
+			m_seen[i] = true;
+			m_first[i] = v;
+		} else if (!m_changed[i] && (v - m_first[i] > 0.01f || m_first[i] - v > 0.01f)) {
+			m_changed[i] = true;
+		}
+	}
+
+	/*!
+	 * Which inputs changed at least once, and which never did (pressed, touched or moved): an input that never
+	 * changes while the controller is used points at a component that isn't reaching SteamVR (or wasn't used).
+	 */
+	void
+	reportInputs(const char *when)
+	{
+		m_inputsReported = true;
+		std::string never;
+		size_t changed = 0;
+		for (size_t i = 0; i < m_paths.size(); i++) {
+			if (m_changed[i]) {
+				changed++;
+			} else {
+				never += (never.empty() ? "" : ", ") + m_paths[i];
+			}
+		}
+		log("ovrn: %s controller inputs %s: %zu of %zu changed in %llu updates; never changed: %s\n",
+		    m_hand == Hand::Left ? "left" : "right", when, changed, m_paths.size(),
+		    (unsigned long long)m_updates, never.empty() ? "none" : never.c_str());
+	}
+
 	//! Which inputs drive the skeleton: trigger value and touch, grip, and the thumb's touches (stick, face buttons).
 	struct SkeletonInputs
 	{
@@ -240,6 +340,14 @@ private:
 	vr::VRInputComponentHandle_t m_skeletonHandle = vr::k_ulInvalidInputComponentHandle;
 	SkeletonInputs m_skelIdx;
 	skel::HandSkeleton m_skeleton;
+	// The input summary (RunFrame thread, and Activate / Deactivate on the same thread).
+	std::vector<std::string> m_paths;
+	std::vector<float> m_first;
+	std::vector<bool> m_seen;
+	std::vector<bool> m_changed;
+	uint64_t m_updates = 0;
+	bool m_inputsReported = false;
+	int64_t m_activateNs = 0;
 };
 
 } // namespace ovrn

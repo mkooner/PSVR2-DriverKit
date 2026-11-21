@@ -10,6 +10,9 @@
  */
 
 #include "hg_sync.hpp"
+
+#include <algorithm>
+#include <thread>
 #include "hg_image_math.inl"
 #include "tracking/t_hand_tracking.h"
 #include "util/u_box_iou.hpp"
@@ -700,6 +703,8 @@ HandTracking::~HandTracking()
 	xrt_frame_reference(&this->visualizers.old_frame, NULL);
 
 	// Stop all the workers before we release the ONNX state
+	u_worker_group_reference(&this->views[0].tile_group, NULL);
+	u_worker_group_reference(&this->views[1].tile_group, NULL);
 	u_worker_group_reference(&this->group, NULL);
 
 	release_onnx_state(&this->views[0].keypoint[0]);
@@ -1210,9 +1215,18 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	hgt->views[0].view = 0;
 	hgt->views[1].view = 1;
 
-	int num_threads = 4;
+	/*
+	 * 4 threads used to be all: the two views' detection, then the keypoint models. The zoomed-in detection tiles
+	 * (MERCURY_DETECTION_TILES) run in parallel too, up to 9 per view, so use up to half the CPU's threads (at
+	 * most 12, the pool allows 16), never fewer than 4.
+	 */
+	int num_threads = (int)std::thread::hardware_concurrency() / 2;
+	num_threads = std::max(4, std::min(12, num_threads));
 	hgt->pool = u_worker_thread_pool_create(num_threads - 1, num_threads, "Hand Tracking");
 	hgt->group = u_worker_group_create(hgt->pool);
+	hgt->views[0].tile_group = u_worker_group_create(hgt->pool);
+	hgt->views[1].tile_group = u_worker_group_create(hgt->pool);
+	HG_INFO(hgt, "Hand tracking worker threads: %d", num_threads);
 
 	lm::optimizer_create(hgt->left_in_right, false, hgt->log_level, &hgt->kinematic_hands[0]);
 	lm::optimizer_create(hgt->left_in_right, true, hgt->log_level, &hgt->kinematic_hands[1]);

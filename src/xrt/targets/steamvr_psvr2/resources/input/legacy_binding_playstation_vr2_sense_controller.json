@@ -206,6 +206,11 @@
     }
   },
   "controller_type": "playstation_vr2_sense",
-  "description": "Legacy (pre-SteamVR Input) apps on the PS VR2 Sense: the controller poses (/pose/raw, without them SteamVR Room Setup can't trace a room), haptics, trigger L2/R2, stick, grip L1/R1, square/cross as A, triangle/circle as the menu button (as SteamVR's Touch legacy binding)",
-  "name": "PS VR2 Sense legacy bindings (Monado)"
+  "description": "Legacy (pre-SteamVR Input) apps on the PS VR2 Sense: the controller poses (/pose/raw, without them SteamVR Room Setup can't trace a room), haptics, trigger L2/R2, stick, grip L1/R1, square/cross as A, triangle/circle as the menu button (as SteamVR's Touch legacy binding). Legacy apps are shown Oculus Touch controllers, as Sony's driver does: games such as Skyrim VR and Fallout 4 VR pick their control scheme from those, and know no PS VR2 one. The headset stays the PS VR2 (simulate_hmd off; it defaults on, which made legacy apps see an Oculus Quest 2 headset and tracking system).",
+  "name": "PS VR2 Sense legacy bindings (Monado)",
+  "options": {
+    "simulated_controller_type": "oculus_touch",
+    "simulate_rendermodel": true,
+    "simulate_hmd": false
+  }
 }

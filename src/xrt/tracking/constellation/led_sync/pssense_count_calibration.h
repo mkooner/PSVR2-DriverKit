@@ -819,8 +819,20 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
 #define COUNT_HOLD_EDGE_MARGIN_NS (U_TIME_1US_IN_NS * 150)
 #define COUNT_HOLD_DRIFT_MIN_T_NS (U_TIME_1S_IN_NS * 10)
 #define COUNT_HOLD_DRIFT_MAX (50e-6)
-//! Probes in a row with this controller's LEDs not seen at the centre before calibrating again (unconfirmed window).
-#define COUNT_HOLD_UNSEEN_PROBES 3
+/*!
+ * Probes in a row with this controller's LEDs not seen at the centre before calibrating again (unconfirmed window).
+ * The nudge probe measures the LEDs the tracker matched, so until the tracker has found the controller once every
+ * probe reads "not in view", right window or not. At 3 (~3 s at the 1 s unseen interval) a controller the tracker
+ * was slow to find was calibrated again and again (6-8 s each, LEDs mostly at wrong offsets): a user's cluttered
+ * room (2026-11-21, 50-150 background blobs) took 5 calibrations and 60 s, all finding the same window.
+ * calib_sim SIM_ACQUIRE_S (tracker needs 1-20 s on average, 120 starts each), 3 -> 8: start 4.9/11.5/21.0/40.9 s ->
+ * 4.9/9.4/16.7/32.4 s, worst 15/56/96/204 s -> 9/30/86/156 s, most calibrations 2/6/11/22 -> 1/2/5/9; the same or
+ * better with wandering or flickering background blobs except one worst case (81 vs 58 s). A wrong window is held
+ * ~8 s instead of ~3 s before it's calibrated again.
+ */
+#ifndef COUNT_HOLD_UNSEEN_PROBES
+#define COUNT_HOLD_UNSEEN_PROBES 8
+#endif
 /*!
  * Once the hold has seen the controller since its calibration, how long it keeps the timing while the controller is
  * unseen. Unseen almost always means out of view: the timing can only walk out of the window by drift, which at the
