@@ -47,6 +47,11 @@ DEBUG_GET_ONCE_FLOAT_OPTION(constellation_tracker_gyro_gate_deg, "T_CONSTELLATIO
  * 33/30%, with no position jumps or gravity gate failures; 50 costs about the same CPU as 150, 0 about 30% more.
  */
 DEBUG_GET_ONCE_NUM_OPTION(constellation_tracker_slow_skip_ms, "T_CONSTELLATION_SLOW_SKIP_MS", 50)
+/*!
+ * Upstream 026c4ab4e: a device nearer the camera may take blobs already matched to a farther one (overlapping
+ * controllers: two-handed grips, hands crossing). Off until measured (psvr2-test/ctreplay).
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(constellation_tracker_near_takes_blobs, "T_CONSTELLATION_NEAR_TAKES_BLOBS", false)
 //! How long shallow searches must have failed before a deep search (ms), see processSampleSlow.
 DEBUG_GET_ONCE_NUM_OPTION(constellation_tracker_deep_delay_ms, "T_CONSTELLATION_DEEP_DELAY_MS", 1000)
 /*
@@ -249,6 +254,20 @@ collect_devices_nearest_first(ConstellationTracker *tracker,
 		return device_state_camera_distance_sqrd(sample.getDeviceState(x->id).value_or(nullptr)) <
 		       device_state_camera_distance_sqrd(sample.getDeviceState(y->id).value_or(nullptr));
 	});
+
+	// The nearer-device blob rule's ranking: only devices with a predicted pose in this camera.
+	sample.device_ids_by_distance.fill(XRT_CONSTELLATION_INVALID_DEVICE_ID);
+	sample.have_ranking = false;
+	if (debug_get_bool_option_constellation_tracker_near_takes_blobs()) {
+		uint32_t ranked = 0;
+		for (uint32_t i = 0; i < device_count; i++) {
+			const float d = device_state_camera_distance_sqrd(sample.getDeviceState(out_devices[i]->id).value_or(nullptr));
+			if (std::isfinite(d)) {
+				sample.device_ids_by_distance[ranked++] = out_devices[i]->id;
+			}
+		}
+		sample.have_ranking = ranked > 1;
+	}
 
 	return device_count;
 }
@@ -554,7 +573,7 @@ Camera::tryDevicePose(Device *device,
 	bool success;
 	pose_metrics score;
 	if (Tcv_cam_device_prior.has_value()) {
-		success = pose_metrics_evaluate_pose_with_prior( //
+		success = pose_metrics_evaluate_pose_with_prior_ranked( //
 		    &score,                                      //
 		    &Tcv_cam_device_candidate,                   //
 		    false,                                       //
@@ -564,17 +583,17 @@ Camera::tryDevicePose(Device *device,
 		    sample.blobs,                                //
 		    sample.blob_count,                           //
 		    &device->params.led_model,                   //
-		    device->id,                                  //
+		    device->id, sample.nearRanking(),                                  //
 		    &this->model,                                //
 		    NULL);                                       //
 	} else {
-		success = pose_metrics_evaluate_pose( //
+		success = pose_metrics_evaluate_pose_ranked( //
 		    &score,                           //
 		    &Tcv_cam_device_candidate,        //
 		    sample.blobs,                     //
 		    sample.blob_count,                //
 		    &device->params.led_model,        //
-		    device->id,                       //
+		    device->id, sample.nearRanking(),                       //
 		    &this->model,                     //
 		    NULL);                            //
 	}
@@ -612,8 +631,8 @@ bool
 Camera::tryDevicePriorSnap(Device *device, CameraSample &sample, DeviceState &device_state, const xrt_space_relation &prior)
 {
 	pose_metrics_blob_match_info info;
-	pose_metrics_match_pose_to_blobs(&prior.pose, sample.blobs, sample.blob_count, &device->params.led_model,
-	                                 device->id, &this->model, &info);
+	pose_metrics_match_pose_to_blobs_ranked(&prior.pose, sample.blobs, sample.blob_count, &device->params.led_model,
+	                                 device->id, sample.nearRanking(), &this->model, &info);
 	if (info.num_visible_leds < 4) {
 		return false;
 	}
@@ -738,10 +757,10 @@ Camera::tryDevicePriorSnap(Device *device, CameraSample &sample, DeviceState &de
 			math_quat_rotate(&inv, &solved.orientation, &dq);
 			float rot_deg = RAD_TO_DEG(2.0f * acosf(fminf(1.0f, fabsf(dq.w))));
 			pose_metrics score;
-			bool ok = pose_metrics_evaluate_pose_with_prior(&score, &solved, true, &prior.pose,
+			bool ok = pose_metrics_evaluate_pose_with_prior_ranked(&score, &solved, true, &prior.pose,
 			                                                &device->prior_pos_error, &device->prior_rot_error,
 			                                                sample.blobs, sample.blob_count,
-			                                                &device->params.led_model, device->id, &this->model,
+			                                                &device->params.led_model, device->id, sample.nearRanking(), &this->model,
 			                                                NULL);
 			if (ok && (score.matched_blobs > 4 || POSE_HAS_FLAGS(&score, POSE_MATCH_GOOD)) &&
 			    m_vec3_len(d) <= debug_get_float_option_constellation_tracker_prior_snap_max_m() &&
@@ -769,8 +788,8 @@ Camera::tryDevicePriorSnap(Device *device, CameraSample &sample, DeviceState &de
 		                 sample.blobs, sample.blob_count, &device->params.led_model, device->id, solved)) {
 			pose_metrics score;
 			// The fit alone: the prior's own error is what the snap bridges, so its agreement test can't be used.
-			bool ok = pose_metrics_evaluate_pose(&score, &solved, sample.blobs, sample.blob_count,
-			                                     &device->params.led_model, device->id, &this->model, NULL);
+			bool ok = pose_metrics_evaluate_pose_ranked(&score, &solved, sample.blobs, sample.blob_count,
+			                                     &device->params.led_model, device->id, sample.nearRanking(), &this->model, NULL);
 			if (ok && POSE_HAS_FLAGS(&score, POSE_MATCH_GOOD)) {
 				this->pushPose(sample, device_state, device, score, solved, true,
 				               CONSTELLATION_SOLVE_TYPE_BLOB_LABELS);
@@ -865,7 +884,7 @@ Camera::tryDeviceBlobRecovery(Device *device,
 	pose_metrics score;
 	// Evaluate the pose, using the prior if available
 	if (Tcv_cam_device_prior.has_value()) {
-		success = pose_metrics_evaluate_pose_with_prior( //
+		success = pose_metrics_evaluate_pose_with_prior_ranked( //
 		    &score,                                      //
 		    &Tcv_cam_device,                             //
 		    true,                                        //
@@ -875,12 +894,12 @@ Camera::tryDeviceBlobRecovery(Device *device,
 		    sample.blobs,                                //
 		    sample.blob_count,                           //
 		    &device->params.led_model,                   //
-		    device->id,                                  //
+		    device->id, sample.nearRanking(),                                  //
 		    &this->model,                                //
 		    NULL);
 	} else {
-		success = pose_metrics_evaluate_pose(&score, &Tcv_cam_device, sample.blobs, sample.blob_count,
-		                                     &device->params.led_model, device->id, &this->model, NULL);
+		success = pose_metrics_evaluate_pose_ranked(&score, &Tcv_cam_device, sample.blobs, sample.blob_count,
+		                                     &device->params.led_model, device->id, sample.nearRanking(), &this->model, NULL);
 	}
 
 	// If the evaluate failed entirely, this isn't a success.
@@ -1025,6 +1044,9 @@ Camera::processSampleSlow(CameraSample &sample)
 	const auto process_start_ns = os_monotonic_get_ns();
 
 	correspondence_search_set_blobs(data.cs, sample.blobs, sample.blob_count);
+	data.cs->ranking_valid = sample.have_ranking;
+	std::memcpy(data.cs->device_ids_by_distance, sample.device_ids_by_distance.data(),
+	            sizeof(data.cs->device_ids_by_distance));
 
 	std::shared_ptr<CameraMosaic> mosaic = this->mosaic.lock();
 	U_ASSERT_WEAK_PTR_RET(mosaic,
@@ -1419,6 +1441,9 @@ Camera::processSampleFast(CameraSample &sample)
 		if (debug_get_bool_option_constellation_tracker_fast_prior_search() && Tcv_cam_device_predicted.has_value()) {
 			auto &cs = this->fast_processing_thread_data.cs;
 			correspondence_search_set_blobs(cs, sample.blobs, sample.blob_count);
+			cs->ranking_valid = sample.have_ranking;
+			std::memcpy(cs->device_ids_by_distance, sample.device_ids_by_distance.data(),
+			            sizeof(cs->device_ids_by_distance));
 			xrt_pose Tcv_cam_device = Tcv_cam_device_predicted->pose;
 			correspondence_search_flags flags = (correspondence_search_flags)(
 			    CS_FLAG_SHALLOW_SEARCH | CS_FLAG_HAVE_POSE_PRIOR | CS_FLAG_STOP_FOR_STRONG_MATCH);
@@ -1527,8 +1552,8 @@ Camera::pushPose(CameraSample &camera_sample,
 
 	// Match visible blobs to the pose we found
 	pose_metrics_blob_match_info blob_match_info;
-	pose_metrics_match_pose_to_blobs(&Tcv_cam_device_initial, camera_sample.blobs, camera_sample.blob_count,
-	                                 &device->params.led_model, device->id, &this->model, &blob_match_info);
+	pose_metrics_match_pose_to_blobs_ranked(&Tcv_cam_device_initial, camera_sample.blobs, camera_sample.blob_count,
+	                                 &device->params.led_model, device->id, camera_sample.nearRanking(), &this->model, &blob_match_info);
 
 	// Mark all the new blobs using the match info
 	camera_sample.markMatchingBlobs(tracker, device->params.led_model, device->id, blob_match_info);
@@ -1569,8 +1594,8 @@ Camera::pushPose(CameraSample &camera_sample,
 			         Tcv_cam_device.position.z);
 
 			// Now that we've optimized the pose, we gotta update the match info
-			pose_metrics_match_pose_to_blobs(&Tcv_cam_device, camera_sample.blobs, camera_sample.blob_count,
-			                                 &device->params.led_model, device->id, &this->model,
+			pose_metrics_match_pose_to_blobs_ranked(&Tcv_cam_device, camera_sample.blobs, camera_sample.blob_count,
+			                                 &device->params.led_model, device->id, camera_sample.nearRanking(), &this->model,
 			                                 &blob_match_info);
 
 			// Unmark any other blobs
@@ -1585,13 +1610,13 @@ Camera::pushPose(CameraSample &camera_sample,
 		}
 
 		// We need to re-evaluate the pose after optimization, since the reprojection error may have changed.
-		pose_metrics_evaluate_pose(    //
+		pose_metrics_evaluate_pose_ranked(    //
 		    &score,                    //
 		    &Tcv_cam_device,           //
 		    camera_sample.blobs,       //
 		    camera_sample.blob_count,  //
 		    &device->params.led_model, //
-		    device->id,                //
+		    device->id, camera_sample.nearRanking(),                //
 		    &this->model,              //
 		    NULL);                     //
 	}
