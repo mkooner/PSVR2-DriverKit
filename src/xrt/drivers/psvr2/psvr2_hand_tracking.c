@@ -234,11 +234,15 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 	 */
 	setenv("MERCURY_KEYPOINT_HAND_CONFIDENCE", "0.98", 0);
 	/*
-	 * Mercury's zoomed-in detection tiles (MERCURY_DETECTION_TILES) stay off for now. Scored against the 2026-11-20
-	 * recording's frames labelled by hand (hands over the desk 2-35 s, no hands 37-43 s; found / ghosts): no tiles
-	 * left 26% right 74%, one 3x3 tile a frame 27% / 77%, three 29% / 74%, all nine every frame 41% / 76% but ~20 ms a
-	 * frame (too slow for the 60 Hz stream); no ghosts in any. Next: run the nine in parallel.
+	 * Mercury's zoomed-in detection tiles: while a hand isn't found, the detector also looks at a 3x3 grid of
+	 * overlapping crops, all nine every frame, run in parallel (hg_model.cpp run_detection_tile). On the 2026-11-20
+	 * recording, replayed through this module (psvr2-test/hands/driver_ht_replay: share of SteamVR queries a hand is
+	 * active, hands over the desk 2-35 s / none 37-43 s): off left 22% right 63%, one tile a frame 52% / 65%, all nine
+	 * in parallel 77% / 68%, no false hands in any; the tiles took 3.7 ms per searching frame (one after another
+	 * ~17 ms, too slow for the 60 Hz stream), CPU 0.55 -> 1.0 cores. MERCURY_DETECTION_TILES=0 turns them off.
 	 */
+	setenv("MERCURY_DETECTION_TILES", "3", 0);
+	setenv("MERCURY_DETECTION_TILES_PER_FRAME", "9", 0);
 	struct t_hand_tracking_sync *sync = t_hand_tracking_sync_mercury_create(stereo, info, models);
 	t_stereo_camera_calibration_reference(&stereo, NULL);
 	if (sync == NULL) {
