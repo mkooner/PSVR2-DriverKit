@@ -523,6 +523,21 @@ process_status_report(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read, timep
 	}
 }
 
+static const char *
+psvr2_xfer_status_name(enum libusb_transfer_status status)
+{
+	switch (status) {
+	case LIBUSB_TRANSFER_COMPLETED: return "completed";
+	case LIBUSB_TRANSFER_ERROR: return "error";
+	case LIBUSB_TRANSFER_TIMED_OUT: return "timed out";
+	case LIBUSB_TRANSFER_CANCELLED: return "cancelled";
+	case LIBUSB_TRANSFER_STALL: return "stall";
+	case LIBUSB_TRANSFER_NO_DEVICE: return "no device (the headset left USB)";
+	case LIBUSB_TRANSFER_OVERFLOW: return "overflow";
+	}
+	return "unknown";
+}
+
 bool
 psvr2_usb_xfer_continue(struct libusb_transfer *xfer, const char *type)
 {
@@ -541,8 +556,6 @@ psvr2_usb_xfer_continue(struct libusb_transfer *xfer, const char *type)
 
 	switch (xfer->status) {
 	case LIBUSB_TRANSFER_OVERFLOW:
-		PSVR2_ERROR(hmd, "%s xfer returned overflow!", type);
-		/* Fall through */
 	case LIBUSB_TRANSFER_ERROR:
 	case LIBUSB_TRANSFER_TIMED_OUT:
 	case LIBUSB_TRANSFER_CANCELLED:
@@ -552,7 +565,14 @@ psvr2_usb_xfer_continue(struct libusb_transfer *xfer, const char *type)
 		hmd->usb_active_xfers--;
 		os_thread_helper_signal_locked(&hmd->usb_thread);
 		os_thread_helper_unlock(&hmd->usb_thread);
-		PSVR2_TRACE(hmd, "%s xfer is aborting with status %d", type, xfer->status);
+		/*
+		 * Not shutting down (that returned above), so this stream has stopped for the rest of the session: it
+		 * isn't submitted again. Logged as an error with the reason, so a run summary shows which stream died
+		 * and why (a stream that stopped without a word left head tracking, the calibration block or LED data
+		 * missing).
+		 */
+		PSVR2_ERROR(hmd, "USB stream stopped: %s transfer ended with %s (status %d); no more %s data",
+		            type, psvr2_xfer_status_name(xfer->status), (int)xfer->status, type);
 		return false;
 
 	case LIBUSB_TRANSFER_COMPLETED: break;
@@ -1666,7 +1686,8 @@ get_psvr2_control(struct psvr2_hmd *hmd, uint16_t report_id, uint8_t subcmd, uin
 	ret = libusb_control_transfer(hmd->dev, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_ENDPOINT | 0x80, 0x1,
 	                              report_id, 0x0, (unsigned char *)&pkt, buf_size + 8, 100);
 	if (ret < 0) {
-		PSVR2_ERROR(hmd, "Failed to get report id %u subcmd %u, reason %d", report_id, subcmd, ret);
+		PSVR2_ERROR(hmd, "Failed to get report id %u subcmd %u, reason %s", report_id, subcmd,
+		            libusb_error_name(ret));
 		return false;
 	}
 
@@ -1693,7 +1714,8 @@ send_psvr2_control_value(
 	int ret = libusb_control_transfer(hmd->dev, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_ENDPOINT, 0x9, w_value,
 	                                  0x0, (unsigned char *)&pkt, pkt_len + 8, 100);
 	if (ret < 0) {
-		PSVR2_ERROR(hmd, "Failed to send report id %u subcmd %u", report_id, subcmd);
+		PSVR2_ERROR(hmd, "Failed to send report id 0x%02x subcmd %u: %s", report_id, subcmd,
+		            libusb_error_name(ret));
 		return false;
 	}
 	return true;
@@ -1715,7 +1737,8 @@ send_psvr2_control(struct psvr2_hmd *hmd, uint16_t report_id, uint8_t subcmd, ui
 	ret = libusb_control_transfer(hmd->dev, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_ENDPOINT, 0x9, report_id,
 	                              0x0, (unsigned char *)&pkt, pkt_len + 8, 100);
 	if (ret < 0) {
-		PSVR2_ERROR(hmd, "Failed to send report id %u subcmd %u", report_id, subcmd);
+		PSVR2_ERROR(hmd, "Failed to send report id 0x%02x subcmd %u: %s", report_id, subcmd,
+		            libusb_error_name(ret));
 		return false;
 	}
 
@@ -2060,8 +2083,11 @@ psvr2_usb_stop(struct psvr2_hmd *hmd)
 {
 #define X(xfer)                                                                                                        \
 	if (xfer) {                                                                                                    \
-		if (libusb_cancel_transfer(xfer) != 0) {                                                               \
-			PSVR2_ERROR(hmd, "failed to cancel transfer");                                                 \
+		int cancel_ret = libusb_cancel_transfer(xfer);                                                         \
+		if (cancel_ret == LIBUSB_ERROR_NOT_FOUND) {                                                            \
+			PSVR2_INFO(hmd, "USB shutdown: %s had already stopped (logged when it stopped)", #xfer);       \
+		} else if (cancel_ret != 0) {                                                                          \
+			PSVR2_ERROR(hmd, "USB shutdown: cannot cancel %s: %s", #xfer, libusb_error_name(cancel_ret));  \
 		}                                                                                                      \
 	}
 
