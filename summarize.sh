@@ -17,11 +17,14 @@ stage() { # name, pattern, hint-if-missing
 }
 
 echo "== Stages ($LOG)"
+# Stages 1b-5 match the driver's info-level messages (the older patterns, kept as alternatives, are debug-level or
+# gone: a normal run showed the calibration block, the tracker and LED data missing while they worked).
 stage "1 Headset opened (Monado)"       "PS VR2 HMD|psvr2_hmd|\[PSVR2\]|d/psvr2"                   "headset not probed: USB/udev, or another runtime holds it"
-stage "2 Calibration block parsed"      "Camera [0-9] calibration: resolution"  "no calibration block: controllers must be on when the service starts"
-stage "3 Camera poses computed"         "camera [0-9] pose position"            "tracker not created"
-stage "4 LD (LED) data arriving"        "LD stats:"                             "no LED payloads from the headset"
-stage "5 LEDs seen by cameras"          "LEDs per camera \[[^0]|LEDs per camera \[[0-9]+ [1-9]|LEDs per camera \[[0-9]+ [0-9]+ [1-9]|LEDs per camera \[[0-9]+ [0-9]+ [0-9]+ [1-9]" "cameras see no LEDs: controllers not in view, or LEDs not lit (LED sync)"
+stage "1b Head tracking (SLAM) arriving" "Re-centered SLAM space on the first pose"  "no head pose from the headset: see USB streams below"
+stage "2 Calibration block parsed"      "psvr2_parse_gen_calibration_block\] Camera [0-9] (aligned|mount)|Camera [0-9] calibration: resolution|using the saved copy" "no calibration block from the headset: see USB streams below"
+stage "3 LED tracker created"           "Creating the LED tracker|creating the LED tracker|added to the running LED tracker|camera [0-9] pose position" "tracker not created: no calibration block, or no controllers connected"
+stage "4 LD (LED) data arriving"        "Headset LED detector now|LD stats:"    "no LED detector data from the headset: see USB streams below"
+stage "5 LEDs seen by cameras"          "Count calibration done|LEDs per camera \[[^0]|LEDs per camera \[[0-9]+ [1-9]|LEDs per camera \[[0-9]+ [0-9]+ [1-9]|LEDs per camera \[[0-9]+ [0-9]+ [0-9]+ [1-9]" "cameras see no LEDs: controllers not in view, or LEDs not lit (LED sync)"
 stage "6 Controllers seen by LED sync"  "Device has been seen"                   "LEDs never identified: LED sync / timing"
 stage "7 LED sync phase changes"        "Transitioning from search phase"       "LED sync stuck in its first phase"
 stage "8 Gray code accepted"            "Accepting gray code"                   "gray code never locked"
@@ -97,6 +100,18 @@ grep -E "LD stats:" "$LOG" | tail -3 | cut -c1-220
 echo
 echo "== Camera poses"
 grep -E "camera [0-9] pose position" "$LOG" | tail -4 | cut -c1-200
+
+echo
+echo "== USB streams (a stopped stream sends nothing more this session; commands that failed)"
+n=$(count "USB stream stopped|Failed to send report|Failed to get report|cannot cancel")
+if [ "$n" -gt 0 ]; then
+	grep -E "USB stream stopped|Failed to send report|Failed to get report|cannot cancel|failed to cancel transfer" "$LOG" | sed -E 's/^.*(USB stream stopped|Failed to send report|Failed to get report|USB shutdown: cannot cancel)/  \1/' | sort | uniq -c | cut -c1-200
+else
+	echo "  none stopped, no failed commands"
+fi
+old=$(count "failed to cancel transfer")
+[ "$old" -gt 0 ] && echo "  $old x 'failed to cancel transfer' (older driver: streams that had already stopped, reason not logged)"
+grep -E "had already stopped" "$LOG" | sed -E 's/^.*USB shutdown: /  at shutdown: /' | sort | uniq -c | cut -c1-160
 
 echo
 echo "== Errors/warnings (top 15 distinct)"
