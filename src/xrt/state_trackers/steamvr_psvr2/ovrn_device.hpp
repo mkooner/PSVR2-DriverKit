@@ -84,21 +84,11 @@ public:
 		return err;
 	}
 
-	/*!
-	 * OpenVR: the device must not call SteamVR after Deactivate returns. The pose thread's calls for this device
-	 * run under m_activeMutex (withActive), so taking it here waits for one in flight, as Valve's sample drivers
-	 * wait for their pose thread in Deactivate; then the device frees its own resources (deactivate). Cleanup
-	 * comes after.
-	 */
 	void
 	Deactivate() final
 	{
-		{
-			std::lock_guard<std::mutex> lock(m_activeMutex);
-			m_objectId = vr::k_unTrackedDeviceIndexInvalid;
-			m_container = vr::k_ulInvalidPropertyContainer;
-		}
-		deactivate();
+		m_objectId = vr::k_unTrackedDeviceIndexInvalid;
+		m_container = vr::k_ulInvalidPropertyContainer;
 	}
 
 	void
@@ -131,28 +121,6 @@ protected:
 	virtual vr::EVRInitError
 	activate(uint32_t object_id) = 0;
 
-	//! Device-specific resources to free at Deactivate, after the last call to SteamVR for this device.
-	virtual void
-	deactivate()
-	{}
-
-	/*!
-	 * Runs @p fn(index, container) while the device is active, under m_activeMutex: for calls to SteamVR from
-	 * threads other than SteamVR's own (the pose thread), so none is made after Deactivate returns.
-	 */
-	template <typename Fn>
-	bool
-	withActive(Fn &&fn)
-	{
-		std::lock_guard<std::mutex> lock(m_activeMutex);
-		const uint32_t id = m_objectId.load();
-		if (id == vr::k_unTrackedDeviceIndexInvalid) {
-			return false;
-		}
-		fn(id, m_container);
-		return true;
-	}
-
 	void
 	submitPose(const vr::DriverPose_t &pose)
 	{
@@ -160,9 +128,10 @@ protected:
 			std::lock_guard<std::mutex> lock(m_poseMutex);
 			m_lastPose = pose;
 		}
-		withActive([&](uint32_t id, vr::PropertyContainerHandle_t) {
+		const uint32_t id = m_objectId.load();
+		if (id != vr::k_unTrackedDeviceIndexInvalid) {
 			vr::VRServerDriverHost()->TrackedDevicePoseUpdated(id, pose, sizeof(vr::DriverPose_t));
-		});
+		}
 	}
 
 	//! The identity every device reports: names, type, profile, model, the backend's extra properties, the universe.
@@ -240,8 +209,6 @@ protected:
 private:
 	std::mutex m_poseMutex;
 	vr::DriverPose_t m_lastPose;
-	//! Held by Deactivate and around every call to SteamVR from another thread (withActive).
-	std::mutex m_activeMutex;
 };
 
 } // namespace ovrn

@@ -73,17 +73,6 @@ public:
 
 	~Camera()
 	{
-		shutdown();
-	}
-
-	/*!
-	 * Stops for good: the watcher, the stream and its worker, then SteamVR's frame queue. The headset calls it at
-	 * its Deactivate, so nothing writes to SteamVR after that (OpenVR); a later StartVideoStream doesn't start it
-	 * again. Once only (the destructor calls it too).
-	 */
-	void
-	shutdown()
-	{
 		{
 			std::lock_guard<std::mutex> l(m_watchMutex);
 			m_watchQuit = true;
@@ -94,10 +83,6 @@ public:
 		}
 		{
 			std::lock_guard<std::mutex> l(m_controlMutex);
-			if (m_shutDown) {
-				return;
-			}
-			m_shutDown = true;
 			m_streamRequested = false;
 			m_readerActive = false;
 			stop();
@@ -105,8 +90,6 @@ public:
 		if (m_queue != nullptr && m_queueHandle != vr::k_ulInvalidPropertyContainer) {
 			m_queue->Destroy(m_queueHandle);
 		}
-		m_queue = nullptr;
-		m_queueHandle = vr::k_ulInvalidPropertyContainer;
 	}
 
 	/*!
@@ -504,9 +487,6 @@ private:
 	bool
 	update(const char *why)
 	{
-		if (m_shutDown) {
-			return false; // after the headset's Deactivate: no new stream
-		}
 		if (m_streamRequested || m_readerActive) {
 			if (m_running.load()) {
 				return true;
@@ -677,7 +657,6 @@ private:
 	std::mutex m_controlMutex; //!< start / stop, from SteamVR's calls and the queue watcher
 	bool m_streamRequested = false;
 	bool m_readerActive = false;
-	bool m_shutDown = false; //!< m_controlMutex: shutdown() ran
 	int64_t m_lastReaderNs = 0;
 
 	std::mutex m_watchMutex;
