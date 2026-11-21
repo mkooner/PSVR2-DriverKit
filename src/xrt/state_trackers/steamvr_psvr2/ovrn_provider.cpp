@@ -14,6 +14,8 @@
 #include "ovrn_interface.h"
 #include "ovrn_log.hpp"
 
+#include "util/u_git_tag.h"
+
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -39,6 +41,8 @@ public:
 	Init(vr::IVRDriverContext *context) override
 	{
 		VR_INIT_SERVER_DRIVER_CONTEXT(context);
+		// Which build this is (git describe of the source at configure time), to compare users' logs.
+		log("ovrn: driver build %s\n", u_git_tag);
 		applyCompositorDefaults();
 		applySeeThroughSettings();
 		// OVRN_BACKEND=sim: the simulated headset (tests); otherwise Monado's devices.
