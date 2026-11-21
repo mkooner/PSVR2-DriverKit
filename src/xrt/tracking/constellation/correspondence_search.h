@@ -101,6 +101,10 @@ struct correspondence_search
 {
 	const enum u_logging_level *ct_log_level;
 
+	//! Nearest-first device ranking for the pose metrics (see pose_metrics_match_pose_to_blobs_ranked), if valid.
+	t_constellation_device_id_t device_ids_by_distance[XRT_CONSTELLATION_MAX_DEVICES];
+	bool ranking_valid;
+
 	int num_points;
 	struct cs_image_point *points;
 	struct t_blob *blobs; /* Original blobs structs [num_points] */
