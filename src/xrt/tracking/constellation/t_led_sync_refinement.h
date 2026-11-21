@@ -414,6 +414,16 @@ struct t_led_sync_refinement
 		//! Adaptive probe interval: lengthened while the probes keep finding the blink centred.
 		time_duration_ns hold_interval_ns;
 		uint32_t hold_centred_streak;
+		/*!
+		 * Bluetooth clock follow (see COUNT_HOLD_BT_*): the driver's host -> controller clock offset, smoothed;
+		 * its value and the held centre at the last probe that found the blink centred; and a move made from it
+		 * that the next probe has to confirm (the centre before it, to go back to).
+		 */
+		bool bt_valid, bt_have_ref, bt_jump_pending;
+		double bt_smooth_ns;
+		double bt_ref_ns;
+		time_duration_ns bt_centre_ref_ns, bt_pre_jump_centre_ns;
+		uint32_t bt_jumps, bt_jumps_undone;
 		//! Nudge check: brightness of this device's matched LEDs from the tracker, per side.
 		bool hold_measuring;
 		uint64_t hold_meas_from_seq;
