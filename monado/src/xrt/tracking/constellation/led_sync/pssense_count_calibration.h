@@ -396,6 +396,11 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	cc->hold_seen_since_calib = false;
 	cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
 	cc->hold_centred_streak = 0;
+	// The window was just measured with the current clock offset: that's the reference to follow it from.
+	cc->bt_have_ref = cc->bt_valid;
+	cc->bt_ref_ns = cc->bt_smooth_ns;
+	cc->bt_centre_ref_ns = centre_ns;
+	cc->bt_jump_pending = false;
 	count_calib_set_offset(refinement, centre_ns);
 	refinement->frames_since_last_visually_seen = 0;
 	set_phase_locked(refinement, T_LED_SYNC_PHASE_COUNT_HOLD);
@@ -826,6 +831,53 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
  */
 #define COUNT_HOLD_UNSEEN_KEEP_NS (U_TIME_1S_IN_NS * 20)
 
+/*!
+ * Bluetooth clock follow. The driver holds its host -> controller LED clock mapping fixed (only trimmed by the drift
+ * rate the hold measures), because following the Bluetooth clock estimate moved the LEDs out of the window: its errors
+ * were 0-330us/s of drift or ~0.5ms steps. But the controller's clock relation can also really change: in a user's
+ * session (2026-11-20 23:26, firmware 06000102) the Bluetooth offset of each controller moved ~1.2ms within ~40s, one
+ * after the other, after minutes of < 2ppm, and each controller's window then moved the same way (+0.7 / +0.4ms by the
+ * end, still moving), which the hold chased in 100us steps at up to 30s probe intervals.
+ *
+ * So the hold follows a Bluetooth change only when its own optical probe confirms it: once the smoothed offset has
+ * moved COUNT_HOLD_BT_TRIGGER_NS from its value at the last centred probe, it probes at once (not up to 30s later),
+ * and if that probe sees the blink off centre in the same direction, it moves the centre by the whole Bluetooth change
+ * instead of one 100us step. The probe after (COUNT_HOLD_BT_VERIFY_NS later) has to see the LEDs again, or the move is
+ * undone. A Bluetooth error with the LEDs still centred moves nothing.
+ */
+#define COUNT_HOLD_BT_TRIGGER_NS (U_TIME_1US_IN_NS * 300)
+//! Compile-time switch for the simulator's before/after comparison (psvr2-test/ledsync/calib_sim).
+#ifndef COUNT_HOLD_BT_FOLLOW
+#define COUNT_HOLD_BT_FOLLOW 1
+#endif
+//! Largest move taken from the Bluetooth change, beyond that it's a clock reset, not a shift.
+#define COUNT_HOLD_BT_MAX_NS (U_TIME_1MS_IN_NS * 3)
+#define COUNT_HOLD_BT_VERIFY_NS (U_TIME_1S_IN_NS * 1)
+//! Smoothing of the offset per report (~250 reports/s: ~0.4s).
+#define COUNT_HOLD_BT_ALPHA 0.01
+
+static void
+count_hold_push_clock_offset(struct t_led_sync_refinement *refinement, time_duration_ns offset_ns)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	if (!cc->bt_valid || fabs((double)offset_ns - cc->bt_smooth_ns) > 50e6) {
+		// First value, or a clock reset (reconnect): start over, and drop a reference from the old clock.
+		cc->bt_smooth_ns = (double)offset_ns;
+		cc->bt_have_ref = false;
+		cc->bt_valid = true;
+		return;
+	}
+	cc->bt_smooth_ns += COUNT_HOLD_BT_ALPHA * ((double)offset_ns - cc->bt_smooth_ns);
+}
+
+//! The Bluetooth offset's change since the last centred probe, 0 without a reference.
+static double
+count_hold_bt_change_ns(const struct t_led_sync_refinement *refinement)
+{
+	const __typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	return COUNT_HOLD_BT_FOLLOW && cc->bt_have_ref ? cc->bt_smooth_ns - cc->bt_ref_ns : 0.0;
+}
+
 static void
 count_hold_integrate_trim(struct t_led_sync_refinement *refinement, timepoint_ns now_ns)
 {
@@ -846,10 +898,56 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
 
 	count_hold_integrate_trim(refinement, now_ns);
-	if (e != 0) {
+	bool bt_moved = false;
+	if (cc->bt_jump_pending) {
+		cc->bt_jump_pending = false;
+		const int dir = cc->hold_centre_ns > cc->bt_pre_jump_centre_ns ? 1 : -1;
+		/*
+		 * LEDs gone, or the blink now off centre the other way: the move overshot, so the Bluetooth change wasn't
+		 * (all) the LEDs'. Go back to where the hold was, plus the one step its probe asked for. In simulation a
+		 * Bluetooth-only error otherwise made ~1 wrong move per run whenever the normal drift corrections happened
+		 * to point the same way.
+		 */
+		if (!in_view || e == -dir) {
+			LOG_INFO(refinement,
+			         "Count hold: the Bluetooth clock move %s, back to %" PRId64 "us",
+			         in_view ? "overshot" : "lost the LEDs",
+			         (int64_t)((cc->bt_pre_jump_centre_ns + dir * COUNT_HOLD_STEP_NS) / U_TIME_1US_IN_NS));
+			cc->hold_centre_ns = cc->bt_pre_jump_centre_ns + dir * COUNT_HOLD_STEP_NS;
+			cc->bt_jumps_undone++;
+			// Don't take the same change again: the next reference is set from a centred probe.
+			cc->bt_have_ref = false;
+			e = 0;
+		}
+	}
+	if (in_view && e != 0 && cc->bt_have_ref) {
+		const double bt_ns = count_hold_bt_change_ns(refinement);
+		const double done_ns = (double)(cc->hold_centre_ns - cc->bt_centre_ref_ns);
+		// The blink sits off centre the way the clock moved (the window moves later as the offset grows).
+		if ((bt_ns > 0) == (e > 0) && fabs(bt_ns) >= (double)COUNT_HOLD_BT_TRIGGER_NS &&
+		    fabs(bt_ns) <= (double)COUNT_HOLD_BT_MAX_NS && fabs(bt_ns - done_ns) >= (double)COUNT_HOLD_STEP_NS) {
+			cc->bt_pre_jump_centre_ns = cc->hold_centre_ns;
+			cc->hold_centre_ns = cc->bt_centre_ref_ns + (time_duration_ns)bt_ns;
+			cc->bt_jump_pending = true;
+			cc->bt_jumps++;
+			bt_moved = true;
+			LOG_INFO(refinement,
+			         "Count hold: following the Bluetooth clock, it moved %+.0fus and the probe agrees, centre %" PRId64
+			         "us -> %" PRId64 "us",
+			         bt_ns / 1e3, (int64_t)(cc->bt_pre_jump_centre_ns / U_TIME_1US_IN_NS),
+			         (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS));
+		}
+	}
+	if (e != 0 && !bt_moved) {
 		cc->hold_centre_ns += e * COUNT_HOLD_STEP_NS;
 		cc->hold_corrections_sum_ns += e * (double)COUNT_HOLD_STEP_NS;
 		cc->hold_corrections++;
+	}
+	if (in_view && e == 0 && !cc->bt_jump_pending && cc->bt_valid) {
+		// Centred: the clock offset now belongs to this centre.
+		cc->bt_have_ref = true;
+		cc->bt_ref_ns = cc->bt_smooth_ns;
+		cc->bt_centre_ref_ns = cc->hold_centre_ns;
 	}
 
 	time_duration_ns t_ns = now_ns - cc->hold_start_ns;
@@ -887,6 +985,9 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 	} else {
 		cc->hold_centred_streak = 0;
 		cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
+	}
+	if (cc->bt_jump_pending) {
+		cc->hold_interval_ns = COUNT_HOLD_BT_VERIFY_NS;
 	}
 	cc->hold_in_view = in_view;
 
@@ -931,7 +1032,10 @@ handle_count_hold_edges(struct t_led_sync_refinement *refinement)
 	if (cc->hold_sub == 0) {
 		bool unseen = refinement->frames_since_last_visually_seen > 60;
 		time_duration_ns since_probe_ns = now_ns - cc->hold_last_probe_ns;
-		if (since_probe_ns >= cc->hold_interval_ns || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS)) {
+		// The clock moved by Bluetooth: check now whether the LEDs moved with it.
+		bool bt_trigger = fabs(count_hold_bt_change_ns(refinement)) >= (double)COUNT_HOLD_BT_TRIGGER_NS;
+		if (since_probe_ns >= cc->hold_interval_ns || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS) ||
+		    (bt_trigger && since_probe_ns >= COUNT_HOLD_BT_VERIFY_NS)) {
 			if (!count_calib_take_token(refinement)) {
 				// The other controller is calibrating or probing, ask it to yield between steps.
 				atomic_store(&count_probe_wanted, refinement);
@@ -1044,7 +1148,10 @@ handle_count_hold_nudge(struct t_led_sync_refinement *refinement)
 	if (cc->hold_sub == 0) {
 		bool unseen = refinement->frames_since_last_visually_seen > 60;
 		time_duration_ns since_probe_ns = now_ns - cc->hold_last_probe_ns;
-		if (since_probe_ns >= cc->hold_interval_ns || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS)) {
+		// The clock moved by Bluetooth: check now whether the LEDs moved with it.
+		bool bt_trigger = fabs(count_hold_bt_change_ns(refinement)) >= (double)COUNT_HOLD_BT_TRIGGER_NS;
+		if (since_probe_ns >= cc->hold_interval_ns || (unseen && since_probe_ns >= COUNT_HOLD_PROBE_UNSEEN_NS) ||
+		    (bt_trigger && since_probe_ns >= COUNT_HOLD_BT_VERIFY_NS)) {
 			cc->hold_sub = 1;
 			cc->hold_measuring = false;
 			count_calib_set_offset(refinement, cc->hold_centre_ns - COUNT_HOLD_NUDGE_NS);

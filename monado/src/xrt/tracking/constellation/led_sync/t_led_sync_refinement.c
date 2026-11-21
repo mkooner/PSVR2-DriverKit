@@ -840,6 +840,7 @@ t_led_sync_push_host_device_clock_offset(struct t_led_sync_refinement *refinemen
 	os_mutex_lock(&refinement->lock);
 	{
 		refinement->optical_driven_offset.driver_host_device_clock_offset_ns = clock_offset_ns;
+		count_hold_push_clock_offset(refinement, clock_offset_ns);
 	}
 	os_mutex_unlock(&refinement->lock);
 }
