@@ -15,6 +15,17 @@
  * SIM_DROP_AT=<s> SIM_DROP_FOR=<s>: the left controller's link drops at that time and comes back after that long, as
  * pssense_reconnect does it (t_led_sync_refinement_restart at the drop and at the reconnect). Its hold time is then
  * counted from the reconnect; the run passes when both hold.
+ *
+ * SIM_SHIFT_US=<us> [SIM_SHIFT_S=<s>] (with SIM_TRACKER=1): 40 s after both hold (probe intervals grown), the left
+ * controller's clock relation shifts by that much, as a ramp over SIM_SHIFT_S (0: a step); its LED window moves with
+ * it and so does the Bluetooth clock offset the driver reports (with noise). SIM_BTERR_US=<us> [SIM_BTERR_S=<s>]:
+ * instead (or as well) a Bluetooth-only error of that size, ramped over SIM_BTERR_S, held 10 s, then gone, while the
+ * LEDs don't move. Reported for the left controller over the 90 s from the event: frames tracked (>= 4 LEDs in the
+ * pictures), recalibrations, held centre error, and Bluetooth follow moves (made, undone).
+ *
+ * SIM_OUTAGE_FOR=<s> (with SIM_TRACKER=1): once both hold, the left controller holds 5 s more, then leaves every
+ * camera's view for that long and comes back (its link stays up). Reported: how long after it is back in view until it
+ * is tracked again (holding, its LEDs in the pictures for 15 frames running), and how many recalibrations that took.
  */
 #include "os/os_time.h"
 
@@ -37,6 +48,7 @@ sim_now_ns(void)
 static double g_led_latency_frames = 1.0;
 static bool g_ambient_walk = false;
 static bool g_tracker = false;
+static double g_drift = 15e-6;
 static double g_ambient = 30.0;
 static double g_flicker = 0.0;
 #define PROC_DELAY_NS 7500000LL
@@ -85,9 +97,31 @@ struct sim_ctrl
 	// Simulated tracker: this frame's match, reported one frame later (SIM_TRACKER=1).
 	int pending_match;
 	uint64_t pending_seq;
+	double pending_bright;
+	double bt_ns; // the driver's host -> controller offset estimate (true part)
 	double hold_centre_err_us;
 	uint32_t steps;
 };
+
+/*!
+ * The LEDs' brightness in a picture, 0..1: how much of the exposure the blink covers (the hold's nudge check compares
+ * it at two offsets). Rises over the first exposure's worth of the window, flat while the blink covers the whole
+ * exposure, falls over the last.
+ */
+static double
+led_brightness(struct sim_ctrl *c, double exposure_ns, int64_t exposure_start_ns)
+{
+	if (!c->visible || !c->on_mode || exposure_start_ns < c->effective_from_ns)
+		return 0;
+	double blink = (double)c->r.current_blink_duration_ns;
+	double L = c->window_left_ns, R = L + blink + exposure_ns;
+	double off = fmod(c->offset_ns - L, (double)FRAME_NS);
+	if (off < 0)
+		off += FRAME_NS;
+	off += L;
+	double b = fmin(fmin(off - L, R - off), exposure_ns) / exposure_ns;
+	return b < 0 ? 0 : (b > 1 ? 1 : b);
+}
 
 static int
 visible_leds(struct sim_ctrl *c, double exposure_ns, int64_t exposure_start_ns)
@@ -120,12 +154,24 @@ main(int argc, char **argv)
 	double exposure_ns = exposure_us * 1000.0;
 	g_ambient_walk = getenv("SIM_AMBIENT_WALK") != NULL;
 	g_tracker = getenv("SIM_TRACKER") != NULL;
+	if (getenv("SIM_DRIFT_PPM"))
+		g_drift = atof(getenv("SIM_DRIFT_PPM")) * 1e-6;
 	g_flicker = getenv("SIM_AMBIENT_FLICKER") ? atof(getenv("SIM_AMBIENT_FLICKER")) : 0.0;
 	if (getenv("SIM_LED_LATENCY_FRAMES"))
 		g_led_latency_frames = atof(getenv("SIM_LED_LATENCY_FRAMES"));
 
 	const double drop_at = getenv("SIM_DROP_AT") ? atof(getenv("SIM_DROP_AT")) : -1;
 	const double drop_for = getenv("SIM_DROP_FOR") ? atof(getenv("SIM_DROP_FOR")) : 3;
+	const double outage_for = getenv("SIM_OUTAGE_FOR") ? atof(getenv("SIM_OUTAGE_FOR")) : 0;
+	const double shift_us = getenv("SIM_SHIFT_US") ? atof(getenv("SIM_SHIFT_US")) : 0;
+	const double shift_s = getenv("SIM_SHIFT_S") ? atof(getenv("SIM_SHIFT_S")) : 0;
+	const double bterr_us = getenv("SIM_BTERR_US") ? atof(getenv("SIM_BTERR_US")) : 0;
+	const double bterr_s = getenv("SIM_BTERR_S") ? atof(getenv("SIM_BTERR_S")) : 0;
+	const bool shift_mode = shift_us != 0 || bterr_us != 0 || getenv("SIM_SHIFT_BASE") != NULL;
+	double sh_tracked = 0, sh_worst_tracked = 1, sh_err_worst = 0, sh_err_sum = 0;
+	int sh_runs = 0, sh_recal = 0, sh_recal_max = 0, sh_jumps = 0, sh_undone = 0;
+	double sum_rec = 0, worst_rec = 0, sum_recal = 0;
+	int n_rec = 0, n_never = 0, max_recal = 0;
 	double sum_other = 0, worst_other = 0, sum_back = 0, worst_back = 0;
 	double sum_both = 0, worst_both = 0, sum_err = 0, worst_err = 0;
 	int failed = 0, n_ok = 0;
@@ -156,10 +202,57 @@ main(int argc, char **argv)
 		int64_t start_ns = g_now_ns;
 		uint64_t seq = 1000;
 		int64_t exposure_start = g_now_ns;
-		while (g_now_ns - start_ns < 60LL * 1000000000LL) {
+		int64_t out_start = -1, out_end = -1, recovered = -1;
+		int recal = 0, streak = 0, prev_phase = -1;
+		int64_t ev_start = -1;
+		double applied_shift = 0, bt_walk = 0, run_err_worst = 0;
+		long ev_frames = 0, ev_tracked = 0;
+		for (int i = 0; i < 2; i++)
+			c[i].bt_ns = 3e6 + urand() * 1e6;
+		const int64_t run_limit = (outage_for > 0 || shift_mode ? 220LL : 60LL) * 1000000000LL;
+		while (g_now_ns - start_ns < run_limit) {
 			// Advance to this frame's processing time, applying LED commands due before it.
 			exposure_start += FRAME_NS;
 			int64_t proc = exposure_start + PROC_DELAY_NS;
+			if (outage_for > 0) {
+				if (out_start < 0 && c[0].hold_at_ns >= 0 && c[1].hold_at_ns >= 0) {
+					out_start = proc + 5LL * 1000000000LL;
+				}
+				if (out_start >= 0 && proc >= out_start && out_end < 0) {
+					c[0].visible = proc >= out_start + (int64_t)(outage_for * 1e9);
+					if (c[0].visible) {
+						out_end = proc;
+					}
+				}
+			}
+			if (shift_mode) {
+				if (ev_start < 0 && c[0].hold_at_ns >= 0 && c[1].hold_at_ns >= 0) {
+					ev_start = proc + 40LL * 1000000000LL;
+				}
+				double t = ev_start >= 0 ? (proc - ev_start) / 1e9 : -1;
+				// Real shift: LED window and Bluetooth offset together.
+				double want = t < 0 ? 0 : (shift_s <= 0 ? shift_us : shift_us * fmin(1.0, t / shift_s));
+				double step = (want - applied_shift) * 1000.0;
+				applied_shift = want;
+				c[0].window_left_ns += step;
+				c[0].bt_ns += step;
+				// Bluetooth-only error: ramp in, hold 10 s, gone.
+				double err = 0;
+				if (t >= 0 && bterr_us != 0) {
+					double up = bterr_s <= 0 ? 1.0 : fmin(1.0, t / bterr_s);
+					err = t < bterr_s + 10 ? bterr_us * up : 0;
+				}
+				// Noise: 30 us per report and a slow random walk (logs: +-30 us per 5 s while calm).
+				bt_walk += 1.0 * (urand() - 0.5) * 3.46;
+				for (int i = 0; i < 2; i++) {
+					if (c[i].dropped)
+						continue;
+					double u1 = fmax(urand(), 1e-12), u2 = urand();
+					double white = 30.0 * sqrt(-2 * log(u1)) * cos(2 * M_PI * u2);
+					double v = c[i].bt_ns + (white + bt_walk + (i == 0 ? err : 0)) * 1000.0;
+					t_led_sync_push_host_device_clock_offset(&c[i].r, (time_duration_ns)v);
+				}
+			}
 			if (drop_at >= 0) {
 				struct sim_ctrl *d = &c[0];
 				if (!d->dropped && d->reconnect_ns == 0 && proc - start_ns >= (int64_t)(drop_at * 1e9)) {
@@ -187,7 +280,8 @@ main(int argc, char **argv)
 					t_led_sync_mark_latest_sample_applied(&s->r, s->apply_at_ns);
 				}
 				// Window drift 15us/s, as measured.
-				s->window_left_ns += 15e-6 * FRAME_NS;
+				s->window_left_ns += g_drift * FRAME_NS; // SIM_DRIFT_PPM, 15 as measured
+				s->bt_ns += g_drift * FRAME_NS;          // a real drift shows in the Bluetooth clock too
 				if (dropout > 0 && proc >= s->vis_change_ns) {
 					s->visible = !s->visible;
 					double mean = s->visible ? 4.0 * (1 - dropout) / fmax(dropout, 0.01) : 4.0;
@@ -245,10 +339,13 @@ main(int argc, char **argv)
 						smp2.timestamp_ns = exposure_start - FRAME_NS;
 						smp2.has_world_pose = true;
 						smp2.metrics.matched_blob_count = (uint32_t)s->pending_match;
+						// 15% noise per picture (motion, angle), as analysis/dither_sim.py assumed
+						smp2.average_brightness = (float)(s->pending_bright * (0.85 + 0.3 * urand()));
 						t_led_sync_push_constellation_sample(&s->r, &smp2);
 					}
 					s->pending_match = (vis[i] >= 4 && urand() < 0.7) ? vis[i] : 0;
 					s->pending_seq = ev.sequence_id;
+					s->pending_bright = led_brightness(s, exposure_ns, exposure_start);
 				}
 				struct t_led_sync_sample smp;
 				if (t_led_sync_get_sample(&s->r, &smp)) {
@@ -272,10 +369,82 @@ main(int argc, char **argv)
 					s->hold_centre_err_us = d / 1000.0;
 				}
 			}
-			if (c[0].hold_at_ns >= 0 && c[1].hold_at_ns >= 0)
+			if (shift_mode && ev_start >= 0 && proc >= ev_start) {
+				const int ph = (int)c[0].r.phase;
+				if (ph == T_LED_SYNC_PHASE_COUNT_CALIBRATE && prev_phase != T_LED_SYNC_PHASE_COUNT_CALIBRATE &&
+				    prev_phase >= 0)
+					recal++;
+				prev_phase = ph;
+				ev_frames++;
+				ev_tracked += vis[0] >= 4;
+				if (ph == T_LED_SYNC_PHASE_COUNT_HOLD) {
+					double blink = (double)c[0].r.current_blink_duration_ns;
+					double tc = c[0].window_left_ns + (blink + exposure_ns) / 2;
+					double d = fmod((double)c[0].r.count_calib.hold_centre_ns - tc, (double)FRAME_NS);
+					if (d > FRAME_NS / 2)
+						d -= FRAME_NS;
+					if (d < -FRAME_NS / 2)
+						d += FRAME_NS;
+					run_err_worst = fmax(run_err_worst, fabs(d) / 1000.0);
+				}
+				if (proc - ev_start > 90LL * 1000000000LL)
+					break;
+				continue;
+			}
+			if (shift_mode) {
+				prev_phase = (int)c[0].r.phase;
+				continue;
+			}
+			if (outage_for > 0 && out_start >= 0 && proc >= out_start) {
+				const int ph = (int)c[0].r.phase;
+				if (ph == T_LED_SYNC_PHASE_COUNT_CALIBRATE && prev_phase != T_LED_SYNC_PHASE_COUNT_CALIBRATE &&
+				    prev_phase >= 0) {
+					recal++;
+				}
+				prev_phase = ph;
+				if (out_end >= 0 && recovered < 0) {
+					streak = (ph == T_LED_SYNC_PHASE_COUNT_HOLD && vis[0] >= 4) ? streak + 1 : 0;
+					if (streak >= 15) {
+						recovered = proc - 14 * FRAME_NS;
+					}
+				}
+				if (recovered >= 0 || (out_end >= 0 && proc - out_end > 60LL * 1000000000LL)) {
+					break;
+				}
+				continue;
+			}
+			if (outage_for > 0 && out_start >= 0) {
+				prev_phase = (int)c[0].r.phase;
+				continue;
+			}
+			if (outage_for <= 0 && c[0].hold_at_ns >= 0 && c[1].hold_at_ns >= 0)
 				break;
 			if (drop_at >= 0 && c[0].reconnect_ns == 0 && proc - start_ns > (int64_t)((drop_at + drop_for + 1) * 1e9))
 				break; // can't happen: guard
+		}
+		if (shift_mode && ev_frames > 0) {
+			double f = (double)ev_tracked / ev_frames;
+			sh_tracked += f;
+			sh_worst_tracked = fmin(sh_worst_tracked, f);
+			sh_err_worst = fmax(sh_err_worst, run_err_worst);
+			sh_err_sum += run_err_worst;
+			sh_recal += recal;
+			sh_recal_max = recal > sh_recal_max ? recal : sh_recal_max;
+			sh_jumps += c[0].r.count_calib.bt_jumps;
+			sh_undone += c[0].r.count_calib.bt_jumps_undone;
+			sh_runs++;
+		}
+		if (outage_for > 0 && out_end >= 0) {
+			sum_recal += recal;
+			max_recal = recal > max_recal ? recal : max_recal;
+			if (recovered >= 0) {
+				const double r = (recovered - out_end) / 1e9;
+				sum_rec += r;
+				worst_rec = fmax(worst_rec, r);
+				n_rec++;
+			} else {
+				n_never++;
+			}
 		}
 		if (c[0].hold_at_ns < 0 || c[1].hold_at_ns < 0) {
 			failed++;
@@ -317,6 +486,20 @@ main(int argc, char **argv)
 	       "held centre error mean %.0fus worst %.0fus (half room %.0fus); %d/%d never finished\n",
 	       exposure_us, dropout, n_ok ? times[n_ok / 2] : 0, n_ok ? sum_both / n_ok : 0, worst_both,
 	       n_ok ? sum_err / (2 * n_ok) : 0, worst_err, exposure_us / 2, failed, runs);
+	if (shift_mode && sh_runs > 0) {
+		printf("shift %+.0fus over %.0fs, BT error %+.0fus over %.0fs: tracked %.1f%% (worst run %.1f%%), "
+		       "recalibrations %.2f/run (max %d), worst centre error mean %.0fus max %.0fus, BT moves %.2f/run "
+		       "(%d undone), %d runs\n",
+		       shift_us, shift_s, bterr_us, bterr_s, 100 * sh_tracked / sh_runs, 100 * sh_worst_tracked,
+		       (double)sh_recal / sh_runs, sh_recal_max, sh_err_sum / sh_runs, sh_err_worst,
+		       (double)sh_jumps / sh_runs, sh_undone, sh_runs);
+	}
+	if (outage_for > 0) {
+		printf("left out of view %.0fs after holding: tracked again after mean %.2fs worst %.2fs (%d runs), "
+		       "never within 60s %d; recalibrations mean %.2f max %d\n",
+		       outage_for, n_rec ? sum_rec / n_rec : 0, worst_rec, n_rec, n_never,
+		       (n_rec + n_never) ? sum_recal / (n_rec + n_never) : 0, max_recal);
+	}
 	if (drop_at >= 0 && n_ok > 0) {
 		printf("left drops at %.1fs for %.1fs: right holding after mean %.1fs worst %.1fs; left holding again "
 		       "after reconnecting mean %.1fs worst %.1fs\n",
