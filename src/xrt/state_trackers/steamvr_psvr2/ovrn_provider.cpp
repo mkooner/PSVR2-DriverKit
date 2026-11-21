@@ -195,10 +195,15 @@ private:
 	 *   on SteamVR 2.19.3 its WaitForPendingPresent patch finds nothing, but it still replaces vrcompositor's GPU event
 	 *   queries using struct offsets from an older build; with it the user saw clearly more judder (17:46 vs 17:44).
 	 *   OVRN_LINUX_FIXES=1 keeps it.
-	 * - SteamVR's async reprojection on (off by default on NVIDIA under Linux): late frames are moved to the new head
-	 *   pose instead of shown again (17:44: 6 frames dropped, 304 reprojected, no "Timed out" fallback; without it 50
-	 *   dropped, 60 timed out). For this session only: Cleanup takes the setting out again, so other drivers (Sony's)
-	 *   keep SteamVR's default. OVRN_ASYNC=0 leaves SteamVR's setting alone.
+	 * - SteamVR's async reprojection only when asked for (OVRN_ASYNC=1, DriverKit's "SteamVR async reprojection"
+	 *   setting, off by default since 2026-11-21): late frames are then moved to the new head pose instead of shown
+	 *   again (17:44: 6 frames dropped, 304 reprojected; without it 50 dropped, 60 timed out). For that session only:
+	 *   Cleanup takes the setting out again, so other drivers (Sony's) keep SteamVR's default. Otherwise SteamVR's
+	 *   own setting is left as it is (a leftover of ours from a session that crashed is taken out).
+	 * - SteamVR's Facet renderer (steamvr/useFacetRenderer, an undocumented setting users turn on by hand for speed)
+	 *   off for the session: with it the compositor aborted about 1.5 s after every start on a user's PC (2026-11-21,
+	 *   SteamVR 2.18.4, RX 7600: ASSERT "NOIMPL" at facetrenderer.cpp:3572, SteamVR error -203), and the same build
+	 *   ran with it off. Cleanup turns it back on. OVRN_FACET=1 leaves it on.
 	 */
 	void
 	applyCompositorDefaults()
@@ -208,16 +213,23 @@ private:
 			setenv("DISABLE_STEAMVR_LINUX_FIXES", "1", 1);
 			log("ovrn: SteamVRLinuxFixes layer off for the compositor (OVRN_LINUX_FIXES=1 keeps it)\n");
 		}
-		const char *async = getenv("OVRN_ASYNC");
-		if (async != nullptr && strcmp(async, "0") == 0) {
-			return;
-		}
 		vr::IVRSettings *settings = vr::VRSettings();
 		if (settings == nullptr) {
 			return;
 		}
+		applyFacetOff(settings);
 		vr::EVRSettingsError err = vr::VRSettingsError_None;
 		const bool noted = settings->GetBool(kOwnSection, kAsyncNoteKey, &err) && err == vr::VRSettingsError_None;
+		const char *async = getenv("OVRN_ASYNC");
+		if (async == nullptr || strcmp(async, "1") != 0) {
+			if (noted) {
+				settings->RemoveKeyInSection(kAsyncSection, kAsyncKey);
+				settings->RemoveKeyInSection(kOwnSection, kAsyncNoteKey);
+				log("ovrn: async reprojection setting left by an earlier session taken out\n");
+			}
+			log("ovrn: async reprojection: SteamVR's own setting (OVRN_ASYNC=1 asks for it)\n");
+			return;
+		}
 		err = vr::VRSettingsError_None;
 		const bool on = settings->GetBool(kAsyncSection, kAsyncKey, &err);
 		const bool present = err == vr::VRSettingsError_None;
@@ -228,22 +240,60 @@ private:
 		settings->SetBool(kAsyncSection, kAsyncKey, true);
 		settings->SetBool(kOwnSection, kAsyncNoteKey, true);
 		m_asyncSet = true;
-		log("ovrn: SteamVR async reprojection on for this session (OVRN_ASYNC=0 leaves SteamVR's default)\n");
+		log("ovrn: SteamVR async reprojection on for this session (OVRN_ASYNC=1)\n");
+	}
+
+	static constexpr const char *kFacetKey = "useFacetRenderer";
+	static constexpr const char *kFacetNoteKey = "facetRendererTurnedOffByDriver";
+
+	//! The Facet renderer off for this session if the user's settings have it on (see applyCompositorDefaults).
+	void
+	applyFacetOff(vr::IVRSettings *settings)
+	{
+		const char *facet = getenv("OVRN_FACET");
+		if (facet != nullptr && strcmp(facet, "1") == 0) {
+			log("ovrn: SteamVR's Facet renderer setting left as it is (OVRN_FACET=1)\n");
+			return;
+		}
+		vr::EVRSettingsError err = vr::VRSettingsError_None;
+		const bool noted = settings->GetBool(kOwnSection, kFacetNoteKey, &err) && err == vr::VRSettingsError_None;
+		err = vr::VRSettingsError_None;
+		const bool on = settings->GetBool(kAsyncSection, kFacetKey, &err) && err == vr::VRSettingsError_None;
+		if (!on && !noted) {
+			return; // off or not set: SteamVR's standard renderer
+		}
+		// noted: an earlier session turned it off and ended without Cleanup; it still owes the user their setting.
+		settings->SetBool(kAsyncSection, kFacetKey, false);
+		settings->SetBool(kOwnSection, kFacetNoteKey, true);
+		m_facetSet = true;
+		log("ovrn: SteamVR's Facet renderer (useFacetRenderer) off for this session: it aborts the compositor at "
+		    "start; back on at shutdown (OVRN_FACET=1 leaves it on)\n");
 	}
 
 	void
 	restoreCompositorDefaults()
 	{
-		if (!m_asyncSet || vr::VRSettings() == nullptr) {
+		vr::IVRSettings *settings = vr::VRSettings();
+		if (settings == nullptr) {
 			return;
 		}
-		vr::VRSettings()->RemoveKeyInSection(kAsyncSection, kAsyncKey);
-		vr::VRSettings()->RemoveKeyInSection(kOwnSection, kAsyncNoteKey);
+		if (m_facetSet) {
+			settings->SetBool(kAsyncSection, kFacetKey, true);
+			settings->RemoveKeyInSection(kOwnSection, kFacetNoteKey);
+			m_facetSet = false;
+			log("ovrn: SteamVR's Facet renderer setting back on (the user's own)\n");
+		}
+		if (!m_asyncSet) {
+			return;
+		}
+		settings->RemoveKeyInSection(kAsyncSection, kAsyncKey);
+		settings->RemoveKeyInSection(kOwnSection, kAsyncNoteKey);
 		m_asyncSet = false;
 		log("ovrn: SteamVR async reprojection setting taken out again (SteamVR's default)\n");
 	}
 
 	bool m_asyncSet = false;
+	bool m_facetSet = false;
 
 	/*
 	 * See-through, as on Sony's driver (its see-through mode, 2026-11-19): the headset's function button shows the
