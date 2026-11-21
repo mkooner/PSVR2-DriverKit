@@ -361,27 +361,10 @@ psvr2_start_gaze_tracking(struct psvr2_hmd *hmd)
 		return -1;
 	}
 
-	FILE *eye_calib_file = u_file_open_file_in_config_dir_subpath("psvr2", "eye_calibration.bin", "r");
-
-	if (eye_calib_file) {
-		size_t file_size;
-		char *contents = u_file_read_content(eye_calib_file, &file_size);
-
-		if (contents != NULL) {
-			ret = libusb_bulk_transfer(hmd->dev, LIBUSB_ENDPOINT_OUT | PSVR2_GAZE_INTERFACE,
-			                           (uint8_t *)contents, file_size, NULL, 1000);
-			if (ret < 0) {
-				PSVR2_ERROR(hmd, "Could not send gaze calibration");
-				free(contents);
-				fclose(eye_calib_file);
-				return -1;
-			}
-
-			free(contents);
-		}
-
-		fclose(eye_calib_file);
-	}
+	/*
+	 * No eye calibration is sent: the headset uses its own. (An eye_calibration.bin in the config folder used to be
+	 * sent to the headset as it was, unchecked; nothing made that file.)
+	 */
 
 	ret = os_thread_helper_start(&hmd->et_data.eye_tracking_thread, psvr2_eye_tracking_control_thread, hmd);
 	if (ret < 0) {
