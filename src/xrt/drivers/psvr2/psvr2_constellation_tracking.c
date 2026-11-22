@@ -8,6 +8,7 @@
  * @ingroup drv_psvr2
  */
 
+#include "util/u_startup_log.h"
 #include "constellation/t_constellation_tracker.h"
 
 #include "math/m_api.h"
@@ -416,6 +417,7 @@ psvr2_parse_gen_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t
 	}
 
 	t_constellation_tracker_create(&hmd->xfctx, &constellation_tracker_params, &hmd->led_tracker);
+	u_startup_mark("controllers: LED tracker created");
 
 	// Controller poses are in the headset's SLAM space, so give them the same floor offset as the head.
 	t_constellation_tracker_get_tracking_origin(hmd->led_tracker)->initial_offset =

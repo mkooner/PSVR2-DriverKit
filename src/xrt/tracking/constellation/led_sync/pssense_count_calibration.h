@@ -373,6 +373,10 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	         (int64_t)(centre_ns / U_TIME_1US_IN_NS),
 	         cc->started_ns != 0 ? (double)(os_monotonic_get_ns() - cc->started_ns) / 1e9 : 0.0);
 
+	if (!cc->startup_marked) {
+		cc->startup_marked = true;
+		u_startup_mark("[%s] controller: LED timing found", LED_SYNC_NAME(refinement));
+	}
 	cc->local_retries = 0;
 	cc->quick = false;
 	cc->started_ns = 0;

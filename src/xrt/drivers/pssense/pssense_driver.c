@@ -26,6 +26,7 @@
 #include "constellation/t_led_sync_refinement.h"
 
 #include "util/u_debug.h"
+#include "util/u_startup_log.h"
 #include "util/u_device.h"
 #include "util/u_linux.h"
 #include "util/u_logging.h"
@@ -1300,6 +1301,8 @@ pssense_run_thread(void *ptr)
 			if (!pssense->has_calibration) {
 				calib_attempts++;
 				if (pssense_get_calibration_data(pssense)) {
+					u_startup_mark("%s controller: calibration read (attempt %u)",
+					               pssense->hand == XRT_HAND_LEFT ? "left" : "right", calib_attempts);
 					if (calib_attempts > 1) {
 						PSSENSE_INFO(pssense, "Calibration read after %u attempts (%.1fs)", calib_attempts,
 						             (double)(os_monotonic_get_ns() - setup_start_ns) / U_TIME_1S_IN_NS);
@@ -3180,6 +3183,7 @@ pssense_create(struct xrt_prober *xp,
 		*out_timing_sink = &pssense->timing_event_sink;
 	}
 
+	u_startup_mark("%s controller: driver created", pssense->hand == XRT_HAND_LEFT ? "left" : "right");
 	return &pssense->base;
 }
 

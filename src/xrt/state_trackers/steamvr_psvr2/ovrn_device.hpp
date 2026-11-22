@@ -11,6 +11,9 @@
 #include "ovrn_backend.hpp"
 #include "ovrn_log.hpp"
 
+#include "os/os_time.h"
+#include "util/u_startup_log.h"
+
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -76,11 +79,16 @@ public:
 	vr::EVRInitError
 	Activate(uint32_t object_id) final
 	{
+		const int64_t begin_ns = os_monotonic_get_ns();
+		u_startup_mark("%s: Activate begins", startupLabel().c_str());
 		m_container = vr::VRProperties()->TrackedDeviceToPropertyContainer(object_id);
 		vr::EVRInitError err = activate(object_id);
 		if (err == vr::VRInitError_None) {
 			m_objectId = object_id; // poses flow from here on
 		}
+		u_startup_mark("%s: Activate done (%.1f ms, %s)", startupLabel().c_str(),
+		               (double)(os_monotonic_get_ns() - begin_ns) / 1e6,
+		               err == vr::VRInitError_None ? "ok" : "failed");
 		return err;
 	}
 
@@ -156,6 +164,7 @@ protected:
 	void
 	submitPose(const vr::DriverPose_t &pose)
 	{
+		markPoseMilestones(pose);
 		{
 			std::lock_guard<std::mutex> lock(m_poseMutex);
 			m_lastPose = pose;
@@ -164,6 +173,71 @@ protected:
 			vr::VRServerDriverHost()->TrackedDevicePoseUpdated(id, pose, sizeof(vr::DriverPose_t));
 		});
 	}
+
+	//! "headset", "controller <serial>" or "hand <serial>", for the startup milestones.
+	std::string
+	startupLabel() const
+	{
+		switch (m_class) {
+		case vr::TrackedDeviceClass_HMD: return "headset";
+		case vr::TrackedDeviceClass_Controller: return "controller " + m_serial;
+		default: return "device " + m_serial;
+		}
+	}
+
+	/*!
+	 * Startup milestones from the poses sent (pose thread only): the first pose, the first valid one, each tracking
+	 * result the first time SteamVR is given it, and the first 2 s of valid poses in a row ("steady"). At most a
+	 * handful of lines per device, never one per pose.
+	 */
+	void
+	markPoseMilestones(const vr::DriverPose_t &pose)
+	{
+		if (!m_startupFirstPose) {
+			m_startupFirstPose = true;
+			u_startup_mark("%s: first pose sent", startupLabel().c_str());
+		}
+		// Results are 1, 100, 101, 200, 201, 300: one bit each (hundreds * 8 + units).
+		const unsigned r = (unsigned)pose.result;
+		const unsigned bit = r / 100 * 8 + r % 100;
+		if (bit < 32 && r % 100 < 8 && (m_startupResultsSeen & (1u << bit)) == 0) {
+			m_startupResultsSeen |= 1u << bit;
+			u_startup_mark("%s: tracking result %s first sent (pose %s)", startupLabel().c_str(), resultName(pose.result),
+			               pose.poseIsValid ? "valid" : "not valid");
+		}
+		const bool ok = pose.poseIsValid && pose.result == vr::TrackingResult_Running_OK;
+		const int64_t now = os_monotonic_get_ns();
+		if (ok && !m_startupFirstValid) {
+			m_startupFirstValid = true;
+			u_startup_mark("%s: first valid pose (Running_OK)", startupLabel().c_str());
+		}
+		if (!ok) {
+			m_startupValidSince = 0;
+		} else if (m_startupValidSince == 0) {
+			m_startupValidSince = now;
+		} else if (!m_startupSteady && now - m_startupValidSince >= 2 * 1000 * 1000 * 1000LL) {
+			m_startupSteady = true;
+			u_startup_mark("%s: steady (2 s of valid poses in a row)", startupLabel().c_str());
+		}
+	}
+
+	static const char *
+	resultName(vr::ETrackingResult r)
+	{
+		switch (r) {
+		case vr::TrackingResult_Uninitialized: return "Uninitialized";
+		case vr::TrackingResult_Calibrating_InProgress: return "Calibrating_InProgress";
+		case vr::TrackingResult_Calibrating_OutOfRange: return "Calibrating_OutOfRange";
+		case vr::TrackingResult_Running_OK: return "Running_OK";
+		case vr::TrackingResult_Running_OutOfRange: return "Running_OutOfRange";
+		case vr::TrackingResult_Fallback_RotationOnly: return "Fallback_RotationOnly";
+		default: return "other";
+		}
+	}
+
+	bool m_startupFirstPose = false, m_startupFirstValid = false, m_startupSteady = false;
+	uint32_t m_startupResultsSeen = 0;
+	int64_t m_startupValidSince = 0;
 
 	//! The identity every device reports: names, type, profile, model, the backend's extra properties, the universe.
 	void

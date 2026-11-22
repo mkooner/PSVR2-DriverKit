@@ -15,6 +15,7 @@
 #include "util/u_time.h"
 #include "util/u_var.h"
 #include "util/u_debug.h"
+#include "util/u_startup_log.h"
 
 #include "math/m_api.h"
 

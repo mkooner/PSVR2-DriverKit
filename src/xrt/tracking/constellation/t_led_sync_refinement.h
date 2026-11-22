@@ -414,6 +414,8 @@ struct t_led_sync_refinement
 		//! Adaptive probe interval: lengthened while the probes keep finding the blink centred.
 		time_duration_ns hold_interval_ns;
 		uint32_t hold_centred_streak;
+		//! The first LED timing found was logged as a startup milestone (u_startup_mark).
+		bool startup_marked;
 		/*!
 		 * Bluetooth clock follow (see COUNT_HOLD_BT_*): the driver's host -> controller clock offset, smoothed;
 		 * its value and the held centre at the last probe that found the blink centred; and a move made from it
