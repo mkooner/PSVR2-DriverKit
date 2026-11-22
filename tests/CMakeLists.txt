@@ -133,6 +133,10 @@ if(XRT_FEATURE_STEAMVR_PLUGIN)
 		PRIVATE
 			OVRN_DRIVER_PATH="${PROJECT_BINARY_DIR}/steamvr-monado-psvr2/bin/linux64/driver_monado_psvr2.so"
 		)
+	if(XRT_BUILD_DRIVER_HANDTRACKING)
+		# The driver was built with hand tracking: its log line says "on", not "built without".
+		target_compile_definitions(ovrn_driver_harness PRIVATE OVRN_HARNESS_HAND_TRACKING)
+	endif()
 
 endif()
 
