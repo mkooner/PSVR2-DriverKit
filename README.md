@@ -83,8 +83,8 @@ runs everything.
    ./target/release/PSVR2-DriverKit
    ```
 3. **Compile Driver tab → Compile Driver.**
-   - **Hand tracking (experimental):** tick Compile hand tracking, press Install dependencies (it adds OpenCV,
-     onnxruntime and patchelf), then Compile Driver. Needs Debian 13, Ubuntu 25.04, Fedora 43 or newer, or an Arch
+   - **Hand tracking (experimental):** tick Compile hand tracking, press Install dependencies (it adds OpenCV and
+     onnxruntime), then Compile Driver. Needs Debian 13, Ubuntu 25.04, Fedora 43 or newer, or an Arch
      based system; the driver gets several hundred MB bigger.
    - **Where it installs:** by default `~/.local/share/PSVR2-DriverKit`. Choose another folder with Browse.
    - **What it builds:** it downloads the latest version of this repository and builds the SteamVR driver,
