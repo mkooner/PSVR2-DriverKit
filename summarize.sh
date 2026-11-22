@@ -43,6 +43,20 @@ awk '/Tracker report device [0-9]+:/ {d = $0; sub(/.*Tracker report device /, ""
 		d, sum[d] / (5 * n[d]), with[d], n[d], 100 * with[d] / n[d]}' "$LOG" | sort
 
 echo
+echo "== Startup timeline (ms after the driver's Init; u_startup_mark lines, the last Init in the log)"
+awk '/startup: / {
+	line = $0; sub(/.*startup: /, "", line)
+	if (match(line, /\(mono [0-9.]+ ms\)$/)) {
+		mono = substr(line, RSTART + 6, RLENGTH - 10) + 0; what = substr(line, 1, RSTART - 2)
+		if (what ~ /^driver: Init begins/) { n = 0; t0 = mono }
+		if (t0 != "") { n++; at[n] = mono - t0; name[n] = what }
+	}
+}
+END {
+	if (n == 0) { print "  (no startup lines: a build from before 2026-11-22)"; exit }
+	for (i = 1; i <= n; i++) printf "  %8.0f  %s\n", at[i], name[i]
+}' "$LOG"
+echo
 echo "== Clock check (ts host-now should be a few ms negative)"
 grep -E "LD stats:" "$LOG" | grep -o "ts host-now [+-][0-9.]*ms" | sort | uniq -c | sort -rn | head -5
 
