@@ -27,7 +27,9 @@
 
 
 //! Frames of blob counts averaged per decision, once the LED change settled (counts are clean: 0 off, 15-30 on).
+#ifndef COUNT_FRAMES_PER_STEP
 #define COUNT_FRAMES_PER_STEP 2
+#endif
 //! Frames of blob counts for the LEDs-off baseline.
 #define COUNT_BASELINE_FRAMES 10
 //! Blobs above the baseline that mean the LEDs are visible, PSVR2Toolkit uses 3. The least threshold, see below.
@@ -66,9 +68,17 @@
 #define COUNT_NOISE_GAIN 0.2f
 /*!
  * Edge search resolution. PSVR2Toolkit uses 25us; the window has 300-500us of room on each side of the 1.5ms blink and
- * the hold centres it in 100us steps within seconds, so 100us saves ~4 steps (~0.7s) per calibration.
+ * the hold centres it in 100us steps within seconds. The two edge searches were ~85% of a calibration (~1 s each at
+ * 100us, calib_sim SIM_BREAKDOWN=1), and the second controller waits for the first's. 100 -> 300us (calib_sim, 100
+ * starts per case, time until both controllers hold): normal 4.8 -> 3.6 s, exposure 290us 4.8 -> 3.6 s (worst 8.5 ->
+ * 4.2), exposure 1150us 4.8 -> 3.6 s, flickering background blobs 6.6 -> 4.8 s, wandering 5.0 -> 3.7 s; none failed;
+ * held centre error mean 13-30 -> 28-52us, worst about the same. 250us gives the same; 400us 3.2 s, but at 500us the
+ * 290 and 1150us exposures took 7.6 and 9.7 s (searches failing and starting again), so 300 keeps the margin.
+ * One frame per step instead of two (COUNT_FRAMES_PER_STEP) locked onto wrong windows with flickering blobs.
  */
-#define COUNT_EDGE_RESOLUTION_NS (U_TIME_1US_IN_NS * 100)
+#ifndef COUNT_EDGE_RESOLUTION_NS
+#define COUNT_EDGE_RESOLUTION_NS (U_TIME_1US_IN_NS * 300)
+#endif
 /*!
  * Where the window's right edge can be: the blink plus the camera's exposure, which the PS VR2 doesn't report (it sends a
  * fixed setting) and which moved 606-1000us between and within sessions. The searches used to assume the setting
