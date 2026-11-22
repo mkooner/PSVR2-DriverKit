@@ -27,6 +27,13 @@ runs everything.
 - **Finger tracking:** a hand skeleton driven by the Sense's touch and distance sensors, for games that animate hands.
 - **PS button:** opens the SteamVR dashboard.
 
+### Hand tracking (experimental)
+- **Bare-hand tracking** with the headset's cameras, using Monado's Mercury hand tracker, while a Sense controller
+  is off. Off by default: turn it on in DriverKit's Settings tab.
+- **Finger tracking** in SteamVR games, a pinch as the trigger, a closed hand as the grip; palm toward your face and
+  pinch for the dashboard.
+- Needs a driver built with hand tracking (onnxruntime and OpenCV).
+
 ### SteamVR integration
 - **A native SteamVR driver.** Registered with Steam, so Steam starts SteamVR with it like any headset, from the
   Library or from a game.
@@ -103,11 +110,15 @@ runs everything.
   is built on and part of, including the PS VR2 headset and Sense controller drivers this project extends.
 - **[ALVR](https://github.com/alvr-org/ALVR)** (MIT): our reference implementation for the SteamVR driver's structure
   (provider, tracked devices, headset and controllers) and for the controller hand skeleton.
+- **Mercury** (Moshi Turner and Collabora, part of Monado, BSL-1.0): the hand tracker and models behind hand tracking.
 - **[PSVR2Toolkit](https://github.com/BnuuySolutions/PSVR2Toolkit)** (Bnuuy Solutions, MIT): our reference
   implementation for:
   - the SteamVR camera interfaces behind Room View, and the passthrough cameras' lens model;
   - the PS VR2 properties SteamVR expects;
   - reporting eye tracking to SteamVR.
+- **Device pictures in PSVR2-DriverKit:** from Wikimedia Commons: the headset by C.Suthorn
+  ([CC BY-SA 4.0](https://commons.wikimedia.org/wiki/File:PSVR2_(Non-Stereoscopic).png)), the controllers by
+  ArlindoPereira ([CC BY 4.0](https://commons.wikimedia.org/wiki/File:PlayStation_VR2.jpg)).
 
 ## Repository layout
 
