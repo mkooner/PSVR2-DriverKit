@@ -22,6 +22,7 @@ add_library(
 	ovrn_room.hpp
 	ovrn_room_log.hpp
 	ovrn_room_state.hpp
+	ovrn_settings.hpp
 	)
 target_include_directories(st_ovrn INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(

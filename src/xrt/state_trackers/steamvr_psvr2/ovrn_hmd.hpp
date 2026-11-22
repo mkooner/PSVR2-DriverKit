@@ -12,6 +12,7 @@
 
 #include "ovrn_camera.hpp"
 #include "ovrn_device.hpp"
+#include "ovrn_settings.hpp"
 
 #include "os/os_time.h"
 
@@ -468,10 +469,17 @@ private:
 	void
 	setupCamera()
 	{
-		const char *env = getenv("OVRN_CAMERA");
-		if (env != nullptr && strcmp(env, "0") == 0) {
-			log("ovrn: passthrough cameras off (OVRN_CAMERA=0)\n");
+		std::string source, invalid;
+		const CameraMode mode = camera_mode(&source, &invalid);
+		if (!invalid.empty()) {
+			log("ovrn: headset cameras setting '%s' is not on, noimages or off: using on\n", invalid.c_str());
+		}
+		if (mode == CameraMode::Off) {
+			log("ovrn: headset cameras: off (%s): no camera for SteamVR\n", source.c_str());
 			return;
+		}
+		if (mode == CameraMode::NoImages) {
+			log("ovrn: headset cameras: noimages (%s): SteamVR's camera set up, no picture sent\n", source.c_str());
 		}
 		if (!m_backend->hasCameras()) {
 			return;
@@ -486,6 +494,7 @@ private:
 			log("ovrn: no passthrough cameras (the backend has none, or their calibration didn't arrive)\n");
 			return;
 		}
+		info.no_images = mode == CameraMode::NoImages;
 		m_camera.reset(new Camera(m_backend, info));
 		m_camera->setProperties(m_container);
 	}

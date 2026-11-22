@@ -14,6 +14,7 @@
 #include "ovrn_hmd.hpp"
 #include "ovrn_interface.h"
 #include "ovrn_log.hpp"
+#include "ovrn_settings.hpp"
 
 #include "util/u_git_tag.h"
 
@@ -331,11 +332,21 @@ private:
 	{
 		const char *e = getenv("OVRN_SEE_THROUGH");
 		vr::IVRSettings *settings = vr::VRSettings();
+		std::string source, invalid;
+		// CAMERA=off (ovrn_settings.hpp): no camera for SteamVR, so its camera settings stay the user's own.
 		if ((e != nullptr && strcmp(e, "0") == 0) || settings == nullptr) {
 			return;
 		}
 		vr::EVRSettingsError err = vr::VRSettingsError_None;
 		const bool noted = settings->GetBool(kOwnSection, kSeeThroughNoteKey, &err) && err == vr::VRSettingsError_None;
+		if (camera_mode(&source, &invalid) == CameraMode::Off) {
+			// A session that ended without Cleanup left ours in place: put the user's back now.
+			if (noted) {
+				m_seeThroughSet = true;
+				restoreSeeThroughSettings();
+			}
+			return;
+		}
 		for (const CameraSetting &c : kSeeThroughSettings) {
 			// The user's value, unless a previous session (ended without Cleanup) already noted it.
 			if (!noted) {
