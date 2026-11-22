@@ -32,7 +32,7 @@ runs everything.
   is off. Off by default: turn it on in DriverKit's Settings tab.
 - **Finger tracking** in SteamVR games, a pinch as the trigger, a closed hand as the grip; palm toward your face and
   pinch for the dashboard.
-- Needs a driver built with hand tracking (onnxruntime and OpenCV).
+- Needs a driver compiled with Compile hand tracking ticked (DriverKit's Compile Driver tab).
 
 ### SteamVR integration
 - **A native SteamVR driver.** Registered with Steam, so Steam starts SteamVR with it like any headset, from the
@@ -70,15 +70,22 @@ runs everything.
   installing it). Without it everything works, but SteamVR shows other controllers and generic icons.
 
 ### Steps
-1. **Install the build packages.** DriverKit's Compile Driver tab lists the command for Arch/CachyOS/Manjaro,
-   Debian/Ubuntu and Fedora, with a Copy button. Paste it into a terminal.
-2. **Build the DriverKit app once from source:**
+1. **Get the repository and install the build packages:**
    ```
    git clone https://github.com/mkooner/PSVR2-DriverKit.git
-   cd PSVR2-DriverKit/launcher-gui && cargo build --release
+   cd PSVR2-DriverKit && ./install-deps.sh
+   ```
+   `install-deps.sh` finds your package manager (Arch based: pacman, Debian based: apt, Fedora based: dnf) and asks for
+   your password. Add `--hand-tracking` for the experimental hand tracking's packages too.
+2. **Build the DriverKit app once from source:**
+   ```
+   cd launcher-gui && cargo build --release
    ./target/release/PSVR2-DriverKit
    ```
 3. **Compile Driver tab → Compile Driver.**
+   - **Hand tracking (experimental):** tick Compile hand tracking, press Install dependencies (it adds OpenCV,
+     onnxruntime and patchelf), then Compile Driver. Needs Debian 13, Ubuntu 25.04, Fedora 43 or newer, or an Arch
+     based system; the driver gets several hundred MB bigger.
    - **Where it installs:** by default `~/.local/share/PSVR2-DriverKit`. Choose another folder with Browse.
    - **What it builds:** it downloads the latest version of this repository and builds the SteamVR driver,
      monado-service, the launch scripts and tools, and a new copy of DriverKit, all into that folder. A progress bar
