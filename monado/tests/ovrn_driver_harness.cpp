@@ -38,6 +38,35 @@ check(bool ok, const char *what)
 	g_fails += ok ? 0 : 1;
 }
 
+//! Whether a PS VR2 headset (054c:0cde) is on USB, read from sysfs (nothing is opened).
+bool
+psvr2_on_usb()
+{
+	for (int bus = 1; bus < 64; bus++) {
+		for (int port = 0; port < 64; port++) {
+			char p[96];
+			snprintf(p, sizeof(p), "/sys/bus/usb/devices/%d-%d/idVendor", bus, port);
+			FILE *v = fopen(p, "r");
+			if (v == nullptr) {
+				continue;
+			}
+			char vid[8] = {0}, pid[8] = {0};
+			bool ok = fscanf(v, "%7s", vid) == 1;
+			fclose(v);
+			snprintf(p, sizeof(p), "/sys/bus/usb/devices/%d-%d/idProduct", bus, port);
+			FILE *d = fopen(p, "r");
+			if (d != nullptr) {
+				ok = ok && fscanf(d, "%7s", pid) == 1;
+				fclose(d);
+			}
+			if (ok && strcmp(vid, "054c") == 0 && strcmp(pid, "0cde") == 0) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 int64_t
 now_ns()
 {
@@ -496,7 +525,10 @@ main(int argc, char **argv)
 	// --room: Monado's simulated headset with the room calibration on, against a temporary SteamVR config folder
 	// (XDG_CONFIG_HOME points at a scratch folder, so the user's SteamVR files are never touched).
 	const bool room = argc > 1 && !strcmp(argv[1], "--room");
-	const bool monado = real || room || (argc > 1 && !strcmp(argv[1], "--monado"));
+	// --no-headset: the Monado backend with no PS VR2 plugged in (skipped if one is): the driver must refuse to start
+	// rather than give SteamVR Monado's fallback "Simulated HMD".
+	const bool no_headset = argc > 1 && !strcmp(argv[1], "--no-headset");
+	const bool monado = real || room || no_headset || (argc > 1 && !strcmp(argv[1], "--monado"));
 	// --predicted: the driver-predicted, zero-velocity pose model (OVRN_POSE_MODEL=predicted).
 	const bool predicted = argc > 1 && !strcmp(argv[1], "--predicted");
 	if (predicted) {
@@ -543,8 +575,9 @@ main(int argc, char **argv)
 	} else {
 		setenv("OVRD_ROOM", "0", 1);
 	}
-	if (real) {
-		// nothing more: Monado probes the hardware
+	if (real || no_headset) {
+		// nothing more: Monado probes the hardware (and isn't asked for its simulated system)
+		unsetenv("SIMULATED_ENABLE");
 	} else if (monado) {
 		setenv("SIMULATED_ENABLE", "true", 1);
 	} else {
@@ -579,6 +612,22 @@ main(int argc, char **argv)
 		return 1;
 	}
 	FakeContext context;
+
+	if (no_headset) {
+		if (psvr2_on_usb()) {
+			printf("skipped: a PS VR2 is on USB (this mode needs it unplugged, it would open it)\n");
+			return 0;
+		}
+		check(provider->Init(&context) != VRInitError_None, "no headset: Init refuses to start");
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_added.empty(), "no headset: no device is registered (no fallback Simulated HMD)");
+			check(g_logText.find("ovrn: no PS VR2 headset found") != std::string::npos,
+			      "no headset: the driver logs why it reports no headset");
+		}
+		printf("%s\n", g_fails ? "FAILED" : "all checks passed");
+		return g_fails ? 1 : 0;
+	}
 
 	// --see-through: Sony-style see-through. The user's camera settings (style 2 "Colored Ghosts", camera on, no
 	// roomView key) are saved and the opaque view set for the session; SteamVR's Room View shown / hidden events turn
@@ -855,6 +904,14 @@ main(int argc, char **argv)
 			g_bools["steamvr/useFacetRenderer"] = true; // the user's own setting, turned on by hand
 		}
 		check(provider->Init(&context) == VRInitError_None, "Init succeeds");
+		if (real) {
+			std::lock_guard<std::mutex> l(g_mutex);
+			if (g_added.empty()) {
+				// Used to run on Monado's fallback Simulated HMD; with no PS VR2 the driver now starts nothing.
+				printf("--real: no headset registered (is the PS VR2 plugged in?)\nFAILED\n");
+				return 1;
+			}
+		}
 		{
 			const char *off = getenv("DISABLE_STEAMVR_LINUX_FIXES");
 			std::lock_guard<std::mutex> l(g_mutex);
