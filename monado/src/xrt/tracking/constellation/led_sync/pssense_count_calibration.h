@@ -392,6 +392,9 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	cc->hold_trim_last_ns = cc->hold_last_probe_ns;
 	cc->hold_corrections_sum_ns = 0;
 	cc->hold_trim_integral_ns = 0;
+	cc->hold_moves_sum_ns = 0;
+	cc->hold_seg_start_ns = 0;
+	cc->hold_have_seg_rate = false;
 	cc->hold_unseen_probes = 0;
 	cc->hold_seen_since_calib = false;
 	cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
@@ -400,7 +403,9 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	cc->bt_have_ref = cc->bt_valid;
 	cc->bt_ref_ns = cc->bt_smooth_ns;
 	cc->bt_centre_ref_ns = centre_ns;
+	cc->bt_trim_ref_ns = 0; // hold_trim_integral_ns starts again too
 	cc->bt_jump_pending = false;
+	cc->hold_have_fast_rate = false;
 	count_calib_set_offset(refinement, centre_ns);
 	refinement->frames_since_last_visually_seen = 0;
 	set_phase_locked(refinement, T_LED_SYNC_PHASE_COUNT_HOLD);
@@ -813,12 +818,33 @@ handle_count_calibrate(struct t_led_sync_refinement *refinement)
  *
  * Drift: if the window moves at rate r against the untrimmed mapping, the phase applied over the hold, the sum of the
  * corrections plus the integral of the trim, is P(t) ~= r t, so r = P / T with an error under step / T. It is only
- * used once T >= 10s (error <= 10ppm) and only if |r| <= 50ppm: the controller clocks measure -3 to +47ppm against the
- * host, so anything beyond is a misreading and the trim is left alone.
+ * used once T >= 10s (error <= 10ppm). Up to 50ppm it is used at once: the controller clocks measure -3 to +47ppm
+ * against the host. Faster drift happens too, from a clock all the controllers share (the host's or the headset's):
+ * on two users' PCs (2026-11-21/22) both controllers' windows moved together at ~75-100ppm, the trim stayed at its
+ * limit and the hold lost the LEDs. So a rate up to COUNT_HOLD_DRIFT_FAST_MAX (the most Linux's time sync slews the
+ * clock by) is used too, but only when an estimate at least COUNT_HOLD_DRIFT_FAST_AGREE_NS older agreed (same sign,
+ * within COUNT_HOLD_DRIFT_FAST_TOL or a quarter): a single misreading, as the 662ppm read from two calibration
+ * searches 3.5s apart, isn't taken.
  */
 #define COUNT_HOLD_EDGE_MARGIN_NS (U_TIME_1US_IN_NS * 150)
 #define COUNT_HOLD_DRIFT_MIN_T_NS (U_TIME_1S_IN_NS * 10)
 #define COUNT_HOLD_DRIFT_MAX (50e-6)
+#ifndef COUNT_HOLD_DRIFT_FAST_MAX
+#define COUNT_HOLD_DRIFT_FAST_MAX (500e-6)
+#endif
+#define COUNT_HOLD_DRIFT_FAST_AGREE_NS (U_TIME_1S_IN_NS * 3)
+#define COUNT_HOLD_DRIFT_FAST_TOL (20e-6)
+/*!
+ * High drift is detected when the hold's applied phase moved over COUNT_HOLD_FAST_DETECT in two COUNT_HOLD_FAST_SEG_NS
+ * stretches in a row, the same way. Normal drift (-3 to +47ppm measured) never gets there; a one-off shift falls in
+ * one stretch. Until then the hold runs as it did before 2026-11-22 (calib_sim: identical results at 0-47ppm).
+ */
+#ifndef COUNT_HOLD_FAST_SEG_NS
+#define COUNT_HOLD_FAST_SEG_NS (U_TIME_1S_IN_NS * 10)
+#endif
+#ifndef COUNT_HOLD_FAST_DETECT
+#define COUNT_HOLD_FAST_DETECT (60e-6)
+#endif
 /*!
  * Probes in a row with this controller's LEDs not seen at the centre before calibrating again (unconfirmed window).
  * The nudge probe measures the LEDs the tracker matched, so until the tracker has found the controller once every
@@ -910,6 +936,13 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
 
 	count_hold_integrate_trim(refinement, now_ns);
+	/*
+	 * Normal drift runs the hold as it was before 2026-11-22. Only once high drift is detected (see
+	 * COUNT_HOLD_FAST_*) does it also count the Bluetooth moves in the drift estimate, measure each Bluetooth move from
+	 * the last confirmed one, take the trim already applied off it, and use drift rates over COUNT_HOLD_DRIFT_MAX.
+	 */
+	const bool fast = cc->high_drift;
+	const time_duration_ns centre_before_ns = cc->hold_centre_ns;
 	bool bt_moved = false;
 	if (cc->bt_jump_pending) {
 		cc->bt_jump_pending = false;
@@ -930,16 +963,29 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 			// Don't take the same change again: the next reference is set from a centred probe.
 			cc->bt_have_ref = false;
 			e = 0;
+		} else if (fast && cc->bt_have_ref) {
+			/*
+			 * High drift, confirmed: the next move is measured from this one. Measured from the last centred probe,
+			 * a steady drift (a user's 2026-11-22 session: ~100 ppm on both controllers, the probes never centred
+			 * again) added up to COUNT_HOLD_BT_MAX_NS within ~30 s, the hold stopped following and lost the LEDs.
+			 */
+			cc->bt_ref_ns = cc->bt_jump_smooth_ns;
+			cc->bt_centre_ref_ns = cc->hold_centre_ns;
+			cc->bt_trim_ref_ns = cc->bt_jump_trim_ns;
 		}
 	}
 	if (in_view && e != 0 && cc->bt_have_ref) {
-		const double bt_ns = count_hold_bt_change_ns(refinement);
+		// High drift: the trim applied since the reference already moved the LEDs that far with the clock.
+		const double trimmed_ns = fast ? cc->hold_trim_integral_ns - cc->bt_trim_ref_ns : 0.0;
+		const double bt_ns = count_hold_bt_change_ns(refinement) - trimmed_ns;
 		const double done_ns = (double)(cc->hold_centre_ns - cc->bt_centre_ref_ns);
 		// The blink sits off centre the way the clock moved (the window moves later as the offset grows).
 		if ((bt_ns > 0) == (e > 0) && fabs(bt_ns) >= (double)COUNT_HOLD_BT_TRIGGER_NS &&
 		    fabs(bt_ns) <= (double)COUNT_HOLD_BT_MAX_NS && fabs(bt_ns - done_ns) >= (double)COUNT_HOLD_STEP_NS) {
 			cc->bt_pre_jump_centre_ns = cc->hold_centre_ns;
 			cc->hold_centre_ns = cc->bt_centre_ref_ns + (time_duration_ns)bt_ns;
+			cc->bt_jump_smooth_ns = cc->bt_smooth_ns;
+			cc->bt_jump_trim_ns = cc->hold_trim_integral_ns;
 			cc->bt_jump_pending = true;
 			cc->bt_jumps++;
 			bt_moved = true;
@@ -955,15 +1001,18 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 		cc->hold_corrections_sum_ns += e * (double)COUNT_HOLD_STEP_NS;
 		cc->hold_corrections++;
 	}
+	// Every move of the centre (step, Bluetooth move, undo): what high drift is detected and estimated from.
+	cc->hold_moves_sum_ns += (double)(cc->hold_centre_ns - centre_before_ns);
 	if (in_view && e == 0 && !cc->bt_jump_pending && cc->bt_valid) {
 		// Centred: the clock offset now belongs to this centre.
 		cc->bt_have_ref = true;
 		cc->bt_ref_ns = cc->bt_smooth_ns;
 		cc->bt_centre_ref_ns = cc->hold_centre_ns;
+		cc->bt_trim_ref_ns = cc->hold_trim_integral_ns;
 	}
 
 	time_duration_ns t_ns = now_ns - cc->hold_start_ns;
-	if (in_view && t_ns >= COUNT_HOLD_DRIFT_MIN_T_NS) {
+	if (in_view && t_ns >= COUNT_HOLD_DRIFT_MIN_T_NS && !fast) {
 		double rate = (cc->hold_corrections_sum_ns + cc->hold_trim_integral_ns) / (double)t_ns;
 		if (rate >= -COUNT_HOLD_DRIFT_MAX && rate <= COUNT_HOLD_DRIFT_MAX) {
 			cc->skew = rate;
@@ -971,6 +1020,58 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 			LOG_DEBUG(refinement, "Count hold drift estimate %+.1fppm is implausible, trim left at %+.1fppm",
 			          rate * 1e6, cc->skew * 1e6);
 		}
+	} else if (in_view && t_ns >= COUNT_HOLD_DRIFT_MIN_T_NS) {
+		/*
+		 * High drift: before 2026-11-22 only the 100us steps were counted, not the Bluetooth moves that carry most
+		 * of a fast drift, so the estimate stayed near 0 while the hold chased the drift move after move.
+		 */
+		double rate = (cc->hold_moves_sum_ns + cc->hold_trim_integral_ns) / (double)t_ns;
+		const double fast_tol = fmax(COUNT_HOLD_DRIFT_FAST_TOL, 0.25 * fabs(rate));
+		if (rate >= -COUNT_HOLD_DRIFT_MAX && rate <= COUNT_HOLD_DRIFT_MAX) {
+			cc->skew = rate;
+			cc->hold_have_fast_rate = false;
+		} else if (fabs(rate) <= COUNT_HOLD_DRIFT_FAST_MAX && cc->hold_have_fast_rate &&
+		           now_ns - cc->hold_fast_rate_ns >= COUNT_HOLD_DRIFT_FAST_AGREE_NS &&
+		           (rate > 0) == (cc->hold_fast_rate > 0) && fabs(rate - cc->hold_fast_rate) <= fast_tol) {
+			if (fabs(cc->skew) <= COUNT_HOLD_DRIFT_MAX) {
+				LOG_INFO(refinement, "Count hold: the LEDs drift %+.0fppm (measured over %.0fs), trimming it",
+				         rate * 1e6, (double)t_ns / U_TIME_1S_IN_NS);
+			}
+			cc->skew = rate;
+		} else {
+			// The first fast estimate, or one that disagreed: a later one has to agree with this one.
+			if (fabs(rate) <= COUNT_HOLD_DRIFT_FAST_MAX &&
+			    (!cc->hold_have_fast_rate || now_ns - cc->hold_fast_rate_ns >= COUNT_HOLD_DRIFT_FAST_AGREE_NS)) {
+				cc->hold_fast_rate = rate;
+				cc->hold_fast_rate_ns = now_ns;
+				cc->hold_have_fast_rate = true;
+			}
+			LOG_DEBUG(refinement, "Count hold drift estimate %+.1fppm not used yet, trim left at %+.1fppm",
+			          rate * 1e6, cc->skew * 1e6);
+		}
+	}
+
+	/*
+	 * High-drift detection: the phase applied (every move plus the trim) per 10 s stretch. Two stretches in a row
+	 * over COUNT_HOLD_FAST_DETECT in the same direction is a drift, not a one-off shift (that lands in one stretch).
+	 */
+	const double phase_ns = cc->hold_moves_sum_ns + cc->hold_trim_integral_ns;
+	if (cc->hold_seg_start_ns == 0) {
+		cc->hold_seg_start_ns = now_ns;
+		cc->hold_seg_start_phase_ns = phase_ns;
+	} else if (now_ns - cc->hold_seg_start_ns >= COUNT_HOLD_FAST_SEG_NS) {
+		const double seg_rate = (phase_ns - cc->hold_seg_start_phase_ns) / (double)(now_ns - cc->hold_seg_start_ns);
+		if (!cc->high_drift && cc->hold_have_seg_rate && fabs(seg_rate) > COUNT_HOLD_FAST_DETECT &&
+		    fabs(cc->hold_seg_prev_rate) > COUNT_HOLD_FAST_DETECT && (seg_rate > 0) == (cc->hold_seg_prev_rate > 0)) {
+			cc->high_drift = true;
+			LOG_INFO(refinement,
+			         "Count hold: high LED drift (%+.0f then %+.0fppm over 10 s), following it from now on",
+			         cc->hold_seg_prev_rate * 1e6, seg_rate * 1e6);
+		}
+		cc->hold_seg_prev_rate = seg_rate;
+		cc->hold_have_seg_rate = true;
+		cc->hold_seg_start_ns = now_ns;
+		cc->hold_seg_start_phase_ns = phase_ns;
 	}
 
 	if (in_view) {

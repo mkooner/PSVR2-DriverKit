@@ -54,6 +54,8 @@ sim_now_ns(void)
 static double g_led_latency_frames = 1.0;
 static bool g_ambient_walk = false;
 static bool g_tracker = false;
+static bool g_apply_trim = true;
+static double g_flip_s = 0;
 static double g_drift = 15e-6;
 static double g_ambient = 30.0;
 static double g_flicker = 0.0;
@@ -88,6 +90,13 @@ struct sim_ctrl
 	// Applied LED state
 	bool on_mode;
 	double offset_ns;
+	/*
+	 * The drift trim the driver adds on top of the offset (pssense_driver.c: the held LED clock mapping advances by the
+	 * sample's clock_skew times the host time passed), and the skew of the last applied sample. SIM_NO_TRIM=1 leaves it
+	 * out, as this simulator did before 2026-11-21.
+	 */
+	double trim_ns;
+	double skew;
 	// Pending command
 	bool pending;
 	int64_t apply_at_ns;
@@ -127,7 +136,7 @@ led_brightness(struct sim_ctrl *c, double exposure_ns, int64_t exposure_start_ns
 		return 0;
 	double blink = (double)c->r.current_blink_duration_ns;
 	double L = c->window_left_ns, R = L + blink + exposure_ns;
-	double off = fmod(c->offset_ns - L, (double)FRAME_NS);
+	double off = fmod(c->offset_ns + c->trim_ns - L, (double)FRAME_NS);
 	if (off < 0)
 		off += FRAME_NS;
 	off += L;
@@ -143,7 +152,7 @@ visible_leds(struct sim_ctrl *c, double exposure_ns, int64_t exposure_start_ns)
 	double blink = (double)c->r.current_blink_duration_ns;
 	double L = c->window_left_ns, R = L + blink + exposure_ns;
 	// The offset is periodic in the frame.
-	double off = fmod(c->offset_ns - L, (double)FRAME_NS);
+	double off = fmod(c->offset_ns + c->trim_ns - L, (double)FRAME_NS);
 	if (off < 0)
 		off += FRAME_NS;
 	off += L;
@@ -166,6 +175,8 @@ main(int argc, char **argv)
 	double exposure_ns = exposure_us * 1000.0;
 	g_ambient_walk = getenv("SIM_AMBIENT_WALK") != NULL;
 	g_tracker = getenv("SIM_TRACKER") != NULL;
+	g_apply_trim = getenv("SIM_NO_TRIM") == NULL;
+	g_flip_s = getenv("SIM_DRIFT_FLIP_S") ? atof(getenv("SIM_DRIFT_FLIP_S")) : 0;
 	if (getenv("SIM_DRIFT_PPM"))
 		g_drift = atof(getenv("SIM_DRIFT_PPM")) * 1e-6;
 	g_flicker = getenv("SIM_AMBIENT_FLICKER") ? atof(getenv("SIM_AMBIENT_FLICKER")) : 0.0;
@@ -289,14 +300,22 @@ main(int argc, char **argv)
 					s->pending = false;
 					s->on_mode = s->pending_sample.pssense_mode != T_LED_SYNC_SAMPLE_PSSENSE_MODE_LED_ALL_OFF;
 					s->offset_ns = (double)s->pending_sample.fudge_offset_ns;
+					s->skew = s->pending_sample.clock_skew;
 					// The controller blinks with the new settings from its next cycle.
 					s->effective_from_ns = s->apply_at_ns + (int64_t)(urand() * g_led_latency_frames * FRAME_NS);
 					g_now_ns = s->apply_at_ns;
 					t_led_sync_mark_latest_sample_applied(&s->r, s->apply_at_ns);
 				}
 				// Window drift 15us/s, as measured.
-				s->window_left_ns += g_drift * FRAME_NS; // SIM_DRIFT_PPM, 15 as measured
-				s->bt_ns += g_drift * FRAME_NS;          // a real drift shows in the Bluetooth clock too
+				// SIM_DRIFT_FLIP_S: the drift reverses every that many seconds (x12's 2026-11-21 13:18 run: both
+				// controllers' windows moved later, then earlier).
+				double drift = g_drift;
+				if (g_flip_s > 0 && ((int64_t)((proc - start_ns) / (g_flip_s * 1e9))) % 2 == 1)
+					drift = -drift;
+				s->window_left_ns += drift * FRAME_NS; // SIM_DRIFT_PPM, 15 as measured
+				s->bt_ns += drift * FRAME_NS;          // a real drift shows in the Bluetooth clock too
+				if (g_apply_trim)
+					s->trim_ns += s->skew * FRAME_NS; // the driver's mapping advances by the trim
 				if (dropout > 0 && proc >= s->vis_change_ns) {
 					s->visible = !s->visible;
 					double mean = s->visible ? 4.0 * (1 - dropout) / fmax(dropout, 0.01) : 4.0;
@@ -393,7 +412,7 @@ main(int argc, char **argv)
 					s->hold_at_ns = proc - (s->reconnect_ns ? s->reconnect_ns : start_ns);
 					double blink = (double)s->r.current_blink_duration_ns;
 					double true_centre = s->window_left_ns + (blink + exposure_ns) / 2;
-					double held = (double)s->r.count_calib.hold_centre_ns;
+					double held = (double)s->r.count_calib.hold_centre_ns + s->trim_ns;
 					double d = fmod(held - true_centre, (double)FRAME_NS);
 					if (d > FRAME_NS / 2)
 						d -= FRAME_NS;
@@ -418,7 +437,8 @@ main(int argc, char **argv)
 				if (ph == T_LED_SYNC_PHASE_COUNT_HOLD) {
 					double blink = (double)c[0].r.current_blink_duration_ns;
 					double tc = c[0].window_left_ns + (blink + exposure_ns) / 2;
-					double d = fmod((double)c[0].r.count_calib.hold_centre_ns - tc, (double)FRAME_NS);
+					double d = fmod((double)c[0].r.count_calib.hold_centre_ns + c[0].trim_ns - tc,
+					                (double)FRAME_NS);
 					if (d > FRAME_NS / 2)
 						d -= FRAME_NS;
 					if (d < -FRAME_NS / 2)
