@@ -944,8 +944,20 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 			    "", "position carried over", "position carried over (reset loop, counted as a world change)",
 			    "not carried (PSVR2_SLAM_CARRY=0), tracking world replaced",
 			    "not carried (SLAM still settling), tracking world replaced"}; // (no longer happens: carried)
-			PSVR2_INFO(hmd, "SLAM reset (%.3f m jump, %.1f s in): %s", jump_m,
-			           time_ns_to_s(vts_ns - hmd->slam_carry.first_ts), what[event]);
+			/*
+			 * With what the headset was doing: in 9 of 50 sessions (11-19/20) its own tracking reset again and
+			 * again for 10-32 s after starting, often every ~2 s, which looks like the 10-30 s "no positional
+			 * tracking yet" reports; whether that's while it lies still or isn't worn is the open question. Only
+			 * values already kept (wear sensor, the latest gyro sample): nothing more per frame or per sample.
+			 * Moving above 5 deg/s, well over the gyro's ~1 deg/s bias. mono: the startup lines' clock.
+			 */
+			const float gyro_dps =
+			    m_vec3_len(hmd->last_gyro) * 180.0f / (float)M_PI;
+			PSVR2_INFO(hmd,
+			           "SLAM reset (%.3f m jump, %.1f s in): %s; headset %s, %s (gyro %.1f deg/s); mono %.1f ms",
+			           jump_m, time_ns_to_s(vts_ns - hmd->slam_carry.first_ts), what[event],
+			           hmd->proximity_sensor != 0 ? "worn" : "not worn", gyro_dps > 5.0f ? "moving" : "still",
+			           gyro_dps, (double)os_monotonic_get_ns() / 1e6);
 		}
 	}
 
