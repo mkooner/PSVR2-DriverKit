@@ -189,6 +189,9 @@ struct psvr2_hmd
 {
 	struct xrt_device base;
 
+	//! Startup milestones logged once (u_startup_mark): first IMU sample, first camera frame with data.
+	bool startup_imu, startup_camera;
+
 	struct xrt_pose pose;
 
 	enum u_logging_level log_level;
@@ -244,6 +247,12 @@ struct psvr2_hmd
 	struct os_mutex calib_lock;
 	uint8_t *calib_block;
 	uint32_t calib_block_size;
+	//! calib_block is the saved copy, not yet confirmed by the headset's own block (take_calibration_block).
+	bool calib_from_cache;
+	//! The saved copy was compared with the headset's block this session (and updated if it differed).
+	bool calib_saved_checked;
+	//! The serial number is the headset's own (firmware info read), so its saved copy may be used at start.
+	bool calib_serial_known;
 
 	//! Camera image transfer counts for the periodic "Camera stream" report (USB thread only).
 	struct

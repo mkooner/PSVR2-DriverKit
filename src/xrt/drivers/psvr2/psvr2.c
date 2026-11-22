@@ -18,6 +18,7 @@
  */
 
 #include "tracking/t_time_sync.h"
+#include "util/u_startup_log.h"
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_prober.h"
 #include "xrt/xrt_tracking.h"
@@ -395,6 +396,11 @@ process_imu_record(struct psvr2_hmd *hmd, size_t index, struct imu_usb_record *i
 {
 	struct imu_record imu_data;
 
+	if (!hmd->startup_imu) {
+		hmd->startup_imu = true;
+		u_startup_mark("headset: first IMU sample");
+	}
+
 	imu_data.vts_us = __le32_to_cpu(in->vts_us);
 	for (int i = 0; i < 3; i++) {
 		imu_data.accel[i] = __le16_to_cpu(in->accel[i]);
@@ -685,6 +691,10 @@ img_xfer_cb(struct libusb_transfer *xfer)
 			} else {
 				h->cam_stats.last_length = xfer->actual_length;
 				h->cam_stats.with_data++;
+				if (!h->startup_camera) {
+					h->startup_camera = true;
+					u_startup_mark("headset: first camera frame (%d bytes)", xfer->actual_length);
+				}
 			}
 		}
 		int64_t now = os_monotonic_get_ns();
@@ -966,6 +976,7 @@ process_slam_record(struct psvr2_hmd *hmd, uint8_t *buf, int bytes_read)
 			struct xrt_pose start = {.orientation = yaw_q, .position = hmd->pose.position};
 			math_pose_invert(&start, &hmd->recenter_pose);
 			hmd->recenter_done = true;
+			u_startup_mark("headset: first head-tracking (SLAM) pose");
 			PSVR2_INFO(hmd,
 			           "Re-centered SLAM space on the first pose: head was at (%.3f, %.3f, %.3f), yaw %.1f deg",
 			           start.position.x, start.position.y, start.position.z, yaw * 180.0f / (float)M_PI);
@@ -1513,28 +1524,60 @@ static void
 take_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t size, bool from_cache)
 {
 	os_mutex_lock(&hmd->calib_lock);
-	bool first = hmd->calib_block == NULL;
-	if (first) {
+	bool parse = true;
+	if (hmd->calib_block == NULL) {
+		u_startup_mark("headset: calibration block (%s, %u bytes)", from_cache ? "saved copy" : "from the headset",
+		               size);
 		hmd->calib_block = malloc(size);
 		if (hmd->calib_block != NULL) {
 			memcpy(hmd->calib_block, data, size);
 			hmd->calib_block_size = size;
+			hmd->calib_from_cache = from_cache;
+		}
+	} else if (!from_cache && hmd->calib_from_cache) {
+		/*
+		 * The saved copy was taken at start (calibration_block_load_saved); the headset's own block confirms it, or
+		 * replaces it while nothing was built from it yet. Once the LED tracker exists it can't be rebuilt, so a
+		 * different block (after a firmware update or a repair?) is only saved, for the next start.
+		 */
+		hmd->calib_from_cache = false;
+		const bool same = size == hmd->calib_block_size && memcmp(data, hmd->calib_block, size) == 0;
+		if (same) {
+			u_startup_mark("headset: calibration block from the headset (matches the saved copy)");
+		} else if (hmd->led_tracker == NULL) {
+			u_startup_mark("headset: calibration block from the headset differs from the saved copy: using it");
+			uint8_t *block = malloc(size);
+			if (block != NULL) {
+				memcpy(block, data, size);
+				free(hmd->calib_block);
+				hmd->calib_block = block;
+				hmd->calib_block_size = size;
+			}
+		} else {
+			PSVR2_WARN(hmd,
+			           "The headset's calibration block differs from the saved copy, and the controllers' tracker "
+			           "was already built from the saved one: it's saved now; restart SteamVR to use it");
+			parse = false;
 		}
 	}
-	psvr2_parse_gen_calibration_block(hmd, data, size);
-	if (debug_get_bool_option_psvr2_basalt() && hmd->basalt == NULL && !hmd->basalt_tried) {
-		// Once: it needs the camera calibration in this block. Published only when fully set up.
-		hmd->basalt_tried = true;
-		struct psvr2_basalt *b = psvr2_basalt_create(NULL, data, size);
-		__atomic_store_n(&hmd->basalt, b, __ATOMIC_RELEASE);
-		if (b == NULL) {
-			PSVR2_ERROR(hmd, "PSVR2_BASALT: Basalt didn't start, running without the referee");
+	if (parse && hmd->calib_block != NULL) {
+		psvr2_parse_gen_calibration_block(hmd, hmd->calib_block, hmd->calib_block_size);
+		if (debug_get_bool_option_psvr2_basalt() && hmd->basalt == NULL && !hmd->basalt_tried) {
+			// Once: it needs the camera calibration in this block. Published only when fully set up.
+			hmd->basalt_tried = true;
+			struct psvr2_basalt *b = psvr2_basalt_create(NULL, hmd->calib_block, hmd->calib_block_size);
+			__atomic_store_n(&hmd->basalt, b, __ATOMIC_RELEASE);
+			if (b == NULL) {
+				PSVR2_ERROR(hmd, "PSVR2_BASALT: Basalt didn't start, running without the referee");
+			}
 		}
 	}
+	const bool check_saved = !from_cache && !hmd->calib_saved_checked;
+	hmd->calib_saved_checked = hmd->calib_saved_checked || !from_cache;
 	os_mutex_unlock(&hmd->calib_lock);
 
 	char path[1024];
-	if (!from_cache && first && calibration_cache_path(hmd, path, sizeof path)) {
+	if (check_saved && calibration_cache_path(hmd, path, sizeof path)) {
 		// Save it when there's no copy yet or it differs (another headset with the same serial string is unlikely).
 		bool same = false;
 		FILE *f = fopen(path, "rb");
@@ -1558,31 +1601,54 @@ take_calibration_block(struct psvr2_hmd *hmd, uint8_t *data, uint32_t size, bool
 	}
 }
 
-//! No calibration block from the headset PSVR2_CALIB_WAIT_S after USB start: use the saved copy, if there is one.
-static void
-calibration_block_fallback(struct psvr2_hmd *hmd)
+/*!
+ * The saved copy of this headset's calibration block (from its last session), taken now: at the end of the headset's
+ * create, so the controllers' LED tracker and the cameras don't wait for the headset to send its own (which then
+ * confirms or replaces it, see take_calibration_block); and as the fallback when the headset sends none
+ * (PSVR2_CALIB_WAIT_S). Only for the headset's own serial number. @p at_start: quiet when there's no copy yet (first
+ * session on this headset: the headset's own block is waited for).
+ */
+static bool
+calibration_block_load_saved(struct psvr2_hmd *hmd, bool at_start)
 {
 	char path[1024];
-	if (!calibration_cache_path(hmd, path, sizeof path)) {
-		return;
+	if (!hmd->calib_serial_known || !calibration_cache_path(hmd, path, sizeof path)) {
+		return false;
 	}
 	FILE *f = fopen(path, "rb");
 	if (f == NULL) {
-		PSVR2_ERROR(hmd, "The headset sent no calibration block and there's no saved copy (%s): the controllers "
-		                 "won't be tracked optically this session; restarting usually brings it back",
-		            path);
-		return;
+		if (at_start) {
+			PSVR2_INFO(hmd, "No saved calibration block yet (%s): waiting for the headset's", path);
+		} else {
+			PSVR2_ERROR(hmd,
+			            "The headset sent no calibration block and there's no saved copy (%s): the controllers "
+			            "won't be tracked optically this session; restarting usually brings it back",
+			            path);
+		}
+		return false;
 	}
 	uint8_t buf[65536];
 	size_t n = fread(buf, 1, sizeof buf, f);
 	fclose(f);
 	if (n < 16) {
 		PSVR2_ERROR(hmd, "Saved calibration block %s is too short (%zu bytes)", path, n);
-		return;
+		return false;
 	}
-	PSVR2_WARN(hmd, "The headset sent no calibration block in %.0f s: using the saved copy %s (%zu bytes)",
-	           debug_get_float_option_psvr2_calib_wait_s(), path, n);
+	if (at_start) {
+		PSVR2_INFO(hmd, "Using the saved calibration block %s (%zu bytes) until the headset sends its own", path, n);
+	} else {
+		PSVR2_WARN(hmd, "The headset sent no calibration block in %.0f s: using the saved copy %s (%zu bytes)",
+		           debug_get_float_option_psvr2_calib_wait_s(), path, n);
+	}
 	take_calibration_block(hmd, buf, (uint32_t)n, true); // the parse checks its magic and size
+	return true;
+}
+
+//! No calibration block from the headset PSVR2_CALIB_WAIT_S after USB start: use the saved copy, if there is one.
+static void
+calibration_block_fallback(struct psvr2_hmd *hmd)
+{
+	calibration_block_load_saved(hmd, false);
 }
 
 static void *
@@ -2062,6 +2128,7 @@ psvr2_usb_start(struct psvr2_hmd *hmd)
 		goto out;
 	}
 
+	u_startup_mark("headset: USB streams started");
 	result = true;
 
 out:
@@ -2358,6 +2425,7 @@ struct xrt_device *
 psvr2_hmd_create(struct xrt_prober_device *xpdev)
 {
 	DRV_TRACE_MARKER();
+	u_startup_mark("headset: driver create begins");
 
 	// This indicates you won't be using Monado's built-in tracking algorithms.
 	enum u_device_alloc_flags flags =
@@ -2619,6 +2687,7 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	if (get_firmware_info(hmd, &firmware_info)) {
 		snprintf(hmd->base.serial, XRT_DEVICE_NAME_LEN, "%.*s", (int)sizeof(firmware_info.pcb_id),
 		         firmware_info.pcb_id);
+		hmd->calib_serial_known = true;
 
 		PSVR2_INFO(hmd, "Headset has firmware version of %08x", __le32_to_cpu(firmware_info.version));
 	} else {
@@ -2639,6 +2708,13 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 		goto cleanup;
 	}
 
+	/*
+	 * This headset's saved calibration block now, instead of after the headset sends its own (or PSVR2_CALIB_WAIT_S
+	 * without one): the LED tracker for the controllers and the cameras are built from it right away.
+	 */
+	calibration_block_load_saved(hmd, true);
+
+	u_startup_mark("headset: driver created (USB streams submitted)");
 	return &hmd->base;
 
 cleanup:
