@@ -57,6 +57,19 @@ END {
 	for (i = 1; i <= n; i++) printf "  %8.0f  %s\n", at[i], name[i]
 }' "$LOG"
 echo
+echo "== Headset tracking resets (the headset's own tracking restarting; 'worn' / 'moving' since 2026-11-22)"
+awk '/SLAM reset \(/ {
+	n++; t = $0; sub(/.* m jump, /, "", t); sub(/ s in.*/, "", t); t += 0; if (t > last) last = t
+	if (t > 10) late++
+	if ($0 ~ /headset worn/) worn++; else if ($0 ~ /headset not worn/) notworn++
+	if ($0 ~ /, moving \(/) moving++; else if ($0 ~ /, still \(/) still++
+}
+END {
+	if (n == 0) { print "  none"; exit }
+	printf "  %d resets, the last %.1f s after the first head pose, %d of them later than 10 s\n", n, last, late
+	if (worn + notworn > 0) printf "  headset worn at %d, not worn at %d; moving at %d, still at %d\n", worn, notworn, moving, still
+}' "$LOG"
+echo
 echo "== Clock check (ts host-now should be a few ms negative)"
 grep -E "LD stats:" "$LOG" | grep -o "ts host-now [+-][0-9.]*ms" | sort | uniq -c | sort -rn | head -5
 
