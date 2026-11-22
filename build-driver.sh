@@ -5,7 +5,11 @@
 # Compile the PS VR2 driver and install everything PSVR2-DriverKit needs into one folder, from our GitHub repository
 # (https://github.com/mkooner/PSVR2-DriverKit, cloned or updated into <dest>/source; the source isn't selectable):
 #
-#   ./build-driver.sh [--dest <install folder>]
+#   ./build-driver.sh [--dest <install folder>] [--hand-tracking]
+#
+#   --hand-tracking  build with Monado's Mercury hand tracking (experimental): needs OpenCV, onnxruntime and patchelf
+#                    (install-deps.sh --hand-tracking), and downloads its two models into
+#                    ~/.local/share/monado/hand-tracking-models
 #
 #   <dest>/source                        the repository (main branch): the Monado fork in monado/, DriverKit, the kit
 #   <dest>/build                         the Monado build: the SteamVR plugin (build/steamvr-monado-psvr2, with the
@@ -26,10 +30,13 @@ set -euo pipefail
 REPO_URL="https://github.com/mkooner/PSVR2-DriverKit.git"
 REPO_BRANCH="main"
 DEST="${HOME}/.local/share/PSVR2-DriverKit"
+HAND_TRACKING=0
+ORIG_ARGS=("$@")
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--dest) DEST="$2"; shift 2 ;;
-	-h | --help) sed -n '4,22p' "$0"; exit 0 ;;
+	--hand-tracking) HAND_TRACKING=1; shift ;;
+	-h | --help) sed -n '4,27p' "$0"; exit 0 ;;
 	*) echo "unknown option $1"; exit 2 ;;
 	esac
 done
@@ -45,9 +52,12 @@ CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/PSVR2-DriverKit"
 echo "== PSVR2-DriverKit driver build"
 echo "  source:  $REPO_URL ($REPO_BRANCH)"
 echo "  install: $DEST"
+echo "  hand tracking: $([ "$HAND_TRACKING" = 1 ] && echo "yes (experimental)" || echo no)"
 
-for tool in git cmake ninja python3 g++ cargo; do
-	command -v "$tool" >/dev/null || { echo "ERROR: $tool not installed (see the package list on DriverKit's Compile Driver tab)"; exit 1; }
+TOOLS=(git cmake ninja python3 g++ cargo)
+[ "$HAND_TRACKING" = 1 ] && TOOLS+=(curl sha256sum patchelf)
+for tool in "${TOOLS[@]}"; do
+	command -v "$tool" >/dev/null || { echo "ERROR: $tool not installed: press Install dependencies on DriverKit's Compile Driver tab"; exit 1; }
 done
 
 echo "STEP 1/5 download the source"
@@ -86,7 +96,7 @@ echo "  $(git -C "$REPO" log -1 --format='commit %h, %cd: %s' --date=format:'%Y-
 # differs, so build fixes reach older DriverKits. Once only: PSVR2_DK_HANDED_OVER stops a loop.
 if [ -z "${PSVR2_DK_HANDED_OVER:-}" ] && [ -f "$REPO/build-driver.sh" ] && ! cmp -s "$0" "$REPO/build-driver.sh"; then
 	echo "  this DriverKit's build script is older than the downloaded one: using the downloaded one"
-	PSVR2_DK_HANDED_OVER=1 exec bash "$REPO/build-driver.sh" --dest "$DEST"
+	PSVR2_DK_HANDED_OVER=1 exec bash "$REPO/build-driver.sh" "${ORIG_ARGS[@]}" --dest "$DEST"
 fi
 
 echo "STEP 2/5 configure"
@@ -95,9 +105,16 @@ echo "STEP 2/5 configure"
 # can load it inside Steam's runtime container as well as on the host. monado-service stays on (OpenXR games).
 # RealSense off too: the PS VR2 doesn't use it, and with a librealsense installed that lacks
 # rs2::device::get_device_time_ms() (Monado's RealSense driver calls it) the build failed.
-OFF=(-DXRT_HAVE_OPENCV=OFF -DXRT_HAVE_GST=OFF -DXRT_HAVE_ONNXRUNTIME=OFF -DXRT_HAVE_SDL2=OFF
+# With --hand-tracking, OpenCV and onnxruntime are on for Mercury (their libraries are bundled too, several hundred MB more with
+# Arch's OpenCV); the EuRoC dataset driver OpenCV would also bring in stays off.
+OFF=(-DXRT_HAVE_GST=OFF -DXRT_HAVE_SDL2=OFF
 	-DXRT_FEATURE_DEBUG_GUI=OFF -DXRT_FEATURE_SLAM=OFF -DXRT_FEATURE_RENDERDOC=OFF
-	-DXRT_HAVE_BLUETOOTH=OFF -DXRT_HAVE_HIDAPI=OFF -DXRT_HAVE_REALSENSE=OFF)
+	-DXRT_HAVE_BLUETOOTH=OFF -DXRT_HAVE_HIDAPI=OFF -DXRT_HAVE_REALSENSE=OFF -DXRT_BUILD_DRIVER_EUROC=OFF)
+if [ "$HAND_TRACKING" = 1 ]; then
+	OFF+=(-DXRT_HAVE_OPENCV=ON -DXRT_HAVE_ONNXRUNTIME=ON)
+else
+	OFF+=(-DXRT_HAVE_OPENCV=OFF -DXRT_HAVE_ONNXRUNTIME=OFF)
+fi
 cmake -S "$SRC" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 	-DXRT_FEATURE_STEAMVR_PLUGIN=ON -DXRT_FEATURE_SERVICE=ON -DXRT_FEATURE_OPENXR=ON \
 	-DXRT_BUILD_DRIVER_PSVR2=ON -DXRT_BUILD_DRIVER_PSSENSE=ON -DXRT_BUILD_DRIVER_SIMULATED=ON \
@@ -106,6 +123,11 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 	echo "ERROR: configure failed (log: $DEST/configure.log)"
 	exit 1
 }
+if [ "$HAND_TRACKING" = 1 ] && ! grep -q "^XRT_BUILD_DRIVER_HANDTRACKING:BOOL=ON" "$BUILD/CMakeCache.txt"; then
+	grep -E "#    (OPENCV|ONNXRUNTIME|DRIVER_HANDTRACKING):" "$DEST/configure.log" || true
+	echo "ERROR: hand tracking needs OpenCV and onnxruntime: tick Compile hand tracking, press Install dependencies, then compile again"
+	exit 1
+fi
 
 echo "STEP 3/5 compile"
 set +e
@@ -149,7 +171,7 @@ else
 	echo "  note: PlayStation VR2 App not found in Steam's libraries: SteamVR will show generic controller models and icons"
 fi
 mkdir -p "$KIT/tools" "$KIT/analysis" "$KIT/logs"
-for f in launch-steamvr.sh launch-openxr.sh summarize.sh build-driver.sh README.md ROOM.md; do
+for f in launch-steamvr.sh launch-openxr.sh summarize.sh build-driver.sh install-deps.sh README.md ROOM.md; do
 	[ -f "$HERE/$f" ] && cp -f "$HERE/$f" "$KIT/"
 done
 for f in steamvr_frame_shift.py steamvr_probe.py steamvr_timeline.py; do
@@ -179,6 +201,29 @@ if [ -f "$REPO/launcher-gui/Cargo.toml" ]; then
 	cp -f "$DEST/cargo-target/release/PSVR2-DriverKit" "$KIT/"
 fi
 
+if [ "$HAND_TRACKING" = 1 ]; then
+	# Mercury's two models (Monado's hand-tracking-models, master), where Monado looks for them; checked by hash.
+	MODELS="${XDG_DATA_HOME:-$HOME/.local/share}/monado/hand-tracking-models"
+	MODELS_URL="https://gitlab.freedesktop.org/monado/utilities/hand-tracking-models/-/raw/master"
+	mkdir -p "$MODELS"
+	for m in "grayscale_detection_160x160.onnx 1f1a039a266e13dc186bb884430ebd9c8216bdda680ab08a533d4c671f27ed36" \
+		"grayscale_keypoint_jan18.onnx 40c0daa598cedb993b54fff17685231b7465d6db342656c401b01c2029efd1d5"; do
+		f="${m% *}"
+		sum="${m#* }"
+		if [ -f "$MODELS/$f" ] && [ "$(sha256sum "$MODELS/$f" | cut -d' ' -f1)" = "$sum" ]; then
+			continue
+		fi
+		if ! curl -sfL -o "$MODELS/$f.part" "$MODELS_URL/$f" ||
+			[ "$(sha256sum "$MODELS/$f.part" | cut -d' ' -f1)" != "$sum" ]; then
+			rm -f "$MODELS/$f.part"
+			echo "ERROR: couldn't download the hand tracking model $f from $MODELS_URL"
+			exit 1
+		fi
+		mv -f "$MODELS/$f.part" "$MODELS/$f"
+		echo "  hand tracking model $f downloaded into $MODELS"
+	done
+fi
+
 echo "STEP 5/5 record the install location"
 mkdir -p "$CONF_DIR"
 cat >"$CONF_DIR/driver.env" <<EOF
@@ -191,6 +236,7 @@ PSVR2_KIT="$KIT"
 MONADO_SOURCE="$SRC"
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
 SOURCE_DATE="$(git -C "$REPO" log -1 --format=%cI)"
+HAND_TRACKING_BUILT="$HAND_TRACKING"
 EOF
 echo "  $CONF_DIR/driver.env"
 echo "DONE plugin: $PLUGIN"

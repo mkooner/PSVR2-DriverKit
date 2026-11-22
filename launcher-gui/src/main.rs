@@ -119,7 +119,7 @@ fn headset_settings(target: Target, accel: bool) -> Vec<Setting> {
         t(toggle("PSVR2_SONY_LD_CONFIG", "Sony's LED detector settings",
                  "Send Sony's LED detector settings to the headset (controller tracking in bright rooms).", true)),
         t(toggle("PSVR2_HAND_TRACKING", "Hand tracking (experimental)",
-                 "Experimental, off by default. Tracks your bare hands with the headset's cameras while a Sense controller is off: finger tracking in SteamVR games, pinch as the trigger, a closed hand as the grip, palm toward your face and pinch for the dashboard. Hands are often lost, the left more than the right. Needs a driver built with hand tracking (onnxruntime and OpenCV); turn a controller back on to use it again.", false)),
+                 "Experimental, off by default. Tracks your bare hands with the headset's cameras while a Sense controller is off: finger tracking in SteamVR games, pinch as the trigger, a closed hand as the grip, palm toward your face and pinch for the dashboard. Needs a driver compiled with Compile hand tracking ticked (Compile Driver tab); turn a controller back on to use it again.", false)),
         t(toggle("PSVR2_BASALT", "Basalt referee",
                  "Basalt visual-inertial tracking checks the headset's position jumps in fast turns (~2 CPU cores).", false)),
         t(value("VIT_SYSTEM_LIBRARY_PATH", "Basalt library", "libbasalt.so for the Basalt referee.", "", true)),
@@ -177,6 +177,10 @@ struct Config {
     /// Compile Driver tab: where the driver is compiled and installed to (the source is always our GitHub repository).
     #[serde(default = "default_install_dir")]
     install_dir: String,
+    /// Compile Driver tab: build with Monado's Mercury hand tracking (OpenCV and onnxruntime, build-driver.sh
+    /// --hand-tracking), and install its packages with Install dependencies.
+    #[serde(default)]
+    compile_hand_tracking: bool,
     /// Settings format: 2 = async reprojection off by default (SteamVR's own choice); 3 = SteamVR render scale 170;
 /// 4 = smooth SLAM corrections on.
     #[serde(default)]
@@ -198,6 +202,7 @@ impl Default for Config {
             steam_root: String::new(),
             steamvr_dir: String::new(),
             install_dir: default_install_dir(),
+            compile_hand_tracking: false,
             version: CONFIG_VERSION,
         }
     }
@@ -703,6 +708,8 @@ struct Launcher {
     build: Arc<Mutex<BuildState>>,
     /// The Compile tab's Check: is the installed build the latest on GitHub?
     check: Arc<Mutex<CheckState>>,
+    /// The Compile tab's Install dependencies (install-deps.sh through pkexec).
+    deps: Arc<Mutex<DepsState>>,
     /// --screenshot <file.png> [launcher|settings|compile]: render one tab, save it, quit (for checking the design).
     screenshot: Option<(PathBuf, Instant, bool)>,
     /// The device pictures (assets/): headset, left and right Sense controller.
@@ -749,6 +756,7 @@ impl Launcher {
             saved_at: None,
             build: Arc::new(Mutex::new(BuildState::default())),
             check: Arc::new(Mutex::new(CheckState::default())),
+            deps: Arc::new(Mutex::new(DepsState::default())),
             screenshot: None,
             reg_cache: None,
             pictures: [
@@ -1046,6 +1054,15 @@ impl Launcher {
  */
 
 /// A running or finished compile (build-driver.sh's output, read on a thread).
+/// A running or finished Install dependencies (install-deps.sh's output, read on a thread).
+#[derive(Default)]
+struct DepsState {
+    running: bool,
+    lines: Vec<String>,
+    /// Ok(what was done) or Err(why)
+    result: Option<Result<String, String>>,
+}
+
 /// What Check found (see check_build).
 #[derive(Default)]
 struct CheckState {
@@ -1729,13 +1746,17 @@ impl Launcher {
         let _ = save_config(&self.cfg);
         *self.build.lock().unwrap() = BuildState { running: true, ..Default::default() };
         let state = self.build.clone();
+        let hand_tracking = self.cfg.compile_hand_tracking;
         let log = Path::new(&dest).join("compile-output.log");
         self.message = format!("Compiling into {dest} (log {})", log.display());
         thread::spawn(move || {
             let mut out = fs::File::create(&log).ok();
-            let child = Command::new("bash")
-                .arg(&script)
-                .args(["--dest", &dest])
+            let mut cmd = Command::new("bash");
+            cmd.arg(&script).args(["--dest", &dest]);
+            if hand_tracking {
+                cmd.arg("--hand-tracking");
+            }
+            let child = cmd
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1794,6 +1815,80 @@ impl Launcher {
         });
     }
 
+    /// Install dependencies: install-deps.sh (built into this app) as root through pkexec, which asks for the password
+    /// in a desktop dialog; with --hand-tracking when Compile hand tracking is ticked. Its output shows below.
+    fn start_install_deps(&mut self) {
+        let script = config_dir().join("install-deps.sh");
+        if let Err(e) = fs::create_dir_all(config_dir()).and_then(|_| fs::write(&script, DEPS_SCRIPT)) {
+            self.message = format!("Can't write {}: {e}", script.display());
+            return;
+        }
+        let ht = self.cfg.compile_hand_tracking;
+        let _ = save_config(&self.cfg);
+        let mut args = vec![script.display().to_string()];
+        if ht {
+            args.push("--hand-tracking".into());
+        }
+        if Command::new("pkexec").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
+            self.message = format!("pkexec isn't installed: run this in a terminal instead: bash {}", args.join(" "));
+            return;
+        }
+        *self.deps.lock().unwrap() = DepsState { running: true, ..Default::default() };
+        let state = self.deps.clone();
+        thread::spawn(move || {
+            use std::io::BufRead;
+            let child = Command::new("pkexec")
+                .arg("bash")
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => {
+                    let mut st = state.lock().unwrap();
+                    st.running = false;
+                    st.result = Some(Err(format!("couldn't run pkexec: {e}")));
+                    return;
+                }
+            };
+            let stderr = child.stderr.take();
+            let st2 = state.clone();
+            let err_thread = thread::spawn(move || {
+                if let Some(e) = stderr {
+                    for line in std::io::BufReader::new(e).lines().map_while(Result::ok) {
+                        st2.lock().unwrap().lines.push(line);
+                    }
+                }
+            });
+            if let Some(out) = child.stdout.take() {
+                for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                    let mut st = state.lock().unwrap();
+                    st.lines.push(line);
+                    let n = st.lines.len();
+                    if n > 400 {
+                        st.lines.drain(0..n - 400);
+                    }
+                }
+            }
+            let _ = err_thread.join();
+            let code = child.wait().ok().and_then(|s| s.code());
+            let mut st = state.lock().unwrap();
+            st.running = false;
+            st.result = Some(match code {
+                Some(0) => Ok(if st.lines.iter().any(|l| l.contains("everything is installed")) {
+                    "Everything needed is already installed.".to_string()
+                } else {
+                    "Dependencies installed.".to_string()
+                }),
+                // pkexec: 126 = the password dialog was dismissed, 127 = not authorized
+                Some(126) | Some(127) => Err("Not installed: the password wasn't given.".to_string()),
+                _ => Err(st.lines.iter().rev().find(|l| l.starts_with("ERROR")).cloned().unwrap_or_else(|| "Installing the dependencies failed: see the output.".into())),
+            });
+        });
+    }
+
     fn compile_tab(&mut self, ui: &mut egui::Ui, st: &Status) {
         let steamvr = st.steamvr || self.steamvr.is_some();
         let (running, frac, done, total, step, result, tail) = {
@@ -1819,9 +1914,23 @@ impl Launcher {
             });
             theme::note(ui, &format!("Source: {REPO_WEB} (main branch)"));
             ui.add_space(6.0);
+            let deps_running = self.deps.lock().unwrap().running;
+            ui.add_enabled(!running && !deps_running, egui::Checkbox::new(&mut self.cfg.compile_hand_tracking, "Compile hand tracking (experimental)"))
+                .on_hover_text("Builds Monado's Mercury hand tracking into the driver: needs OpenCV and onnxruntime (Install dependencies adds them; Debian 13, Ubuntu 25.04, Fedora 43 or newer, or any Arch based system), downloads its two models, and the driver gets several hundred MB bigger. Turn it on afterwards in Settings: Hand tracking.");
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!running && !steamvr, theme::primary("Compile Driver"))
+                    .add_enabled(!running && !deps_running, egui::Button::new("Install dependencies"))
+                    .on_hover_text(if self.cfg.compile_hand_tracking {
+                        "Installs the packages compiling needs, with hand tracking's (OpenCV, onnxruntime, patchelf), using your system's package manager (pacman, apt or dnf). Asks for your password."
+                    } else {
+                        "Installs the packages compiling needs, using your system's package manager (pacman, apt or dnf). Asks for your password."
+                    })
+                    .clicked()
+                {
+                    self.start_install_deps();
+                }
+                if ui
+                    .add_enabled(!running && !steamvr && !deps_running, theme::primary("Compile Driver"))
                     .on_disabled_hover_text(if steamvr { "Close SteamVR first: it has the driver loaded." } else { "Compiling..." })
                     .clicked()
                 {
@@ -1853,6 +1962,32 @@ impl Launcher {
                     CheckResult::Failed(t) => (theme::FAULT, t),
                 };
                 ui.label(egui::RichText::new(text).color(color).font(theme::bold(13.0)));
+            }
+            {
+                let d = self.deps.lock().unwrap();
+                if d.running {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Installing dependencies...");
+                    });
+                }
+                if let Some(r) = &d.result {
+                    match r {
+                        Ok(t) => ui.colored_label(theme::LIT, t),
+                        Err(e) => ui.colored_label(theme::FAULT, e),
+                    };
+                }
+                if d.running || d.result.is_some() {
+                    let tail: Vec<&String> = d.lines.iter().rev().take(8).collect();
+                    if !tail.is_empty() {
+                        egui::Frame::new().fill(theme::FIELD).corner_radius(egui::CornerRadius::same(8)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            for l in tail.into_iter().rev() {
+                                ui.label(egui::RichText::new(l).monospace().size(12.0).color(theme::SLATE));
+                            }
+                        });
+                    }
+                }
             }
             if running || result.is_some() {
                 let text = match (running, &result) {
@@ -1972,7 +2107,7 @@ impl Launcher {
         });
 
         theme::section(ui, "Packages needed to compile", |ui| {
-            theme::note(ui, "Install these first. Copy the line for your distribution into a terminal.");
+            theme::note(ui, "Install dependencies (above) installs these for you. To do it by hand, copy the line for your distribution into a terminal. With Compile hand tracking, also: Arch: opencv onnxruntime-cpu patchelf; Debian 13 / Ubuntu 25.04 or newer: libopencv-dev libonnxruntime-dev patchelf; Fedora 43 or newer: opencv-devel onnxruntime-devel patchelf.");
             for (distro, cmd) in PACKAGES {
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new(distro).font(theme::bold(14.0)));
@@ -2082,6 +2217,9 @@ impl Launcher {
 /// The compile script (psvr2-test/build-driver.sh), built into the app: DriverKit can compile and update everything
 /// on its own (e.g. as an AppImage), without a copy of the kit.
 const BUILD_SCRIPT: &str = include_str!("../../build-driver.sh");
+
+/// The dependency installer (psvr2-test/install-deps.sh), built into the app like the compile script.
+const DEPS_SCRIPT: &str = include_str!("../../install-deps.sh");
 const REPO_WEB: &str = "github.com/mkooner/PSVR2-DriverKit";
 
 fn main() -> eframe::Result<()> {
