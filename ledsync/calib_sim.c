@@ -57,6 +57,10 @@ static bool g_tracker = false;
 static bool g_apply_trim = true;
 static double g_flip_s = 0;
 static double g_drift = 15e-6;
+// SIM_BREAKDOWN=1: time in each count calibration state until the first hold, per controller (ms, summed over runs).
+static double g_state_ms[2][16];
+static double g_wait_other_ms[2];
+static int g_breakdown_runs;
 static double g_ambient = 30.0;
 static double g_flicker = 0.0;
 #define PROC_DELAY_NS 7500000LL
@@ -407,6 +411,14 @@ main(int argc, char **argv)
 					// Driver send wait (report cadence, haptics) + round trip ~10-30ms.
 					s->apply_at_ns = proc + (int64_t)(4e6 + urand() * 8e6) + (int64_t)(8e6 + urand() * 20e6);
 				}
+				if (getenv("SIM_BREAKDOWN") && s->hold_at_ns < 0 && s->r.phase == T_LED_SYNC_PHASE_COUNT_CALIBRATE) {
+					const int st = (int)s->r.count_calib.state;
+					if (st >= 0 && st < 16)
+						g_state_ms[i][st] += FRAME_NS / 1e6;
+					if (st == 0 && atomic_load(&count_calib_owner) != NULL &&
+					    atomic_load(&count_calib_owner) != &s->r)
+						g_wait_other_ms[i] += FRAME_NS / 1e6;
+				}
 				if (s->hold_at_ns < 0 && s->r.phase == T_LED_SYNC_PHASE_COUNT_HOLD &&
 				    !(drop_at >= 0 && i == 0 && s->reconnect_ns == 0)) {
 					s->hold_at_ns = proc - (s->reconnect_ns ? s->reconnect_ns : start_ns);
@@ -554,6 +566,21 @@ main(int argc, char **argv)
 				times[i] = times[j];
 				times[j] = t;
 			}
+	if (getenv("SIM_BREAKDOWN")) {
+		static const char *names[] = {"wait token", "baseline", "find on (sweep)", "left edge", "right edge",
+		                              "confirm left outer", "confirm left inner", "confirm right outer",
+		                              "confirm right inner", "(9)", "diag on"};
+		for (int i = 0; i < 2; i++) {
+			double tot = 0;
+			for (int k = 0; k < 16; k++)
+				tot += g_state_ms[i][k];
+			printf("controller %d until first hold: %.0f ms on average; of it waiting for the other %.0f ms\n", i,
+			       tot / runs, g_wait_other_ms[i] / runs);
+			for (int k = 0; k < 11; k++)
+				if (g_state_ms[i][k] > 0)
+					printf("  %-20s %6.0f ms (%4.1f%%)\n", names[k], g_state_ms[i][k] / runs, 100 * g_state_ms[i][k] / tot);
+		}
+	}
 	printf("exposure %4.0fus dropout %.2f: both holding after median %.1fs, mean %.1fs, worst %.1fs; "
 	       "held centre error mean %.0fus worst %.0fus (half room %.0fus); %d/%d never finished\n",
 	       exposure_us, dropout, n_ok ? times[n_ok / 2] : 0, n_ok ? sum_both / n_ok : 0, worst_both,
