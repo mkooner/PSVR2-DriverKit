@@ -7,6 +7,7 @@
  * @ingroup st_ovrn
  */
 
+#include "util/u_startup_log.h"
 #include "ovrn_backend.hpp"
 #include "ovrn_controller.hpp"
 #include "ovrn_hand.hpp"
@@ -41,6 +42,7 @@ public:
 	Init(vr::IVRDriverContext *context) override
 	{
 		VR_INIT_SERVER_DRIVER_CONTEXT(context);
+		u_startup_mark("driver: Init begins");
 		// Which build this is (git describe of the source at configure time), to compare users' logs.
 		log("ovrn: driver build %s\n", u_git_tag);
 		applyCompositorDefaults();
@@ -71,6 +73,7 @@ public:
 		m_poseThread = std::thread(&Provider::poseLoop, this);
 		log("ovrn: started, backend %s, %zu controllers, %zu tracked hands\n", m_backend->name(), m_controllers.size(),
 		    m_hands.size());
+		u_startup_mark("driver: Init done (devices added)");
 		return vr::VRInitError_None;
 	}
 
