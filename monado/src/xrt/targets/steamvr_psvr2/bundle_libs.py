@@ -13,9 +13,12 @@ inside it, couldn't connect.
 
 Usage: bundle_libs.py <plugin.so> <steam runtime files dir> [--dry-run]
   The runtime dir is e.g. ~/.local/share/Steam/steamapps/common/SteamLinuxRuntime_sniper/sniper_platform_*/files.
-Bundled libraries with a search path of their own (DT_RUNPATH, e.g. Arch's OpenCV: /usr/lib) would look for their
-dependencies there and not next to the plugin, so inside the container they'd miss them (the hand tracking build,
-2026-11-22: 35 of OpenCV's libraries, Qt, GStreamer and FFmpeg among them): their copies get $ORIGIN instead (patchelf).
+Bundled libraries with a DT_RUNPATH of their own (e.g. Arch's OpenCV and libjpeg: /usr/lib) don't take the plugin's
+DT_RPATH for their dependencies, so inside the container those wouldn't be found next to the plugin (the hand tracking
+build, 2026-11-22: 35 of OpenCV's libraries, Qt, GStreamer and FFmpeg among them). Their copies get that entry turned
+into a DT_RPATH (the tag only, the path stays): the loader then searches it and, after it, the RPATHs of the libraries
+that loaded it, up to the plugin's $ORIGIN. No tool needed (an earlier version used patchelf, which a user's build
+then stopped on, for libjpeg).
 Never bundled: the C runtime (glibc, libstdc++, libgcc_s): pressure-vessel uses the newer of the host's and the
 runtime's, and a second copy would clash with the one SteamVR itself loads.
 """
@@ -62,13 +65,35 @@ def dependencies(path):
     return deps
 
 
-def search_path(path):
-    """The library's DT_RUNPATH or DT_RPATH ("" if it has none)."""
-    out = subprocess.run(["readelf", "-d", path], capture_output=True, text=True).stdout
-    for line in out.splitlines():
-        if "(RUNPATH)" in line or "(RPATH)" in line:
-            return line.split("[", 1)[1].rsplit("]", 1)[0] if "[" in line else ""
-    return ""
+def runpath_to_rpath(path):
+    """Turn the library's DT_RUNPATH entries into DT_RPATH (ELF64 little-endian, via PT_DYNAMIC). Returns how many."""
+    import struct
+    DT_NULL, DT_RPATH, DT_RUNPATH, PT_DYNAMIC = 0, 15, 29, 2
+    with open(path, "r+b") as f:
+        head = f.read(64)
+        if head[:4] != b"\x7fELF" or head[4] != 2 or head[5] != 1:
+            return 0  # not ELF64 little-endian: left as it is
+        e_phoff, = struct.unpack_from("<Q", head, 0x20)
+        e_phentsize, e_phnum = struct.unpack_from("<HH", head, 0x36)
+        changed = 0
+        for i in range(e_phnum):
+            f.seek(e_phoff + i * e_phentsize)
+            ph = f.read(e_phentsize)
+            p_type, = struct.unpack_from("<I", ph, 0)
+            if p_type != PT_DYNAMIC:
+                continue
+            p_offset, = struct.unpack_from("<Q", ph, 0x08)
+            p_filesz, = struct.unpack_from("<Q", ph, 0x20)
+            for off in range(p_offset, p_offset + p_filesz, 16):
+                f.seek(off)
+                tag, = struct.unpack("<q", f.read(8))
+                if tag == DT_NULL:
+                    break
+                if tag == DT_RUNPATH:
+                    f.seek(off)
+                    f.write(struct.pack("<q", DT_RPATH))
+                    changed += 1
+        return changed
 
 
 def main():
@@ -105,22 +130,14 @@ def main():
             dst = os.path.join(out_dir, name)
             if os.path.abspath(src) != os.path.abspath(dst):
                 shutil.copy2(os.path.realpath(src), dst)
-            # Only when it needs other bundled libraries (libjpeg's /usr/lib in the normal build needs none: left).
-            rp = search_path(dst)
-            needs_bundled = any(d in bundled for d in dependencies(src) if d != name)
-            if rp not in ("", "$ORIGIN") and needs_bundled:
-                if shutil.which("patchelf") is None:
-                    print(f"{name} looks for its libraries in {rp}, not next to the plugin, and patchelf isn't installed "
-                          "to change that (DriverKit: Install dependencies)")
-                    return 1
-                subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", dst], check=True)
+            if runpath_to_rpath(dst):
                 repathed.append(name)
     print(f"{len(deps)} dependencies: {len(bundled)} bundled into {out_dir}, {len(deps) - len(bundled) - len(skipped)} "
           f"from Steam's runtime, {len(skipped)} from the system (C runtime, graphics, udev/dbus)")
     if bundled:
         print("bundled: " + " ".join(bundled))
     if repathed:
-        print(f"{len(repathed)} of them now look next to the plugin ($ORIGIN): " + " ".join(repathed))
+        print(f"{len(repathed)} had a RUNPATH, now an RPATH (they find the bundled libraries): " + " ".join(repathed))
     return 0
 
 
