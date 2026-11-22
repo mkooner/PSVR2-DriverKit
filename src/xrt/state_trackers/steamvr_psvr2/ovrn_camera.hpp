@@ -57,8 +57,16 @@ public:
 
 	Camera(Backend *backend, const CameraInfo &info) : m_backend(backend), m_info(info)
 	{
-		m_w = 2 * info.width; // side by side
-		m_h = info.height;
+		/*
+		 * Half size (CameraInfo::half, DriverKit's "Lighter camera picture"): each 2x2 pixels averaged, a quarter of
+		 * the data. SteamVR's compositor copies every frame to the GPU through its transfer ring buffer while it
+		 * shows the camera (a user's PC, 2026-11-21: 3.1 MB 60 times a second filled it every 1.43 s, and it once
+		 * aborted on a full one). Pixel-based values SteamVR gets (frame size, intrinsics) are scaled with it; the
+		 * normalized and angular ones (distortion, projection) don't change.
+		 */
+		m_scale = info.half ? 2 : 1;
+		m_w = 2 * info.width / m_scale; // side by side
+		m_h = info.height / m_scale;
 		m_frameBytes = (size_t)m_w * m_h * 3 / 2;
 		m_own[0].resize(m_frameBytes);
 		m_own[1].resize(m_frameBytes);
@@ -172,10 +180,11 @@ public:
 		const double baseline = std::sqrt((p1.position.x - p0.position.x) * (p1.position.x - p0.position.x) +
 		                                  (p1.position.y - p0.position.y) * (p1.position.y - p0.position.y) +
 		                                  (p1.position.z - p0.position.z) * (p1.position.z - p0.position.z));
-		log("ovrn: passthrough cameras: %ux%u side by side, NV12, gamma %.2f; lens model fit %.2f / %.2f px rms; "
-		    "camera 0 looks %.1f deg %s, %.1f deg %s, camera 1 %.1f deg %s, %.1f deg %s, %.0f mm apart (%s); SteamVR's "
-		    "camera frame queue: %s\n",
-		    m_w, m_h, m_gamma, m_info.fit_rms_px[0], m_info.fit_rms_px[1], std::fabs(pitch[0]),
+		log("ovrn: passthrough cameras: %ux%u side by side (%s, %s), NV12, gamma %.2f; lens model fit %.2f / %.2f px "
+		    "rms; camera 0 looks %.1f deg %s, %.1f deg %s, camera 1 %.1f deg %s, %.1f deg %s, %.0f mm apart (%s); "
+		    "SteamVR's camera frame queue: %s\n",
+		    m_w, m_h, m_scale == 2 ? "half size" : "full size", m_info.half_source.c_str(), m_gamma,
+		    m_info.fit_rms_px[0], m_info.fit_rms_px[1], std::fabs(pitch[0]),
 		    pitch[0] < 0 ? "down" : "up", std::fabs(yaw[0]), yaw[0] > 0 ? "left" : "right", std::fabs(pitch[1]),
 		    pitch[1] < 0 ? "down" : "up", std::fabs(yaw[1]), yaw[1] > 0 ? "left" : "right", baseline * 1000.0,
 		    m_info.tracker_poses ? "the controller tracker's camera poses, OVRN_CAMERA_POSES=tracker"
@@ -408,13 +417,14 @@ public:
 		}
 		const bool distorted = type == vr::VRTrackedCameraFrameType_Distorted;
 		const double zoom = distorted ? 1.0 : kZoom;
+		// In the delivered frame's pixels (half of them at half size).
 		if (focal != nullptr) {
-			focal->v[0] = (float)(m_info.fx[cam] / zoom);
-			focal->v[1] = (float)(m_info.fy[cam] / zoom);
+			focal->v[0] = (float)(m_info.fx[cam] / zoom / m_scale);
+			focal->v[1] = (float)(m_info.fy[cam] / zoom / m_scale);
 		}
 		if (center != nullptr) {
-			center->v[0] = (float)cx(cam);
-			center->v[1] = (float)m_info.cy[cam];
+			center->v[0] = (float)(cx(cam) / m_scale);
+			center->v[1] = (float)(m_info.cy[cam] / m_scale);
 		}
 		if (dist != nullptr) {
 			*dist = distorted ? vr::VRDistortionFunctionType_Extended_FTheta : vr::VRDistortionFunctionType_None;
@@ -432,11 +442,15 @@ public:
 		return m_sequence.load();
 	}
 
-	//! Decode one BC4 image pair into an NV12 frame (side by side, brightened, grey chroma); public for the tests.
+	/*!
+	 * Decode one BC4 image pair into an NV12 frame (side by side, brightened, grey chroma); at half size each 2x2
+	 * pixels are averaged (in the camera's own values, then brightened). Public for the tests.
+	 */
 	void
 	decode(const uint8_t *pair, uint8_t *nv12) const
 	{
 		const uint32_t w = m_info.width, h = m_info.height;
+		const uint32_t ow = w / m_scale; // one camera's width in the delivered frame
 		const size_t row_bytes = (kStride / 4) * BCDEC_BC4_BLOCK_SIZE;
 		const size_t image_bytes = (size_t)kStride * h / 2;
 		uint8_t block[16];
@@ -445,10 +459,21 @@ public:
 			for (uint32_t by = 0; by < h / 4; by++) {
 				for (uint32_t bx = 0; bx < w / 4; bx++) {
 					bcdec_bc4(src + by * row_bytes + bx * BCDEC_BC4_BLOCK_SIZE, block, 4, 0);
-					for (int y = 0; y < 4; y++) {
-						uint8_t *dst = nv12 + (size_t)(by * 4 + y) * m_w + cam * w + bx * 4;
-						for (int x = 0; x < 4; x++) {
-							dst[x] = m_lut[block[y * 4 + x]];
+					if (m_scale == 1) {
+						for (int y = 0; y < 4; y++) {
+							uint8_t *dst = nv12 + (size_t)(by * 4 + y) * m_w + cam * ow + bx * 4;
+							for (int x = 0; x < 4; x++) {
+								dst[x] = m_lut[block[y * 4 + x]];
+							}
+						}
+						continue;
+					}
+					for (int y = 0; y < 2; y++) {
+						uint8_t *dst = nv12 + (size_t)(by * 2 + y) * m_w + cam * ow + bx * 2;
+						for (int x = 0; x < 2; x++) {
+							const uint8_t *q = block + y * 8 + x * 2; // the 2x2 at (2x, 2y) of the 4x4 block
+							const unsigned sum = q[0] + q[1] + q[4] + q[5];
+							dst[x] = m_lut[(sum + 2) / 4];
 						}
 					}
 				}
@@ -608,21 +633,28 @@ private:
 	deliver(const uint8_t *pair, int64_t exposure_ns)
 	{
 		const uint64_t seq = m_sequence.load();
-		// SteamVR's internal frame queue, when offered: decode straight into its block.
+		/*
+		 * Decoded once per frame: into SteamVR's internal frame queue's block when offered, and that copied into the
+		 * published path's buffer (decoding both took 2 x 2.15 ms per frame, 26% of a core at 60 Hz; once plus the
+		 * 0.16 ms copy, 14%). The block is released only after the copy, so it's read while still ours.
+		 */
+		vr::PropertyContainerHandle_t block = vr::k_ulInvalidPropertyContainer;
+		const uint8_t *decoded = nullptr;
 		if (m_queue != nullptr) {
-			vr::PropertyContainerHandle_t block;
 			void *buffer = nullptr;
 			if (m_queue->AcquireWriteOnlyBlock(m_queueHandle, &block, &buffer) ==
 			        steamvr::QueueResult::Ok &&
 			    buffer != nullptr) {
 				decode(pair, static_cast<uint8_t *>(buffer));
+				decoded = static_cast<const uint8_t *>(buffer);
 				steamvr::set_path(m_paths, block, "/server_time_ticks", (uint64_t)exposure_ns);
 				steamvr::set_path(m_paths, block, "/frame_sequence", (uint64_t)seq);
 				steamvr::set_path(m_paths, block, "/frame_size", (int32_t)m_frameBytes);
 				steamvr::set_path(m_paths, block, "/frame_time_monotonic", (double)(exposure_ns * 1e-9));
 				steamvr::set_path(m_paths, block, "/delivery_rate", kRate);
 				steamvr::set_path(m_paths, block, "/elapsed_time", 1.0 / kRate);
-				m_queue->ReleaseWriteOnlyBlock(m_queueHandle, block);
+			} else {
+				block = vr::k_ulInvalidPropertyContainer;
 			}
 		}
 		// The published path: SteamVR's buffers if it gave us some, else ours; then the sink callback.
@@ -640,7 +672,11 @@ private:
 				index = (uint32_t)(seq % 2);
 				target = m_own[index].data();
 			}
-			decode(pair, target);
+			if (decoded != nullptr) {
+				memcpy(target, decoded, m_frameBytes);
+			} else {
+				decode(pair, target);
+			}
 			m_frame = vr::CameraVideoStreamFrame_t{};
 			m_frame.m_nStreamFormat = vr::CVS_FORMAT_NV12;
 			m_frame.m_nWidth = m_w;
@@ -657,6 +693,9 @@ private:
 			m_haveFrame = true;
 			sink = m_sink;
 		}
+		if (block != vr::k_ulInvalidPropertyContainer) {
+			m_queue->ReleaseWriteOnlyBlock(m_queueHandle, block);
+		}
 		m_sequence.fetch_add(1);
 		if (sink != nullptr) {
 			sink->OnCameraVideoSinkCallback();
@@ -666,6 +705,7 @@ private:
 	Backend *const m_backend;
 	const CameraInfo m_info;
 	uint32_t m_w = 0, m_h = 0;
+	uint32_t m_scale = 1; //!< 2 at half size
 	size_t m_frameBytes = 0;
 	uint8_t m_lut[256];
 	float m_gamma = 0.5f;

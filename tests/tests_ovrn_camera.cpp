@@ -154,6 +154,78 @@ TEST_CASE("ovrn camera: brightening (OVRN_CAMERA_GAMMA, default 0.5)")
 	CHECK(nv12[(size_t)10 * 2 * W + 13] == 255);
 }
 
+TEST_CASE("ovrn camera: half size (DriverKit's lighter camera picture) averages each 2x2, a quarter of the data")
+{
+	setenv("OVRN_CAMERA_GAMMA", "1", 1);
+	FakeBackend backend;
+	ovrn::CameraInfo i = info();
+	i.half = true;
+	ovrn::Camera cam(&backend, i);
+	vr::IVRCameraComponent *c = &cam;
+	uint32_t w = 0, h = 0;
+	REQUIRE(c->GetCameraFrameDimensions(vr::CVS_FORMAT_NV12, &w, &h));
+	CHECK(w == W); // two 508-wide images side by side
+	CHECK(h == H / 2);
+	int count = 0;
+	uint32_t bytes = 0;
+	REQUIRE(c->GetCameraFrameBufferingRequirements(&count, &bytes));
+	CHECK(bytes == (uint32_t)W * (H / 2) * 3 / 2); // a quarter of the full frame
+	std::vector<uint8_t> nv12(bytes);
+	std::vector<uint8_t> src = pair(200, 40, 90);
+	cam.decode(src.data(), nv12.data());
+	const uint32_t ow = W / 2, rw = W; // one image's width, a row of the frame
+	CHECK(nv12[0] == 200);
+	CHECK(nv12[ow - 1] == 200); // the left image's last column
+	CHECK(nv12[ow] == 40);      // the right image starts at 508
+	CHECK(nv12[rw - 1] == 40);
+	CHECK(nv12[(size_t)(H / 2 - 1) * rw] == 200); // last row
+	// The marker pixel (13, 10) falls in the half-size pixel (6, 5) with three 200s: (90 + 3 * 200 + 2) / 4.
+	CHECK(nv12[(size_t)5 * rw + 6] == 173);
+	CHECK(nv12[(size_t)5 * rw + 5] == 200);
+	CHECK(nv12[(size_t)rw * (H / 2)] == 128); // chroma grey
+	CHECK(nv12.back() == 128);
+	// Pixel-based intrinsics follow the delivered frame; the projection and distortion don't change.
+	vr::HmdVector2_t focal, centre;
+	vr::EVRDistortionFunctionType type;
+	double k[vr::k_unMaxDistortionFunctionParameters];
+	REQUIRE(cam.GetCameraIntrinsics(0, vr::VRTrackedCameraFrameType_Distorted, &focal, &centre, &type, k));
+	CHECK(focal.v[0] == Approx(150.0f));
+	CHECK(centre.v[0] == Approx(254.0f));
+	CHECK(centre.v[1] == Approx(254.0f));
+	ovrn::Camera full(&backend, info());
+	vr::HmdMatrix44_t ph, pf;
+	REQUIRE(cam.GetCameraProjection(0, vr::VRTrackedCameraFrameType_Undistorted, 0.1f, 100.0f, &ph));
+	REQUIRE(full.GetCameraProjection(0, vr::VRTrackedCameraFrameType_Undistorted, 0.1f, 100.0f, &pf));
+	CHECK(ph.m[0][0] == Approx(pf.m[0][0]));
+	CHECK(ph.m[0][2] == Approx(pf.m[0][2]));
+	float u = 0, v = 0, uf = 0, vf = 0;
+	REQUIRE(cam.GetCameraDistortion(1, 0.3f, 0.7f, &u, &v));
+	REQUIRE(full.GetCameraDistortion(1, 0.3f, 0.7f, &uf, &vf));
+	CHECK(u == Approx(uf));
+	CHECK(v == Approx(vf));
+
+	// A frame through the published path at half size.
+	std::vector<std::vector<uint8_t>> buffers(count, std::vector<uint8_t>(bytes));
+	std::vector<void *> ptrs;
+	for (auto &b : buffers) {
+		ptrs.push_back(b.data());
+	}
+	REQUIRE(c->SetCameraFrameBuffering(count, ptrs.data(), bytes));
+	REQUIRE(c->StartVideoStream());
+	REQUIRE(backend.fn);
+	backend.fn(src.data(), src.size(), ovrn::now_ns());
+	for (int n = 0; n < 200 && cam.frames() < 1; n++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	REQUIRE(cam.frames() == 1);
+	const vr::CameraVideoStreamFrame_t *f = c->GetVideoStreamFrame();
+	REQUIRE(f != nullptr);
+	CHECK(f->m_nWidth == W);
+	CHECK(f->m_nHeight == H / 2);
+	CHECK(memcmp(reinterpret_cast<const uint8_t *>(f->m_pImageData), nv12.data(), bytes) == 0);
+	c->StopVideoStream();
+}
+
 TEST_CASE("ovrn camera: the lens model fit recovers a fisheye model's coefficients")
 {
 	struct t_camera_calibration cc = {};

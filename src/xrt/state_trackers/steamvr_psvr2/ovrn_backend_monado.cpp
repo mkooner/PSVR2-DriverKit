@@ -1030,6 +1030,18 @@ public:
 			info.cam_in_head[c] = toPose(poses[c]);
 			info.fit_rms_px[c] = fit_ftheta(cams[c], info.ftheta[c]);
 		}
+		// Half-size picture for slower PCs: OVRN_CAMERA_HALF (DriverKit's launch), else DriverKit's settings file.
+		const char *half = getenv("OVRN_CAMERA_HALF");
+		if (half != nullptr && *half != '\0') {
+			info.half = strcmp(half, "1") == 0;
+			info.half_source = "OVRN_CAMERA_HALF";
+		} else {
+			const std::string s = driverkitSetting("CAMERA_HALF");
+			if (!s.empty()) {
+				info.half = s == "1";
+				info.half_source = "DriverKit's setting";
+			}
+		}
 		*out = info;
 		return info.width > 0 && info.height > 0;
 	}
