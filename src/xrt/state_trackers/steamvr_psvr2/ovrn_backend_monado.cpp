@@ -60,6 +60,8 @@
 // per eye, the user's choice 2026-11-18; 170 = Sony's 3400x3468 was tried at 16:43 with Sony's display properties
 // and looked twice as bad; 140 otherwise). psvr2-test/launch-steamvr.sh SCALE=<%> overrides it.
 DEBUG_GET_ONCE_NUM_OPTION(ovrn_scale_percentage, "XRT_COMPOSITOR_SCALE_PERCENTAGE", 0)
+//! Monado's switch for its simulated system: the only case the backend takes a headset that isn't a PS VR2.
+DEBUG_GET_ONCE_BOOL_OPTION(ovrn_simulated_enable, "SIMULATED_ENABLE", false)
 // Seconds from vsync to photons / from photons to vblank (-1: 0.00136 / 0.0103 for the PS VR2, the values Sony's
 // driver logs: "VsyncToPhotons: 0.001360, PhotonsToVblank: 0.010300", vrserver.txt 2026-11-17).
 DEBUG_GET_ONCE_FLOAT_OPTION(ovrn_vsync_to_photons_s, "OVRN_VSYNC_TO_PHOTONS_S", -1.0f)
@@ -254,6 +256,20 @@ public:
 		xrt_result_t xret = xrt_instance_create_system(m_xinst, &m_xsys, &m_xsysd, &m_xso, NULL);
 		if (xret < 0 || m_xsysd == NULL || m_xsysd->static_roles.head == NULL || m_xsysd->static_roles.head->hmd == NULL) {
 			*why = "no headset found by Monado";
+			stop();
+			return false;
+		}
+		/*
+		 * Only the PS VR2. With none found, Monado's general fallback (its auto probers, the simulated headset last)
+		 * offers a "Simulated HMD", and SteamVR then ran games on that fake 1280x720 headset (2026-11-22 11:34: a
+		 * game's Proton, its OpenXR "wineopenxr test instance", started SteamVR while the headset wasn't found).
+		 * Failing here makes SteamVR report no headset instead. SIMULATED_ENABLE, Monado's own switch for its
+		 * simulated system (set by the driver harness), still allows the simulated headset.
+		 */
+		if (m_xsysd->static_roles.head->name != XRT_DEVICE_PSVR2 && !debug_get_bool_option_ovrn_simulated_enable()) {
+			ovrd_log("ovrn: no PS VR2 headset found (Monado offered \"%s\" instead): reporting no headset to SteamVR\n",
+			         m_xsysd->static_roles.head->str);
+			*why = "no PS VR2 headset found";
 			stop();
 			return false;
 		}
