@@ -417,13 +417,32 @@ struct t_led_sync_refinement
 		/*!
 		 * Bluetooth clock follow (see COUNT_HOLD_BT_*): the driver's host -> controller clock offset, smoothed;
 		 * its value and the held centre at the last probe that found the blink centred; and a move made from it
-		 * that the next probe has to confirm (the centre before it, to go back to).
+		 * that the next probe has to confirm (the centre before it, to go back to). bt_trim_ref_ns: the drift trim
+		 * applied up to the reference (hold_trim_integral_ns then), which already moved the LEDs with the clock.
 		 */
 		bool bt_valid, bt_have_ref, bt_jump_pending;
 		double bt_smooth_ns;
 		double bt_ref_ns;
+		double bt_trim_ref_ns;
 		time_duration_ns bt_centre_ref_ns, bt_pre_jump_centre_ns;
+		//! The offset and the trim when the pending move was made: the reference once the next probe confirms it.
+		double bt_jump_smooth_ns, bt_jump_trim_ns;
 		uint32_t bt_jumps, bt_jumps_undone;
+		//! A drift estimate over COUNT_HOLD_DRIFT_MAX and when it was made, which a later one has to agree with.
+		double hold_fast_rate;
+		timepoint_ns hold_fast_rate_ns;
+		bool hold_have_fast_rate;
+		/*!
+		 * High-drift detection (see COUNT_HOLD_FAST_*): all centre moves over the hold (steps, Bluetooth moves,
+		 * undos), the current 10 s stretch's start and its value then, the last stretch's rate, and whether high
+		 * drift was seen (kept for the session: the clock causing it doesn't change with a recalibration).
+		 */
+		double hold_moves_sum_ns;
+		timepoint_ns hold_seg_start_ns;
+		double hold_seg_start_phase_ns;
+		double hold_seg_prev_rate;
+		bool hold_have_seg_rate;
+		bool high_drift;
 		//! Nudge check: brightness of this device's matched LEDs from the tracker, per side.
 		bool hold_measuring;
 		uint64_t hold_meas_from_seq;
