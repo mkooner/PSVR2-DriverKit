@@ -181,6 +181,9 @@ struct CameraInfo
 	double ftheta[2][8] = {};
 	Pose cam_in_head[2];
 	float fit_rms_px[2] = {}; //!< how well the fitted lens model matches the camera's own, pixels
+	//! Send the picture at half size (OVRN_CAMERA_HALF=1, or CAMERA_HALF=1 in DriverKit's settings file).
+	bool half = false;
+	std::string half_source = "default";
 };
 
 //! One image pair (two BC4 images, 1024 stride x 1016 rows, back to back) and its exposure time (now_ns() clock).

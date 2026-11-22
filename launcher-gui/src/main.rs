@@ -146,6 +146,8 @@ fn default_settings() -> Vec<Setting> {
                       "predicted", "", false).steamvr(),
         value("OVRN_LEGACY_CONTROLLER", "Legacy games' controllers",
               "What games without SteamVR Input (legacy games such as Skyrim VR) are shown: touch (the default, Oculus Touch, as Sony's driver), vive (Vive controllers), knuckles (Index controllers) or native (the PS VR2 Sense as it is). The headset always stays the PS VR2. A game's own binding in SteamVR's controller settings still wins.", "touch", true).steamvr(),
+        toggle("OVRN_CAMERA_HALF", "Lighter camera picture (slower PCs)",
+               "Off (default): the see-through and Room View picture at the cameras' full size (2032x1016). On: half size (1016x508), a quarter of the data SteamVR copies to the graphics card 60 times a second; the same views, less sharp. For PCs where the see-through view stutters.", false).steamvr(),
         value("OVRN_SONY_PROPS", "Sony's extra display properties",
               "Which of Sony's headset properties to report: all (the plugin's default, as Sony's driver and PSVR2Toolkit), none, or a list of throttle, framerate, syslayer, texindex, supersample, dsc, edid, display, mask.", "all", false).steamvr(),
         toggle("RECORD_DATASET", "Record controller dataset", "Record LED tracking data (logs/).", false).steamvr(),
@@ -358,9 +360,10 @@ fn write_driver_settings(cfg: &Config) -> Result<(), String> {
             .unwrap_or_default()
     };
     let text = format!(
-        "# Written by PSVR2-DriverKit (Settings tab); the SteamVR driver reads it when SteamVR starts.\nHAND_TRACKING={}\nLEGACY_CONTROLLER={}\n",
+        "# Written by PSVR2-DriverKit (Settings tab); the SteamVR driver reads it when SteamVR starts.\nHAND_TRACKING={}\nLEGACY_CONTROLLER={}\nCAMERA_HALF={}\n",
         if on("PSVR2_HAND_TRACKING") { 1 } else { 0 },
-        value_of("OVRN_LEGACY_CONTROLLER")
+        value_of("OVRN_LEGACY_CONTROLLER"),
+        if on("OVRN_CAMERA_HALF") { 1 } else { 0 }
     );
     let path = config_dir().join("settings.conf");
     if fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
