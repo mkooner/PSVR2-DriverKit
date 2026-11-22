@@ -976,8 +976,14 @@ main(int argc, char **argv)
 			      "SteamVR's Facet renderer is off before the compositor starts (noted in our section)");
 		}
 		if (room) {
+#ifdef OVRN_HARNESS_HAND_TRACKING
 			check(g_logText.find("hand tracking (experimental) on: the cameras track bare hands") != std::string::npos,
 			      "DriverKit's settings file reaches the driver however SteamVR starts (hand tracking on)");
+#else
+			check(g_logText.find("hand tracking (experimental) is on in DriverKit, but this driver was built without") !=
+			          std::string::npos,
+			      "DriverKit's setting reaches the driver; a build without hand tracking says it has none");
+#endif
 		} else if (monado && getenv("XDG_CONFIG_HOME") == nullptr &&
 		           access((std::string(getenv("HOME") ? getenv("HOME") : "") + "/.config/PSVR2-DriverKit/settings.conf").c_str(), F_OK) != 0) {
 			// (only without a real DriverKit settings file in the user's config)

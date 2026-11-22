@@ -246,9 +246,18 @@ public:
 #ifdef XRT_BUILD_DRIVER_PSVR2
 		psvr2_hand_tracking_want(m_handTrackingWanted);
 #endif
+#ifdef XRT_BUILD_DRIVER_HANDTRACKING
 		ovrd_log("ovrn: hand tracking (experimental) %s (DriverKit's setting, %s)\n",
 		         m_handTrackingWanted ? "on: the cameras track bare hands while a controller is off" : "off",
 		         driverkitSettingsPath().c_str());
+#else
+		// A DriverKit build without OpenCV and onnxruntime has no Mercury: say so instead of "on".
+		ovrd_log("ovrn: hand tracking (experimental) %s (DriverKit's setting, %s)\n",
+		         m_handTrackingWanted ? "is on in DriverKit, but this driver was built without hand tracking (Compile "
+		                                "Driver with Compile hand tracking ticked)"
+		                              : "off (and not in this build)",
+		         driverkitSettingsPath().c_str());
+#endif
 		if (xrt_instance_create(NULL, &m_xinst) != XRT_SUCCESS) {
 			*why = "xrt_instance_create failed";
 			return false;

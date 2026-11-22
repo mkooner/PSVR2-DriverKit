@@ -13,6 +13,9 @@ inside it, couldn't connect.
 
 Usage: bundle_libs.py <plugin.so> <steam runtime files dir> [--dry-run]
   The runtime dir is e.g. ~/.local/share/Steam/steamapps/common/SteamLinuxRuntime_sniper/sniper_platform_*/files.
+Bundled libraries with a search path of their own (DT_RUNPATH, e.g. Arch's OpenCV: /usr/lib) would look for their
+dependencies there and not next to the plugin, so inside the container they'd miss them (the hand tracking build,
+2026-11-22: 35 of OpenCV's libraries, Qt, GStreamer and FFmpeg among them): their copies get $ORIGIN instead (patchelf).
 Never bundled: the C runtime (glibc, libstdc++, libgcc_s): pressure-vessel uses the newer of the host's and the
 runtime's, and a second copy would clash with the one SteamVR itself loads.
 """
@@ -59,6 +62,15 @@ def dependencies(path):
     return deps
 
 
+def search_path(path):
+    """The library's DT_RUNPATH or DT_RPATH ("" if it has none)."""
+    out = subprocess.run(["readelf", "-d", path], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        if "(RUNPATH)" in line or "(RPATH)" in line:
+            return line.split("[", 1)[1].rsplit("]", 1)[0] if "[" in line else ""
+    return ""
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
@@ -79,7 +91,7 @@ def main():
         return 1
     out_dir = os.path.dirname(os.path.abspath(plugin))
     deps = dependencies(plugin)
-    bundled, skipped = [], []
+    bundled, skipped, repathed = [], [], []
     for name, src in sorted(deps.items()):
         if any(name.startswith(n) for n in NEVER):
             skipped.append(name)
@@ -87,14 +99,28 @@ def main():
         if name in have:
             continue
         bundled.append(name)
+    for name in bundled:
+        src = deps[name]
         if not dry:
             dst = os.path.join(out_dir, name)
             if os.path.abspath(src) != os.path.abspath(dst):
                 shutil.copy2(os.path.realpath(src), dst)
+            # Only when it needs other bundled libraries (libjpeg's /usr/lib in the normal build needs none: left).
+            rp = search_path(dst)
+            needs_bundled = any(d in bundled for d in dependencies(src) if d != name)
+            if rp not in ("", "$ORIGIN") and needs_bundled:
+                if shutil.which("patchelf") is None:
+                    print(f"{name} looks for its libraries in {rp}, not next to the plugin, and patchelf isn't installed "
+                          "to change that (DriverKit: Install dependencies)")
+                    return 1
+                subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", dst], check=True)
+                repathed.append(name)
     print(f"{len(deps)} dependencies: {len(bundled)} bundled into {out_dir}, {len(deps) - len(bundled) - len(skipped)} "
           f"from Steam's runtime, {len(skipped)} from the system (C runtime, graphics, udev/dbus)")
     if bundled:
         print("bundled: " + " ".join(bundled))
+    if repathed:
+        print(f"{len(repathed)} of them now look next to the plugin ($ORIGIN): " + " ".join(repathed))
     return 0
 
 
