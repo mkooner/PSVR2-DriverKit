@@ -8,8 +8,7 @@
 #
 #   ./install-deps.sh [--hand-tracking] [--list] [--dry-run]
 #
-#   --hand-tracking  also what hand tracking needs: OpenCV and onnxruntime (Monado's Mercury hand tracker), and
-#                    patchelf (so the libraries bundled with the driver find each other inside Steam's container)
+#   --hand-tracking  also what hand tracking needs: OpenCV and onnxruntime (Monado's Mercury hand tracker)
 #   --list           print the distribution found and the command, install nothing
 #   --dry-run        the same, after checking which packages are missing (no root needed)
 #
@@ -23,7 +22,7 @@ for a in "$@"; do
 	--hand-tracking) HT=1 ;;
 	--list) LIST=1 ;;
 	--dry-run) DRY=1 ;;
-	-h | --help) sed -n '4,17p' "$0"; exit 0 ;;
+	-h | --help) sed -n '4,16p' "$0"; exit 0 ;;
 	*) echo "unknown option $a"; exit 2 ;;
 	esac
 done
@@ -37,19 +36,19 @@ fi
 # The compilers, CMake/Ninja, the Monado build's libraries and Rust (DriverKit).
 ARCH_BASE=(base-devel git cmake ninja python pkgconf eigen vulkan-headers vulkan-icd-loader glslang shaderc libusb
 	systemd-libs libjpeg-turbo ceres-solver suitesparse google-glog gflags jsoncpp libx11 libxcb libxrandr wayland
-	wayland-protocols libdrm zlib rust)
+	wayland-protocols libdrm zlib patchelf rust)
 DEB_BASE=(build-essential git cmake ninja-build python3 pkg-config libeigen3-dev libvulkan-dev glslang-tools glslc
 	libusb-1.0-0-dev libudev-dev libjpeg-dev libceres-dev libsuitesparse-dev libgoogle-glog-dev libgflags-dev
 	libjsoncpp-dev libx11-dev libx11-xcb-dev libxcb-randr0-dev libxrandr-dev libwayland-dev wayland-protocols libdrm-dev
-	zlib1g-dev cargo)
+	zlib1g-dev patchelf cargo)
 FED_BASE=(gcc-c++ git cmake ninja-build python3 pkgconf-pkg-config eigen3-devel vulkan-loader-devel vulkan-headers
 	glslang glslc libusb1-devel systemd-devel libjpeg-turbo-devel ceres-solver-devel suitesparse-devel glog-devel
 	gflags-devel jsoncpp-devel libX11-devel libxcb-devel libXrandr-devel wayland-devel wayland-protocols-devel
-	libdrm-devel zlib-devel cargo)
+	libdrm-devel zlib-devel patchelf cargo)
 # Hand tracking. onnxruntime's development files: Arch extra, Debian 13 / Ubuntu 25.04 and newer, Fedora 43 and newer.
-ARCH_HT=(opencv onnxruntime-cpu patchelf)
-DEB_HT=(libopencv-dev libonnxruntime-dev patchelf)
-FED_HT=(opencv-devel onnxruntime-devel patchelf)
+ARCH_HT=(opencv onnxruntime-cpu)
+DEB_HT=(libopencv-dev libonnxruntime-dev)
+FED_HT=(opencv-devel onnxruntime-devel)
 
 if command -v pacman >/dev/null; then
 	FAMILY="Arch based"

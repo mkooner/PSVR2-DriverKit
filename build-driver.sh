@@ -7,7 +7,7 @@
 #
 #   ./build-driver.sh [--dest <install folder>] [--hand-tracking]
 #
-#   --hand-tracking  build with Monado's Mercury hand tracking (experimental): needs OpenCV, onnxruntime and patchelf
+#   --hand-tracking  build with Monado's Mercury hand tracking (experimental): needs OpenCV and onnxruntime
 #                    (install-deps.sh --hand-tracking), and downloads its two models into
 #                    ~/.local/share/monado/hand-tracking-models
 #
@@ -55,7 +55,7 @@ echo "  install: $DEST"
 echo "  hand tracking: $([ "$HAND_TRACKING" = 1 ] && echo "yes (experimental)" || echo no)"
 
 TOOLS=(git cmake ninja python3 g++ cargo)
-[ "$HAND_TRACKING" = 1 ] && TOOLS+=(curl sha256sum patchelf)
+[ "$HAND_TRACKING" = 1 ] && TOOLS+=(curl sha256sum)
 for tool in "${TOOLS[@]}"; do
 	command -v "$tool" >/dev/null || { echo "ERROR: $tool not installed: press Install dependencies on DriverKit's Compile Driver tab"; exit 1; }
 done

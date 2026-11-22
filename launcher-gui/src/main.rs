@@ -1396,11 +1396,11 @@ fn undo_psvr2_settings(file: &Path) -> Result<String, String> {
 /// The packages build-driver.sh needs (compilers, CMake/Ninja, the Monado build's libraries, Rust for DriverKit).
 const PACKAGES: [(&str, &str); 3] = [
     ("Arch / CachyOS / Manjaro",
-     "sudo pacman -S --needed base-devel git cmake ninja python pkgconf eigen vulkan-headers vulkan-icd-loader glslang shaderc libusb systemd-libs libjpeg-turbo ceres-solver suitesparse google-glog gflags jsoncpp libx11 libxcb libxrandr wayland wayland-protocols libdrm zlib rust"),
+     "sudo pacman -S --needed base-devel git cmake ninja python pkgconf eigen vulkan-headers vulkan-icd-loader glslang shaderc libusb systemd-libs libjpeg-turbo ceres-solver suitesparse google-glog gflags jsoncpp libx11 libxcb libxrandr wayland wayland-protocols libdrm zlib patchelf rust"),
     ("Debian / Ubuntu",
-     "sudo apt install build-essential git cmake ninja-build python3 pkg-config libeigen3-dev libvulkan-dev glslang-tools glslc libusb-1.0-0-dev libudev-dev libjpeg-dev libceres-dev libsuitesparse-dev libgoogle-glog-dev libgflags-dev libjsoncpp-dev libx11-dev libx11-xcb-dev libxcb-randr0-dev libxrandr-dev libwayland-dev wayland-protocols libdrm-dev zlib1g-dev cargo"),
+     "sudo apt install build-essential git cmake ninja-build python3 pkg-config libeigen3-dev libvulkan-dev glslang-tools glslc libusb-1.0-0-dev libudev-dev libjpeg-dev libceres-dev libsuitesparse-dev libgoogle-glog-dev libgflags-dev libjsoncpp-dev libx11-dev libx11-xcb-dev libxcb-randr0-dev libxrandr-dev libwayland-dev wayland-protocols libdrm-dev zlib1g-dev patchelf cargo"),
     ("Fedora",
-     "sudo dnf install gcc-c++ git cmake ninja-build python3 pkgconf-pkg-config eigen3-devel vulkan-loader-devel vulkan-headers glslang glslc libusb1-devel systemd-devel libjpeg-turbo-devel ceres-solver-devel suitesparse-devel glog-devel gflags-devel jsoncpp-devel libX11-devel libxcb-devel libXrandr-devel wayland-devel wayland-protocols-devel libdrm-devel zlib-devel cargo"),
+     "sudo dnf install gcc-c++ git cmake ninja-build python3 pkgconf-pkg-config eigen3-devel vulkan-loader-devel vulkan-headers glslang glslc libusb1-devel systemd-devel libjpeg-turbo-devel ceres-solver-devel suitesparse-devel glog-devel gflags-devel jsoncpp-devel libX11-devel libxcb-devel libXrandr-devel wayland-devel wayland-protocols-devel libdrm-devel zlib-devel patchelf cargo"),
 ];
 
 /// A command or environment line to paste into a terminal, with its Copy button.
@@ -1921,7 +1921,7 @@ impl Launcher {
                 if ui
                     .add_enabled(!running && !deps_running, egui::Button::new("Install dependencies"))
                     .on_hover_text(if self.cfg.compile_hand_tracking {
-                        "Installs the packages compiling needs, with hand tracking's (OpenCV, onnxruntime, patchelf), using your system's package manager (pacman, apt or dnf). Asks for your password."
+                        "Installs the packages compiling needs, with hand tracking's (OpenCV and onnxruntime), using your system's package manager (pacman, apt or dnf). Asks for your password."
                     } else {
                         "Installs the packages compiling needs, using your system's package manager (pacman, apt or dnf). Asks for your password."
                     })
@@ -2107,7 +2107,7 @@ impl Launcher {
         });
 
         theme::section(ui, "Packages needed to compile", |ui| {
-            theme::note(ui, "Install dependencies (above) installs these for you. To do it by hand, copy the line for your distribution into a terminal. With Compile hand tracking, also: Arch: opencv onnxruntime-cpu patchelf; Debian 13 / Ubuntu 25.04 or newer: libopencv-dev libonnxruntime-dev patchelf; Fedora 43 or newer: opencv-devel onnxruntime-devel patchelf.");
+            theme::note(ui, "Install dependencies (above) installs these for you. To do it by hand, copy the line for your distribution into a terminal. With Compile hand tracking, also: Arch: opencv onnxruntime-cpu; Debian 13 / Ubuntu 25.04 or newer: libopencv-dev libonnxruntime-dev; Fedora 43 or newer: opencv-devel onnxruntime-devel.");
             for (distro, cmd) in PACKAGES {
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new(distro).font(theme::bold(14.0)));
