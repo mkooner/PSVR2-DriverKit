@@ -629,6 +629,53 @@ main(int argc, char **argv)
 		return g_fails ? 1 : 0;
 	}
 
+	// --camera-off / --camera-noimages (DriverKit's CAMERA setting, for the Intel Arc compositor crash): off leaves the
+	// user's SteamVR camera settings alone and offers SteamVR no camera; noimages sets SteamVR's camera up as "on" does.
+	if (argc > 1 && (!strcmp(argv[1], "--camera-off") || !strcmp(argv[1], "--camera-noimages"))) {
+		const bool off = !strcmp(argv[1], "--camera-off");
+		setenv("OVRN_CAMERA_MODE", off ? "off" : "noimages", 1);
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			g_ints["camera/roomViewStyle"] = 2;
+			g_bools["camera/enableCamera"] = false;
+		}
+		check(provider->Init(&context) == VRInitError_None, "Init succeeds");
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			if (off) {
+				check(g_ints["camera/roomViewStyle"] == 2 && !g_bools["camera/enableCamera"] &&
+				          !g_ints.count("camera/roomView") && !g_bools.count("driver_monado_psvr2/seeThroughSettingsSet"),
+				      "camera off: the user's SteamVR camera settings left alone");
+			} else {
+				check(g_ints["camera/roomViewStyle"] == 4 && g_bools["camera/enableCamera"],
+				      "camera noimages: SteamVR's camera set up as with on");
+			}
+		}
+		std::vector<Added> added;
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			added = g_added;
+		}
+		for (uint32_t i = 0; i < added.size(); i++) {
+			added[i].driver->Activate(i);
+		}
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_logText.find(off ? "ovrn: headset cameras: off (OVRN_CAMERA_MODE)"
+			                         : "ovrn: headset cameras: noimages (OVRN_CAMERA_MODE)") != std::string::npos,
+			      "camera mode: logged at the headset's Activate");
+		}
+		provider->Cleanup();
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			check(g_ints["camera/roomViewStyle"] == 2 && !g_bools["camera/enableCamera"],
+			      "camera mode: the user's camera settings as they were after Cleanup");
+		}
+		check(dlclose(lib) == 0, "the driver unloads");
+		printf("%s\n", g_fails ? "FAILED" : "all checks passed");
+		return g_fails ? 1 : 0;
+	}
+
 	// --see-through: Sony-style see-through. The user's camera settings (style 2 "Colored Ghosts", camera on, no
 	// roomView key) are saved and the opaque view set for the session; SteamVR's Room View shown / hidden events turn
 	// the game pause and reduced rendering on / off; Cleanup puts the user's settings back exactly.

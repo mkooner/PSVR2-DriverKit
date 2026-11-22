@@ -9,6 +9,7 @@
 
 #include "xrt/xrt_config_drivers.h"
 #include "ovrn_backend.hpp"
+#include "ovrn_settings.hpp"
 #include "ovrn_bluetooth.hpp"
 
 // The room calibration (ovrn_room*, from the previous plugin, removed 2026-11-18): the saved room and its files stay valid.
@@ -636,19 +637,11 @@ public:
 		return true;
 	}
 
-	/*!
-	 * DriverKit's settings file ($XDG_CONFIG_HOME/PSVR2-DriverKit/settings.conf, KEY=VALUE lines), read by the driver
-	 * itself so a setting applies however SteamVR is started (from Steam too, not only from DriverKit).
-	 */
+	//! DriverKit's settings file (ovrn_settings.hpp).
 	static std::string
 	driverkitSettingsPath()
 	{
-		const char *xdg = getenv("XDG_CONFIG_HOME");
-		const char *home = getenv("HOME");
-		const std::string base = xdg != NULL && *xdg != '\0' ? std::string(xdg)
-		                         : home != NULL           ? std::string(home) + "/.config"
-		                                                  : std::string();
-		return base.empty() ? std::string() : base + "/PSVR2-DriverKit/settings.conf";
+		return driverkit_settings_path();
 	}
 
 	/*!
@@ -684,24 +677,7 @@ public:
 	static std::string
 	driverkitSetting(const char *key)
 	{
-		const std::string path = driverkitSettingsPath();
-		FILE *f = path.empty() ? NULL : fopen(path.c_str(), "r");
-		if (f == NULL) {
-			return {};
-		}
-		std::string value;
-		char line[512];
-		const size_t n = strlen(key);
-		while (fgets(line, sizeof(line), f) != NULL) {
-			if (strncmp(line, key, n) == 0 && line[n] == '=') {
-				value = line + n + 1;
-				while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ')) {
-					value.pop_back();
-				}
-			}
-		}
-		fclose(f);
-		return value;
+		return driverkit_setting(key);
 	}
 
 	/*!

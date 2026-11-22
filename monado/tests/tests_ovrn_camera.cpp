@@ -10,6 +10,7 @@
  */
 
 #include "ovrn_camera.hpp"
+#include "ovrn_settings.hpp"
 #include "ovrn_camera_fit.hpp"
 #include "psvr2/psvr2_cam_mount.h"
 
@@ -420,6 +421,46 @@ TEST_CASE("ovrn camera: streams while SteamVR's frame queue has a reader (Room V
 	CHECK(backend.stops == 1);
 	cam.readerCheck(false, 11 * s);
 	CHECK(backend.stops == 2);
+}
+
+TEST_CASE("ovrn camera: CAMERA=noimages sets the camera up but never sends a picture")
+{
+	FakeBackend backend;
+	ovrn::CameraInfo i = info();
+	i.no_images = true;
+	ovrn::Camera cam(&backend, i);
+	const int64_t s = 1000000000;
+	cam.readerCheck(true, 1 * s); // SteamVR's compositor reads the queue at once
+	cam.readerCheck(true, 2 * s);
+	vr::IVRCameraComponent *c = &cam;
+	CHECK(c->StartVideoStream()); // SteamVR still sees a camera that answers
+	CHECK(backend.starts == 0);   // but the headset's picture is never started
+	cam.readerCheck(false, 5 * s);
+	c->StopVideoStream();
+	CHECK(backend.stops == 0);
+}
+
+TEST_CASE("ovrn camera: the camera mode setting (OVRN_CAMERA_MODE, else DriverKit's CAMERA)")
+{
+	std::string source, invalid;
+	unsetenv("OVRN_CAMERA");
+	setenv("XDG_CONFIG_HOME", "/nonexistent-ovrn-test", 1); // no settings file
+	unsetenv("OVRN_CAMERA_MODE");
+	CHECK(ovrn::camera_mode(&source, &invalid) == ovrn::CameraMode::On);
+	CHECK(source == "default");
+	setenv("OVRN_CAMERA_MODE", "noimages", 1);
+	CHECK(ovrn::camera_mode(&source, &invalid) == ovrn::CameraMode::NoImages);
+	setenv("OVRN_CAMERA_MODE", "off", 1);
+	CHECK(ovrn::camera_mode(&source, &invalid) == ovrn::CameraMode::Off);
+	setenv("OVRN_CAMERA_MODE", "sideways", 1);
+	invalid.clear();
+	CHECK(ovrn::camera_mode(&source, &invalid) == ovrn::CameraMode::On);
+	CHECK(invalid == "sideways");
+	unsetenv("OVRN_CAMERA_MODE");
+	setenv("OVRN_CAMERA", "0", 1); // the older switch
+	CHECK(ovrn::camera_mode(&source, &invalid) == ovrn::CameraMode::Off);
+	unsetenv("OVRN_CAMERA");
+	unsetenv("XDG_CONFIG_HOME");
 }
 
 TEST_CASE("ovrn camera: the passthrough cameras' true placement from a calibration block (OVRN_CAMERA_TEST_BLOCK)")

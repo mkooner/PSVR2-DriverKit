@@ -536,6 +536,13 @@ private:
 			if (m_running.load()) {
 				return true;
 			}
+			if (m_info.no_images) {
+				if (!m_noImagesLogged) {
+					m_noImagesLogged = true;
+					log("ovrn: passthrough wanted (%s), but no picture is sent (CAMERA=noimages)\n", why);
+				}
+				return true;
+			}
 			log("ovrn: passthrough wanted (%s)\n", why);
 			return start();
 		}
@@ -704,6 +711,7 @@ private:
 
 	Backend *const m_backend;
 	const CameraInfo m_info;
+	bool m_noImagesLogged = false; //!< (m_controlMutex)
 	uint32_t m_w = 0, m_h = 0;
 	uint32_t m_scale = 1; //!< 2 at half size
 	size_t m_frameBytes = 0;
