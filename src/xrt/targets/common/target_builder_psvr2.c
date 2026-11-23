@@ -15,6 +15,7 @@
 
 #include "util/u_debug.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include "util/u_misc.h"
 #include "util/u_logging.h"
@@ -154,6 +155,45 @@ psvr2_open_system_impl(struct xrt_builder *xb,
 	xret = xrt_prober_lock_list(xp, &xpdevs, &xpdev_count);
 	if (xret != XRT_SUCCESS) {
 		goto unlock_and_fail;
+	}
+
+	/*
+	 * Every Sony device the scan found, with its bus: a user's 2026-11-23 runs had both Sense controllers connected
+	 * over Bluetooth, yet none here and no error, so nothing said whether Linux had made an HID device for them.
+	 */
+	{
+		char sony[256] = "";
+		size_t n = 0, count = 0;
+		bool left = false, right = false;
+		for (size_t i = 0; i < xpdev_count; i++) {
+			const struct xrt_prober_device *d = xpdevs[i];
+			if (d == NULL || d->vendor_id != 0x054c) {
+				continue;
+			}
+			count++;
+			left = left || d->product_id == 0x0e45;
+			right = right || d->product_id == 0x0e46;
+			const char *what = d->product_id == 0x0cde   ? "PS VR2 headset"
+			                   : d->product_id == 0x0e45 ? "Sense left"
+			                   : d->product_id == 0x0e46 ? "Sense right"
+			                                             : "other";
+			const char *bus = d->bus == XRT_BUS_TYPE_USB         ? "USB"
+			                  : d->bus == XRT_BUS_TYPE_BLUETOOTH ? "Bluetooth"
+			                                                     : "unknown bus";
+			if (n < sizeof(sony)) {
+				int w = snprintf(sony + n, sizeof(sony) - n, "%s%04x %s (%s)", count > 1 ? ", " : "",
+				                 d->product_id, what, bus);
+				n += w > 0 ? (size_t)w : 0;
+			}
+		}
+		U_LOG_I("Device scan: %zu devices, Sony: %s", xpdev_count, count > 0 ? sony : "none");
+		if (!left || !right) {
+			U_LOG_I("Device scan: no %s%s%s: Linux has no HID device (/dev/hidraw*) for it, so it isn't connected "
+			        "over Bluetooth, or Bluetooth connected it without its input (HID) profile; one connected later is "
+			        "picked up",
+			        !left ? "Sense left (054c:0e45)" : "", !left && !right ? " or " : "",
+			        !right ? "Sense right (054c:0e46)" : "");
+		}
 	}
 
 	struct xrt_device *head_xdev = NULL;
