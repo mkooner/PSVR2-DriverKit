@@ -483,6 +483,9 @@ struct pssense_device
 		//! The vibration the last report carried.
 		uint8_t last_sent_vibration_amplitude;
 		uint8_t last_sent_vibration_mode;
+		//! Since when the reports have carried a vibration (0: none), and whether a long one was logged.
+		timepoint_ns vibration_on_since_ns;
+		bool vibration_long_logged;
 
 		bool send_trigger_feedback;
 		enum pssense_adaptive_trigger_mode trigger_feedback_mode;
@@ -1107,6 +1110,34 @@ pssense_set_output_report_settings_locked(struct pssense_device *pssense,
 		pssense->output.last_sent_vibration_amplitude = pssense->output.vibration_amplitude;
 		pssense->output.last_sent_vibration_mode = pssense->output.vibration_mode;
 		pssense->output.send_vibration = pssense->output.vibration_amplitude > 0;
+
+		/*
+		 * Long vibrations, as the controller got them (a user: "the controllers vibrate constantly", 2026-11-23,
+		 * nothing in the logs to say from where): logged once one has run 5 s without a break and when it
+		 * stops, at info level. Only on reports that carry a vibration: nothing per frame.
+		 */
+		const char *hand = pssense->hand == XRT_HAND_LEFT ? "left" : "right";
+		const uint8_t amp = pssense->output.vibration_amplitude;
+		if (amp > 0 && pssense->output.vibration_on_since_ns == 0) {
+			pssense->output.vibration_on_since_ns = (timepoint_ns)now_ns;
+			pssense->output.vibration_long_logged = false;
+		} else if (amp > 0 && !pssense->output.vibration_long_logged &&
+		           (timepoint_ns)now_ns - pssense->output.vibration_on_since_ns >= 5 * (timepoint_ns)U_TIME_1S_IN_NS) {
+			pssense->output.vibration_long_logged = true;
+			const double left_s = pssense->output.vibration_end_timestamp_ns > now_ns
+			                          ? (double)(pssense->output.vibration_end_timestamp_ns - now_ns) / 1e9
+			                          : 0.0;
+			U_LOG_IFL_I(U_LOGGING_INFO,
+			            "[%s] controller vibrating for 5 s without a break (strength %u/255, mode 0x%02X, the "
+			            "request runs %.1f s more)",
+			            hand, amp, pssense->output.vibration_mode, left_s > 1e6 ? -1.0 : left_s);
+		} else if (amp == 0 && pssense->output.vibration_on_since_ns != 0) {
+			const double on_s = (double)((timepoint_ns)now_ns - pssense->output.vibration_on_since_ns) / 1e9;
+			if (pssense->output.vibration_long_logged) {
+				U_LOG_IFL_I(U_LOGGING_INFO, "[%s] controller vibration stopped after %.1f s", hand, on_s);
+			}
+			pssense->output.vibration_on_since_ns = 0;
+		}
 	}
 
 	if (pssense->output.send_trigger_feedback) {

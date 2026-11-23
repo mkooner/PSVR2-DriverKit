@@ -11,6 +11,7 @@
 #include "ovrn_device.hpp"
 #include "ovrn_hand_skeleton.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -114,7 +115,49 @@ public:
 	void
 	haptic(float duration_s, float frequency_hz, float amplitude)
 	{
+		const int64_t now = now_ns();
+		if (m_hapticRequests == 0) {
+			m_hapticWindowNs = now;
+		}
+		m_hapticRequests++;
+		m_hapticStrong += amplitude > 0.0f ? 1 : 0;
+		m_hapticLongest = std::max(m_hapticLongest, duration_s);
+		m_hapticStrongest = std::max(m_hapticStrongest, amplitude);
+		m_hapticLast[0] = amplitude;
+		m_hapticLast[1] = duration_s;
+		m_hapticLast[2] = frequency_hz;
 		m_backend->haptic(m_hand, duration_s, frequency_hz, amplitude);
+	}
+
+	/*!
+	 * What SteamVR (games, its dashboard) asked this controller to vibrate, summed and logged every 30 s while
+	 * requests come, and at shutdown: the other half of pssense's "vibrating for 5 s without a break" line, so a log
+	 * tells whether a vibration came from a game's requests (a user: "the controllers vibrate constantly",
+	 * 2026-11-23). RunFrame thread; a few additions per request, one comparison per frame.
+	 */
+	void
+	hapticLog(int64_t now, bool at_shutdown = false)
+	{
+		if (m_hapticRequests == 0 || (!at_shutdown && now - m_hapticWindowNs < 30 * kNsPerS)) {
+			if (at_shutdown && m_hapticTotal > 0) {
+				log("ovrn: %s controller vibration requests from SteamVR this session: %llu\n", side(),
+				    (unsigned long long)m_hapticTotal);
+			}
+			return;
+		}
+		log("ovrn: %s controller vibration requests from SteamVR %s: %llu (%llu with strength), longest %.2f s, "
+		    "strongest %.2f; last: strength %.2f for %.2f s at %.0f Hz\n",
+		    side(), at_shutdown ? "since the last summary" : "in the last 30 s", (unsigned long long)m_hapticRequests,
+		    (unsigned long long)m_hapticStrong, m_hapticLongest, m_hapticStrongest, m_hapticLast[0], m_hapticLast[1],
+		    m_hapticLast[2]);
+		m_hapticTotal += m_hapticRequests;
+		m_hapticRequests = m_hapticStrong = 0;
+		m_hapticLongest = m_hapticStrongest = 0;
+		m_hapticWindowNs = now;
+		if (at_shutdown) {
+			log("ovrn: %s controller vibration requests from SteamVR this session: %llu\n", side(),
+			    (unsigned long long)m_hapticTotal);
+		}
 	}
 
 protected:
@@ -191,6 +234,19 @@ protected:
 
 private:
 	static constexpr int64_t kInputReportAfterNs = 120LL * 1000000000LL;
+	static constexpr int64_t kNsPerS = 1000000000LL;
+
+	const char *
+	side() const
+	{
+		return m_hand == Hand::Left ? "left" : "right";
+	}
+
+	// Vibration requests from SteamVR (RunFrame thread, hapticLog).
+	uint64_t m_hapticRequests = 0, m_hapticStrong = 0, m_hapticTotal = 0;
+	float m_hapticLongest = 0, m_hapticStrongest = 0;
+	float m_hapticLast[3] = {}; //!< strength, duration, frequency of the last request
+	int64_t m_hapticWindowNs = 0;
 
 	static const char *
 	legacyDescription(const std::string &mode)

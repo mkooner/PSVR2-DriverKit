@@ -98,6 +98,7 @@ HmdMatrix34_t g_eyeMatrix[2] = {};
 const char *g_dumpPath = nullptr; //!< --real --dump <file>: the display as the driver describes it (vrdisplaydump format)
 std::map<uint64_t, std::map<int, std::vector<uint8_t>>> g_props; //!< container -> property -> bytes
 
+bool g_haptic_sent = false; //!< a haptic event went to the driver (the vibration summary is then checked)
 std::string g_logText; //!< everything the driver logged
 
 struct FakeLog : IVRDriverLog
@@ -1324,6 +1325,7 @@ main(int argc, char **argv)
 			{
 				std::lock_guard<std::mutex> l(g_mutex);
 				check(g_events.empty(), "haptic events are taken from SteamVR's queue");
+				g_haptic_sent = true;
 			}
 		}
 		sleep_ms(real ? 3000 : 1000);
@@ -1440,6 +1442,16 @@ main(int argc, char **argv)
 			      "Cleanup takes the async reprojection setting out again (other drivers keep SteamVR's default)");
 			check(g_bools["steamvr/useFacetRenderer"] && !g_bools.count("driver_monado_psvr2/facetRendererTurnedOffByDriver"),
 			      "Cleanup puts the user's Facet renderer setting back on");
+		}
+		{
+			std::lock_guard<std::mutex> l(g_mutex);
+			if (g_haptic_sent) {
+				check(g_logText.find("ovrn: right controller vibration requests from SteamVR since the last summary: 1 "
+				                     "(1 with strength), longest 0.10 s, strongest 0.70") != std::string::npos &&
+				          g_logText.find("ovrn: right controller vibration requests from SteamVR this session: 1") !=
+				              std::string::npos,
+				      "the vibration requests SteamVR sent are summed up in the log at shutdown");
+			}
 		}
 		const size_t total = pose_count(0) + pose_count(1) + pose_count(2);
 		sleep_ms(100);

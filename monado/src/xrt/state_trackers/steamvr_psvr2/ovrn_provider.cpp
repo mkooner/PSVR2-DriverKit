@@ -86,6 +86,9 @@ public:
 		}
 		m_live[0] = m_live[1] = nullptr;
 		m_liveHands[0] = m_liveHands[1] = nullptr;
+		for (auto &c : m_controllers) {
+			c->hapticLog(now_ns(), true); // what's left of the vibration summary
+		}
 		m_controllers.clear();
 		m_hands.clear();
 		m_hmd.reset();
@@ -167,6 +170,9 @@ public:
 					c->haptic(h.fDurationSeconds, h.fFrequency, h.fAmplitude);
 				}
 			}
+		}
+		for (auto &c : m_controllers) {
+			c->hapticLog(now_ns());
 		}
 	}
 
