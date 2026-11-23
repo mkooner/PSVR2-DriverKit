@@ -54,6 +54,15 @@ public:
 	static constexpr uint32_t kStride = 1024; //!< BC4 rows are 1024 pixels wide; the image is the left 1016
 	static constexpr float kZoom = 3.25f;     //!< undistorted view: focal length / kZoom (PSVR2Toolkit's value)
 	static constexpr double kRate = 59.94;    //!< mode 0x10 image pairs per second (the headset's camera rate)
+	/*!
+	 * Pictures per second while SteamVR's Room View isn't shown (every 4th pair). SteamVR's compositor copies every
+	 * picture it gets to the GPU through its Vulkan transfer ring buffer, shown or not: at the full rate and size
+	 * (3.1 MB, 60 a second) that buffer wrapped every 1.43 s with Room View never opened, and when room setup's own
+	 * uploads came on top it overflowed and the compositor aborted ("Vulkan transfer ring buffer overflow", -203: an
+	 * RX 7600, 2026-11-23, and a user on 2026-11-21). The camera near the play-area walls still gets a picture, a
+	 * quarter as often; Room View gets every one.
+	 */
+	static constexpr double kHiddenRate = 15.0;
 
 	Camera(Backend *backend, const CameraInfo &info) : m_backend(backend), m_info(info)
 	{
@@ -577,7 +586,9 @@ private:
 		m_worker = std::thread(&Camera::workerLoop, this);
 		const bool ok = m_backend->cameraStart(
 		    [this](const uint8_t *pair, size_t size, int64_t exposure_ns) { onImage(pair, size, exposure_ns); });
-		log("ovrn: passthrough %s\n", ok ? "on (camera images streaming)" : "can't start: the backend has no cameras");
+		const char *on = m_roomViewShown.load() ? "on (camera images streaming, full rate: Room View shown)"
+		                                        : "on (camera images streaming, 15 a second until Room View is shown)";
+		log("ovrn: passthrough %s\n", ok ? on : "can't start: the backend has no cameras");
 		if (!ok) {
 			stop();
 		}
@@ -601,6 +612,43 @@ private:
 		log("ovrn: passthrough off (%llu frames)\n", (unsigned long long)m_sequence.load());
 	}
 
+public:
+	//! SteamVR's Room View shown or hidden (RunFrame thread, from VREvent_RoomViewShown / Hidden).
+	void
+	setRoomViewShown(bool on)
+	{
+		if (m_roomViewShown.exchange(on) != on) {
+			log("ovrn: camera picture %s\n", on ? "at the full rate (Room View shown)"
+			                                    : "at 15 a second (Room View hidden)");
+		}
+	}
+
+	/*!
+	 * Whether the pair exposed at @p exposure_ns goes to SteamVR (worker thread; public for the tests): every one while
+	 * Room View is shown, else one per 1/kHiddenRate s (half a frame of slack, so every 4th of the 59.94 Hz pairs).
+	 */
+	bool
+	deliveryCheck(int64_t exposure_ns)
+	{
+		if (!m_roomViewShown.load()) {
+			const int64_t min_ns = (int64_t)(1e9 / kHiddenRate - 0.5e9 / kRate);
+			const int64_t since = exposure_ns - m_lastDeliveredNs;
+			if (m_lastDeliveredNs != 0 && since >= 0 && since < min_ns) {
+				return false;
+			}
+		}
+		m_lastDeliveredNs = exposure_ns;
+		return true;
+	}
+
+	//! The rate pictures reach SteamVR at now.
+	double
+	deliveryRate() const
+	{
+		return m_roomViewShown.load() ? kRate : kRate / std::round(kRate / kHiddenRate);
+	}
+
+private:
 	//! USB thread: keep the newest pair for the worker (a pair still waiting is replaced, never queued up).
 	void
 	onImage(const uint8_t *pair, size_t size, int64_t exposure_ns)
@@ -632,7 +680,9 @@ private:
 				exposure = m_inExposureNs;
 				m_haveIn = false;
 			}
-			deliver(pair.data(), exposure);
+			if (deliveryCheck(exposure)) {
+				deliver(pair.data(), exposure);
+			}
 		}
 	}
 
@@ -640,6 +690,7 @@ private:
 	deliver(const uint8_t *pair, int64_t exposure_ns)
 	{
 		const uint64_t seq = m_sequence.load();
+		const double rate = deliveryRate();
 		/*
 		 * Decoded once per frame: into SteamVR's internal frame queue's block when offered, and that copied into the
 		 * published path's buffer (decoding both took 2 x 2.15 ms per frame, 26% of a core at 60 Hz; once plus the
@@ -658,8 +709,8 @@ private:
 				steamvr::set_path(m_paths, block, "/frame_sequence", (uint64_t)seq);
 				steamvr::set_path(m_paths, block, "/frame_size", (int32_t)m_frameBytes);
 				steamvr::set_path(m_paths, block, "/frame_time_monotonic", (double)(exposure_ns * 1e-9));
-				steamvr::set_path(m_paths, block, "/delivery_rate", kRate);
-				steamvr::set_path(m_paths, block, "/elapsed_time", 1.0 / kRate);
+				steamvr::set_path(m_paths, block, "/delivery_rate", rate);
+				steamvr::set_path(m_paths, block, "/elapsed_time", 1.0 / rate);
 			} else {
 				block = vr::k_ulInvalidPropertyContainer;
 			}
@@ -693,7 +744,7 @@ private:
 			m_frame.m_nBufferIndex = index;
 			m_frame.m_nBufferCount = count;
 			m_frame.m_flFrameElapsedTime = (exposure_ns - m_startNs) * 1e-9;
-			m_frame.m_flFrameDeliveryRate = kRate;
+			m_frame.m_flFrameDeliveryRate = (float)rate;
 			m_frame.m_flFrameCaptureTime_ServerRelative = (exposure_ns - now_ns()) * 1e-9;
 			m_frame.m_nFrameCaptureTicks_ServerAbsolute = (uint64_t)exposure_ns;
 			m_frame.m_pImageData = (uint64_t)(uintptr_t)target;
@@ -737,6 +788,8 @@ private:
 	int64_t m_startNs = 0;
 	std::thread m_worker;
 	std::atomic<uint64_t> m_sequence{0};
+	std::atomic<bool> m_roomViewShown{false};
+	int64_t m_lastDeliveredNs = 0; //!< (worker thread) exposure of the last pair sent to SteamVR
 
 	std::mutex m_inMutex; //!< the pair waiting for the worker
 	std::condition_variable m_cv;
