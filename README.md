@@ -76,7 +76,10 @@ runs everything.
    cd PSVR2-DriverKit && ./install-deps.sh
    ```
    `install-deps.sh` finds your package manager (Arch based: pacman, Debian based: apt, Fedora based: dnf) and asks for
-   your password. Add `--hand-tracking` for the experimental hand tracking's packages too.
+   your password. Add `--hand-tracking` for the experimental hand tracking's packages too. It also installs Monado's
+   [xr-hardware](https://gitlab.freedesktop.org/monado/utilities/xr-hardware) udev rules
+   (`/etc/udev/rules.d/70-xrhardware.rules`) if none cover the PS VR2 and the Sense controllers yet: without them
+   only root can open the controllers, and they aren't found.
 2. **Build the DriverKit app once from source:**
    ```
    cd launcher-gui && cargo build --release

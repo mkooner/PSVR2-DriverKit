@@ -157,6 +157,22 @@ if command -v bluetoothctl >/dev/null; then
 else
 	echo "  [??] bluetoothctl not found: can't check the Sense controllers' Bluetooth connection"
 fi
+# udev rules: without them only root can open the headset and the controllers, and Monado finds no controllers without
+# saying why (a user's 2026-11-23 PC). install-deps.sh installs Monado's xr-hardware rules when none cover them.
+rules=""
+for f in /etc/udev/rules.d/*.rules /run/udev/rules.d/*.rules /usr/lib/udev/rules.d/*.rules /lib/udev/rules.d/*.rules; do
+	[ -r "$f" ] || continue
+	if grep -qi '054c' "$f" && grep -qi '0cde' "$f" && grep -qi '0e45' "$f" && grep -qi '0e46' "$f"; then
+		rules="$f"
+		break
+	fi
+done
+if [ -n "$rules" ]; then
+	echo "  [ok] udev rules for the PS VR2 and Sense controllers: $rules"
+else
+	echo "  [!!] no udev rules for the PS VR2 and Sense controllers: the controllers won't be found. Run DriverKit's"
+	echo "       Install dependencies (Compile Driver tab), or ./install-deps.sh, then turn the controllers off and on"
+fi
 if [ -f "$BACKUP" ]; then
 	echo "  [!!] a backup from a previous run exists; restoring it before continuing"
 	restore_config

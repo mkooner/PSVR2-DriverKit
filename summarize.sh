@@ -83,6 +83,8 @@ grep -E "Pose stats:" "$LOG" | tail -4 | sed -E 's/.*Pose stats: //' | cut -c1-2
 
 echo
 echo "== Controllers (thread health, LED sync progress)"
+# What Monado's device scan found at the start (Sony devices and their bus), and which Sense controller was missing.
+grep -E "Device scan: " "$LOG" | sort -u | sed -E 's/.*Device scan: /  scan: /' | cut -c1-240
 for pat in "Skipping .* Bluetooth simple report" "Failed to send output report" "Output reports recovered" "Output reports failed .* stopping" "trying offset" "Device has been seen" "Accepting gray code" "Gray code jump of .* sent" "Gray code jump applied" "Entering STABLE" "Found pose for device" "holding position" "releasing held position" "using the optical pose" "agrees with the optical fix again" "Rejecting pose for device.*up direction" "Rejecting pose for device.*rotated" "taking the new one as the reference" "skipping confirmation" "LED clock map latched"; do
 	printf '  %-40s %s\n' "$pat" "$(grep -c -E "$pat" "$LOG" 2>/dev/null || true)"
 done
