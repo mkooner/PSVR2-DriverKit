@@ -1758,14 +1758,16 @@ psvr2_usb_open(struct psvr2_hmd *hmd, struct xrt_prober_device *xpdev)
 		int altmode = interface_list[i].altmode;
 		const char *name = interface_list[i].name;
 
+		// With libusb's reason: BUSY is another program holding the headset, ACCESS the udev rule, PIPE / IO /
+		// TIMEOUT / NO_DEVICE the headset or its USB link (a user's 2026-11-23 starts failed here until it opened).
 		res = libusb_claim_interface(hmd->dev, intf_no);
 		if (res < 0) {
-			PSVR2_ERROR(hmd, "Failed to claim USB %s interface", name);
+			PSVR2_ERROR(hmd, "Failed to claim USB %s interface: %s", name, libusb_error_name(res));
 			return false;
 		}
 		res = libusb_set_interface_alt_setting(hmd->dev, intf_no, altmode);
 		if (res < 0) {
-			PSVR2_ERROR(hmd, "Failed to set USB %s interface alt %d", name, altmode);
+			PSVR2_ERROR(hmd, "Failed to set USB %s interface alt %d: %s", name, altmode, libusb_error_name(res));
 			return false;
 		}
 	}

@@ -139,6 +139,24 @@ echo "  [ok] plugin: $PLUGIN"
 echo "  [ok] SteamVR: $STEAMVR"
 lsusb | grep -qi '054c:0cde' && echo "  [ok] PS VR2 headset on USB" || echo "  [??] PS VR2 headset not seen on USB (054c:0cde)"
 pgrep -x steam >/dev/null && echo "  [ok] Steam is running" || echo "  [??] Steam isn't running; start it first if SteamVR complains"
+# The Sense controllers reach the driver over Bluetooth only: say which are paired and connected (a user's 2026-11-23
+# runs had none connected and the logs didn't show it). Only a warning: one turned on after the start is picked up.
+if command -v bluetoothctl >/dev/null; then
+	sense=$(bluetoothctl devices 2>/dev/null | grep 'PlayStation VR2 Sense' || true)
+	if [ -z "$sense" ]; then
+		echo "  [??] no PS VR2 Sense controller paired over Bluetooth: pair each once (hold Create + PS until the light flashes, then pair it in the Bluetooth settings)"
+	else
+		while read -r _ mac name; do
+			if bluetoothctl info "$mac" 2>/dev/null | grep -q 'Connected: yes'; then
+				echo "  [ok] $name ($mac) connected over Bluetooth"
+			else
+				echo "  [??] $name ($mac) paired but not connected: press its PS button"
+			fi
+		done <<< "$sense"
+	fi
+else
+	echo "  [??] bluetoothctl not found: can't check the Sense controllers' Bluetooth connection"
+fi
 if [ -f "$BACKUP" ]; then
 	echo "  [!!] a backup from a previous run exists; restoring it before continuing"
 	restore_config
