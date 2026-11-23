@@ -70,15 +70,15 @@ fi
 # The compilers, CMake/Ninja, the Monado build's libraries and Rust (DriverKit).
 ARCH_BASE=(base-devel git cmake ninja python pkgconf eigen vulkan-headers vulkan-icd-loader glslang shaderc libusb
 	systemd-libs libjpeg-turbo ceres-solver suitesparse google-glog gflags jsoncpp libx11 libxcb libxrandr wayland
-	wayland-protocols libdrm zlib patchelf rust)
+	wayland-protocols libdrm zlib patchelf libcap rust)
 DEB_BASE=(build-essential git cmake ninja-build python3 pkg-config libeigen3-dev libvulkan-dev glslang-tools glslc
 	libusb-1.0-0-dev libudev-dev libjpeg-dev libceres-dev libsuitesparse-dev libgoogle-glog-dev libgflags-dev
 	libjsoncpp-dev libx11-dev libx11-xcb-dev libxcb-randr0-dev libxrandr-dev libwayland-dev wayland-protocols libdrm-dev
-	zlib1g-dev patchelf cargo)
+	zlib1g-dev patchelf libcap2-bin cargo)
 FED_BASE=(gcc-c++ git cmake ninja-build python3 pkgconf-pkg-config eigen3-devel vulkan-loader-devel vulkan-headers
 	glslang glslc libusb1-devel systemd-devel libjpeg-turbo-devel ceres-solver-devel suitesparse-devel glog-devel
 	gflags-devel jsoncpp-devel libX11-devel libxcb-devel libXrandr-devel wayland-devel wayland-protocols-devel
-	libdrm-devel zlib-devel patchelf cargo)
+	libdrm-devel zlib-devel patchelf libcap cargo)
 # Hand tracking. onnxruntime's development files: Arch extra, Debian 13 / Ubuntu 25.04 and newer, Fedora 43 and newer.
 ARCH_HT=(opencv onnxruntime-cpu)
 DEB_HT=(libopencv-dev libonnxruntime-dev)

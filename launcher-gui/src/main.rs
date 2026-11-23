@@ -710,6 +710,8 @@ struct Launcher {
     check: Arc<Mutex<CheckState>>,
     /// The Compile tab's Install dependencies (install-deps.sh through pkexec).
     deps: Arc<Mutex<DepsState>>,
+    /// SteamVR's high-priority GPU queue state (getcap), checked at most every 5 s.
+    high_priority: Option<(Instant, Option<bool>)>,
     /// --screenshot <file.png> [launcher|settings|compile]: render one tab, save it, quit (for checking the design).
     screenshot: Option<(PathBuf, Instant, bool)>,
     /// The device pictures (assets/): headset, left and right Sense controller.
@@ -757,6 +759,7 @@ impl Launcher {
             build: Arc::new(Mutex::new(BuildState::default())),
             check: Arc::new(Mutex::new(CheckState::default())),
             deps: Arc::new(Mutex::new(DepsState::default())),
+            high_priority: None,
             screenshot: None,
             reg_cache: None,
             pictures: [
@@ -1342,6 +1345,30 @@ fn setting_value(key: &str, v: i64) -> serde_json::Value {
 }
 
 /// SteamVR's settings file (<SteamVR config>/steamvr.vrsettings, the config folder from openvrpaths.vrpath).
+/// SteamVR's vrcompositor-launcher (SteamVR's folder from Settings, else in Steam's default library).
+fn compositor_launcher(steam_root: &str, steamvr_dir: &str) -> PathBuf {
+    let dir = if !steamvr_dir.trim().is_empty() {
+        PathBuf::from(steamvr_dir.trim())
+    } else {
+        let root = if steam_root.trim().is_empty() {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/Steam")
+        } else {
+            PathBuf::from(steam_root.trim())
+        };
+        root.join("steamapps/common/SteamVR")
+    };
+    dir.join("bin/linux64/vrcompositor-launcher")
+}
+
+/// Whether SteamVR's compositor launcher has CAP_SYS_NICE (getcap); None if that can't be checked.
+fn high_priority_state(launcher: &Path) -> Option<bool> {
+    if !launcher.exists() {
+        return None;
+    }
+    let out = Command::new("getcap").arg(launcher).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).to_lowercase().contains("cap_sys_nice"))
+}
+
 fn steamvr_settings_file(steam_root: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     let from_vrpath = fs::read_to_string(openvrpaths_file())
@@ -1396,11 +1423,11 @@ fn undo_psvr2_settings(file: &Path) -> Result<String, String> {
 /// The packages build-driver.sh needs (compilers, CMake/Ninja, the Monado build's libraries, Rust for DriverKit).
 const PACKAGES: [(&str, &str); 3] = [
     ("Arch / CachyOS / Manjaro",
-     "sudo pacman -S --needed base-devel git cmake ninja python pkgconf eigen vulkan-headers vulkan-icd-loader glslang shaderc libusb systemd-libs libjpeg-turbo ceres-solver suitesparse google-glog gflags jsoncpp libx11 libxcb libxrandr wayland wayland-protocols libdrm zlib patchelf rust"),
+     "sudo pacman -S --needed base-devel git cmake ninja python pkgconf eigen vulkan-headers vulkan-icd-loader glslang shaderc libusb systemd-libs libjpeg-turbo ceres-solver suitesparse google-glog gflags jsoncpp libx11 libxcb libxrandr wayland wayland-protocols libdrm zlib patchelf libcap rust"),
     ("Debian / Ubuntu",
-     "sudo apt install build-essential git cmake ninja-build python3 pkg-config libeigen3-dev libvulkan-dev glslang-tools glslc libusb-1.0-0-dev libudev-dev libjpeg-dev libceres-dev libsuitesparse-dev libgoogle-glog-dev libgflags-dev libjsoncpp-dev libx11-dev libx11-xcb-dev libxcb-randr0-dev libxrandr-dev libwayland-dev wayland-protocols libdrm-dev zlib1g-dev patchelf cargo"),
+     "sudo apt install build-essential git cmake ninja-build python3 pkg-config libeigen3-dev libvulkan-dev glslang-tools glslc libusb-1.0-0-dev libudev-dev libjpeg-dev libceres-dev libsuitesparse-dev libgoogle-glog-dev libgflags-dev libjsoncpp-dev libx11-dev libx11-xcb-dev libxcb-randr0-dev libxrandr-dev libwayland-dev wayland-protocols libdrm-dev zlib1g-dev patchelf libcap2-bin cargo"),
     ("Fedora",
-     "sudo dnf install gcc-c++ git cmake ninja-build python3 pkgconf-pkg-config eigen3-devel vulkan-loader-devel vulkan-headers glslang glslc libusb1-devel systemd-devel libjpeg-turbo-devel ceres-solver-devel suitesparse-devel glog-devel gflags-devel jsoncpp-devel libX11-devel libxcb-devel libXrandr-devel wayland-devel wayland-protocols-devel libdrm-devel zlib-devel patchelf cargo"),
+     "sudo dnf install gcc-c++ git cmake ninja-build python3 pkgconf-pkg-config eigen3-devel vulkan-loader-devel vulkan-headers glslang glslc libusb1-devel systemd-devel libjpeg-turbo-devel ceres-solver-devel suitesparse-devel glog-devel gflags-devel jsoncpp-devel libX11-devel libxcb-devel libXrandr-devel wayland-devel wayland-protocols-devel libdrm-devel zlib-devel patchelf libcap cargo"),
 ];
 
 /// A command or environment line to paste into a terminal, with its Copy button.
@@ -2109,6 +2136,35 @@ impl Launcher {
                 }
             });
             ui.label(egui::RichText::new(format!("Settings file: {}", file.display())).color(theme::SLATE).size(12.0));
+            ui.add_space(8.0);
+            // SteamVR's high-priority GPU queue: only granted when the user presses the button (never by default).
+            let launcher = compositor_launcher(&self.cfg.steam_root, &self.cfg.steamvr_dir);
+            if self.high_priority.is_none_or(|(t, _)| t.elapsed() > Duration::from_secs(5)) {
+                self.high_priority = Some((Instant::now(), high_priority_state(&launcher)));
+            }
+            let state = self.high_priority.map(|(_, s)| s).unwrap_or(None);
+            let (text, color) = match state {
+                Some(true) => ("High-priority GPU queue: allowed (async reprojection works)", theme::LIT),
+                Some(false) => ("High-priority GPU queue: not allowed (no reprojection: missed frames flicker)", theme::FAULT),
+                None => ("High-priority GPU queue: unknown (getcap isn't installed, or SteamVR wasn't found)", theme::SLATE),
+            };
+            ui.label(egui::RichText::new(text).font(theme::bold(14.0)).color(color));
+            if ui
+                .add_enabled(state == Some(false), egui::Button::new("Allow high priority"))
+                .on_hover_text("SteamVR's own setup step: gives its compositor launcher the CAP_SYS_NICE capability, so SteamVR can render on a high-priority GPU queue and reproject frames a game misses (without it they show as a bright/dark flicker). Asks for your password. A SteamVR update can undo it; press it again then.")
+                .on_disabled_hover_text(if state == Some(true) { "Already allowed." } else { "Can't check: install getcap (Install dependencies) or set SteamVR's folder in Settings." })
+                .clicked()
+            {
+                self.message = match Command::new("pkexec").args(["setcap", "CAP_SYS_NICE=eip"]).arg(&launcher).status() {
+                    Ok(s) if s.success() => {
+                        self.high_priority = None; // check again now
+                        "SteamVR may now use a high-priority GPU queue. Restart SteamVR.".to_string()
+                    }
+                    Ok(s) if matches!(s.code(), Some(126) | Some(127)) => "Not changed: the password wasn't given.".to_string(),
+                    Ok(s) => format!("setcap failed ({s}): is libcap installed (Install dependencies)?"),
+                    Err(e) => format!("Couldn't run pkexec: {e}"),
+                };
+            }
         });
 
         theme::section(ui, "Packages needed to compile", |ui| {

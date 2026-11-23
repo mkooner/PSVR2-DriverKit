@@ -173,6 +173,19 @@ else
 	echo "  [!!] no udev rules for the PS VR2 and Sense controllers: the controllers won't be found. Run DriverKit's"
 	echo "       Install dependencies (Compile Driver tab), or ./install-deps.sh, then turn the controllers off and on"
 fi
+# SteamVR's high-priority GPU queue (CAP_SYS_NICE on vrcompositor-launcher, SteamVR's own setup step): without it the
+# compositor has no async reprojection, so a game's missed frames show as the screen dropping to SteamVR's fallback
+# and back, a bright/dark flicker (a user's Arc A750, 2026-11-23: 1134 timeouts in 2 minutes, 0 reprojected).
+# Only reported: DriverKit's Allow high priority button (Compile Driver tab) grants it when the user chooses to.
+LAUNCHER="$STEAMVR/bin/linux64/vrcompositor-launcher"
+if command -v getcap >/dev/null && [ -f "$LAUNCHER" ]; then
+	if getcap "$LAUNCHER" 2>/dev/null | grep -qi cap_sys_nice; then
+		echo "  [ok] SteamVR may use a high-priority GPU queue (async reprojection)"
+	else
+		echo "  [??] SteamVR may not use a high-priority GPU queue: no reprojection, so a game's missed frames flicker"
+		echo "       (SteamVR's setup step; DriverKit: Compile Driver tab, SteamVR features, Allow high priority)"
+	fi
+fi
 if [ -f "$BACKUP" ]; then
 	echo "  [!!] a backup from a previous run exists; restoring it before continuing"
 	restore_config
