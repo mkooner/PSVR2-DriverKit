@@ -16,7 +16,9 @@
 
 #include "catch_amalgamated.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <fstream>
 #include <thread>
@@ -421,6 +423,46 @@ TEST_CASE("ovrn camera: streams while SteamVR's frame queue has a reader (Room V
 	CHECK(backend.stops == 1);
 	cam.readerCheck(false, 11 * s);
 	CHECK(backend.stops == 2);
+}
+
+TEST_CASE("ovrn camera: 15 pictures a second while Room View is hidden, every one while it's shown")
+{
+	FakeBackend backend;
+	ovrn::Camera cam(&backend, info());
+	const double period = 1e9 / 59.94; // the headset's camera pairs
+	int64_t t = 1000000000;
+	auto count = [&](int pairs) {
+		int sent = 0;
+		for (int i = 0; i < pairs; i++, t += (int64_t)period) {
+			sent += cam.deliveryCheck(t) ? 1 : 0;
+		}
+		return sent;
+	};
+	CHECK(cam.deliveryRate() < 15.1); // hidden at the start
+	CHECK(count(600) == 150);         // 10 s of pairs: every 4th
+	cam.setRoomViewShown(true);
+	CHECK(cam.deliveryRate() > 59.0);
+	CHECK(count(600) == 600); // shown: all of them
+	cam.setRoomViewShown(false);
+	CHECK(count(600) == 150);
+	// Jittered timestamps (+-2 ms) still give one in four, never two close together.
+	int sent = 0;
+	int64_t last = 0, closest = INT64_MAX;
+	for (int i = 0; i < 600; i++, t += (int64_t)period) {
+		const int64_t ts = t + ((i * 7919) % 5 - 2) * 1000000;
+		if (cam.deliveryCheck(ts)) {
+			if (last != 0) {
+				closest = std::min(closest, ts - last);
+			}
+			last = ts;
+			sent++;
+		}
+	}
+	CHECK(sent >= 145);
+	CHECK(sent <= 155);
+	CHECK(closest > 55000000); // at least ~55 ms apart
+	// A clock step backwards doesn't stall delivery.
+	CHECK(cam.deliveryCheck(t - 5000000000LL));
 }
 
 TEST_CASE("ovrn camera: CAMERA=noimages sets the camera up but never sends a picture")

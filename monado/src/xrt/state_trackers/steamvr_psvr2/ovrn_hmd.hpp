@@ -37,6 +37,9 @@ public:
 	void
 	setSeeThrough(bool on)
 	{
+		if (m_camera) {
+			m_camera->setRoomViewShown(on); // the full picture rate only while it's on screen
+		}
 		if (!active()) {
 			return;
 		}
