@@ -174,6 +174,11 @@ mkdir -p "$KIT/tools" "$KIT/analysis" "$KIT/logs"
 for f in launch-steamvr.sh launch-openxr.sh summarize.sh build-driver.sh install-deps.sh README.md ROOM.md; do
 	[ -f "$HERE/$f" ] && cp -f "$HERE/$f" "$KIT/"
 done
+# install-deps.sh installs our copy of the udev rules from udev/ next to itself.
+if [ -f "$HERE/udev/70-xrhardware.rules" ]; then
+	mkdir -p "$KIT/udev"
+	cp -f "$HERE/udev/70-xrhardware.rules" "$KIT/udev/"
+fi
 for f in steamvr_frame_shift.py steamvr_probe.py steamvr_timeline.py; do
 	[ -f "$HERE/analysis/$f" ] && cp -f "$HERE/analysis/$f" "$KIT/analysis/"
 done

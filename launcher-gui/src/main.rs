@@ -1819,8 +1819,13 @@ impl Launcher {
     /// in a desktop dialog; with --hand-tracking when Compile hand tracking is ticked. Its output shows below.
     fn start_install_deps(&mut self) {
         let script = config_dir().join("install-deps.sh");
-        if let Err(e) = fs::create_dir_all(config_dir()).and_then(|_| fs::write(&script, DEPS_SCRIPT)) {
-            self.message = format!("Can't write {}: {e}", script.display());
+        // Our copy of the xr-hardware udev rules goes beside it: install-deps.sh installs it from udev/ next to itself.
+        let rules = config_dir().join("udev").join("70-xrhardware.rules");
+        if let Err(e) = fs::create_dir_all(config_dir().join("udev"))
+            .and_then(|_| fs::write(&script, DEPS_SCRIPT))
+            .and_then(|_| fs::write(&rules, UDEV_RULES))
+        {
+            self.message = format!("Can't write {} and {}: {e}", script.display(), rules.display());
             return;
         }
         let ht = self.cfg.compile_hand_tracking;
@@ -2220,6 +2225,8 @@ const BUILD_SCRIPT: &str = include_str!("../../build-driver.sh");
 
 /// The dependency installer (psvr2-test/install-deps.sh), built into the app like the compile script.
 const DEPS_SCRIPT: &str = include_str!("../../install-deps.sh");
+/// Our copy of Monado's xr-hardware udev rules (udev/70-xrhardware.rules), installed by install-deps.sh.
+const UDEV_RULES: &str = include_str!("../../udev/70-xrhardware.rules");
 const REPO_WEB: &str = "github.com/mkooner/PSVR2-DriverKit";
 
 fn main() -> eframe::Result<()> {
