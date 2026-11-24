@@ -78,8 +78,7 @@ and Sense drivers serve both SteamVR games and native OpenXR apps.
 - **Started with SteamVR:** turn on Start WayVR with SteamVR in DriverKit's Settings tab. DriverKit then starts WayVR
   once SteamVR's compositor runs, restarts it if it stops unexpectedly, and stops it after SteamVR. Close SteamVR's
   dashboard (PS button), then double-press Triangle. The first time, your desktop asks which screen to share.
-- **Tested working** with SteamVR 2.18.4, GNOME Wayland and an NVIDIA GPU.
-- **With Monado (new, untested with a headset):** Settings → Monado section → Start WayVR with monado-service starts
+- **Works with SteamVR or Monado.** For Monado: Settings → Monado section → Start WayVR with monado-service starts
   WayVR on our OpenXR runtime with monado-service.
 
 ### OpenXR with Monado

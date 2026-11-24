@@ -42,9 +42,9 @@ Sense controller bindings for WayVR come with the driver:
 | Scroll | sticks |
 | Right / middle click | touch Triangle or Circle / Square or Cross while clicking |
 
-Tested working with SteamVR 2.18.4, GNOME Wayland and an NVIDIA GPU. Close SteamVR's dashboard (PS button) before
-using WayVR: WayVR gets no controller input while the dashboard is open.
+Works with SteamVR or Monado. With SteamVR, close SteamVR's dashboard (PS button) before using WayVR: WayVR gets no
+controller input while the dashboard is open.
 
-With Monado: Settings → Monado section → Start WayVR with monado-service (new, not yet tested with a headset).
+With Monado: Settings → Monado section → Start WayVR with monado-service.
 
 [Troubleshooting](troubleshooting.md) · [Compatibility](compatibility.md)
