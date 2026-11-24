@@ -202,6 +202,32 @@
           },
           "mode": "joystick",
           "path": "/user/hand/right/input/right_stick"
+        },
+        {
+          "inputs": {
+            "click": {
+              "output": "/actions/lasermouse/in/RightClick"
+            }
+          },
+          "mode": "button",
+          "parameters": {
+            "click_activate_threshold": "0.65",
+            "click_deactivate_threshold": "0.6"
+          },
+          "path": "/user/hand/right/input/r1"
+        },
+        {
+          "inputs": {
+            "click": {
+              "output": "/actions/lasermouse/in/RightClick"
+            }
+          },
+          "mode": "button",
+          "parameters": {
+            "click_activate_threshold": "0.65",
+            "click_deactivate_threshold": "0.6"
+          },
+          "path": "/user/hand/left/input/l1"
         }
       ]
     },
@@ -463,7 +489,7 @@
   },
   "category": "steamvr_input",
   "controller_type": "playstation_vr2_sense",
-  "description": "Translated from SteamVR's Index controller dashboard bindings: system -> PS button (click: dashboard, double: Room View, held: chords), a/b -> cross/circle (right) and square/triangle (left), thumbstick -> sticks, trigger -> L2/R2; trackpad entries dropped (none on the Sense).",
+  "description": "Translated from SteamVR's Index controller dashboard bindings: system -> PS button (click: dashboard, double: Room View, held: chords), a/b -> cross/circle (right) and square/triangle (left), thumbstick -> sticks, trigger -> L2/R2; trackpad entries dropped (none on the Sense), except the laser's right click, on L1/R1 instead (Index has it on the trackpad click).",
   "name": "SteamVR dashboard bindings for PlayStation VR2 Sense controllers",
   "options": {},
   "simulated_actions": []
