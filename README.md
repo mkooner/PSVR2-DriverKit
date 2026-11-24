@@ -44,6 +44,17 @@ runs everything.
 - **The PS VR2 and Sense controller models and icons** in SteamVR, when Sony's PlayStation VR2 App is installed (see
   the install guide).
 
+### Desktop in VR (with WayVR)
+- **Your Linux desktop inside SteamVR,** on Wayland and X11, through
+  [WayVR](https://github.com/wayvr-org/wayvr), a separate overlay program you install yourself (Arch: the AUR package
+  `wayvr`; other distributions: its AppImage in `~/Applications`). It isn't part of this repository.
+- **Sense controller bindings for WayVR come with the driver:** double-press Triangle shows or hides its overlays,
+  L2/R2 click (touch shows the pointer), L1/R1 grab (move; grab + trigger + stick resizes), the sticks scroll, and
+  touching Triangle/Circle or Square/Cross while clicking gives a right or middle click.
+- **Started with SteamVR:** turn on Start WayVR with SteamVR in DriverKit's Settings tab. DriverKit then starts WayVR
+  before SteamVR (as WayVR asks), restarts it if it stops unexpectedly, and stops it after SteamVR. The first time,
+  your desktop asks which screens to share: pick them in the order WayVR asks.
+
 ### OpenXR with Monado
 - **Native OpenXR apps run directly on Monado's runtime** (monado-service), without SteamVR.
 
@@ -107,12 +118,15 @@ runs everything.
 - **SteamVR games:** start them from Steam as usual.
 - **PS button:** opens the SteamVR dashboard.
 - **Headset's function button:** Room View.
+- **Your desktop:** with Start WayVR with SteamVR on, double-press Triangle (see Desktop in VR above).
 - **OpenXR apps without SteamVR:** DriverKit → Launcher → Start monado-service, then Launch app.
 - **Windows games through Proton:** see the Proton note below.
 
 ## Known limitations
 - Controller tracking drops in bright sunlight.
 - The controllers' initial calibration takes about 5 seconds to start in SteamVR.
+- SteamVR's own Desktop panel in the dashboard stays blank on Wayland
+  ([a SteamVR bug](https://github.com/ValveSoftware/SteamVR-for-Linux/issues/693)); use WayVR (Desktop in VR above).
 - For the best results with Proton in VR, use [UMU-Proton](https://github.com/Open-Wine-Components/umu-proton).
 
 ## Credits
@@ -120,6 +134,8 @@ runs everything.
   is built on and part of, including the PS VR2 headset and Sense controller drivers this project extends.
 - **[ALVR](https://github.com/alvr-org/ALVR)** (MIT): our reference implementation for the SteamVR driver's structure
   (provider, tracked devices, headset and controllers) and for the controller hand skeleton.
+- **[WayVR](https://github.com/wayvr-org/wayvr)** (GPL-3.0, a separate program, not included): the desktop overlay we
+  start and ship controller bindings for.
 - **Mercury** (Moshi Turner and Collabora, part of Monado, BSL-1.0): the hand tracker and models behind hand tracking.
 - **[PSVR2Toolkit](https://github.com/BnuuySolutions/PSVR2Toolkit)** (Bnuuy Solutions, MIT): our reference
   implementation for:
