@@ -484,9 +484,12 @@ if [ "${TRACKING:-0}" = 1 ] || [ "${JITTER_CHECK:-0}" = 1 ]; then
 	fi
 fi
 
-# WayVR supervision: started before SteamVR (--wait: it connects when SteamVR is up), restarted after 5, 15 and 60 s
-# if it dies while SteamVR runs (then left off, with the reason in its log), stopped after SteamVR exits. The AppImage
-# variables of DriverKit's own AppImage are taken out: WayVR reads APPIMAGE as its own path.
+# WayVR supervision: started once SteamVR's compositor runs (wayvr_start below), restarted after 5, 15 and 60 s if it
+# dies while SteamVR runs (then left off, with the reason in its log), stopped after SteamVR exits. Not before SteamVR,
+# as WayVR's README puts it for its own --wait: with --openvr it connects at once, and OpenVR then starts SteamVR as
+# WayVR's child (2026-11-23 22:23: connected 1.5 s after starting, SteamVR's log in WayVR's output). What WayVR's
+# README warns against is SteamVR starting WayVR (inside Steam's runtime); here this script starts it, outside it.
+# The AppImage variables of DriverKit's own AppImage are taken out: WayVR reads APPIMAGE as its own path.
 WAYVR_SUP_PID=""
 WAYVR_STOP_FLAG=""
 wayvr_supervise() {
@@ -533,14 +536,29 @@ wayvr_stop() {
 	rm -f "$WAYVR_STOP_FLAG" "$WAYVR_STOP_FLAG.pid"
 	WAYVR_SUP_PID=""
 }
-if [ "$WAYVR" = 1 ] && ! wayvr_running_pid >/dev/null; then
+# Once SteamVR runs: wait (up to 60 s) for its compositor, then start WayVR, so it finds SteamVR instead of starting it.
+wayvr_start() {
+	[ "$WAYVR" = 1 ] || return 0
+	if wayvr_running_pid >/dev/null; then
+		return 0
+	fi
+	local i
+	for i in $(seq 1 60); do
+		pgrep -x vrcompositor >/dev/null && break
+		pgrep -x vrserver >/dev/null || return 0
+		sleep 1
+	done
+	if ! pgrep -x vrcompositor >/dev/null; then
+		echo "  [??] SteamVR's compositor didn't start within 60 s: WayVR not started"
+		return 0
+	fi
 	WAYVR_LOG="$LOGDIR/wayvr-$STAMP.log"
 	WAYVR_STOP_FLAG="$LOGDIR/.wayvr-stop-$STAMP"
 	rm -f "$WAYVR_STOP_FLAG"
 	wayvr_supervise &
 	WAYVR_SUP_PID=$!
-	echo "  WayVR started, waiting for SteamVR (log: $WAYVR_LOG). Show/hide its overlays: double-press Triangle"
-fi
+	echo "  WayVR started (log: $WAYVR_LOG). Close SteamVR's dashboard (PS button), then double-press Triangle"
+}
 
 echo
 echo "== Starting SteamVR (close SteamVR or press Ctrl+C here when done)"
@@ -560,6 +578,7 @@ if ! pgrep -x vrserver >/dev/null; then
 	echo "  vrserver never started; see $LOG and $STEAM_LOGS/vrstartup.txt"
 else
 	echo "  vrserver running (pid $(pgrep -x vrserver | head -1))"
+	wayvr_start
 	FT_PID=""
 	if [ -n "${FRAMES_CSV:-}" ] && [ -x "$HERE/tools/vrframetiming" ]; then
 		"$HERE/tools/vrframetiming" 36000 "$FRAMES_CSV" "$LOGDIR/steamvr-vrposes-$STAMP.csv" \
