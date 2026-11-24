@@ -1,0 +1,35 @@
+# Check the documentation and website on pull requests: Markdown links and anchors, the website's internal links,
+# metadata, headings, structured data, sitemap and robots.txt. Lightweight: Python standard library, no driver build.
+name: Docs check
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - "docs/**"
+      - "*.md"
+      - ".github/workflows/docs-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            site
+            docs
+            README.md
+            CONTRIBUTING.md
+            SECURITY.md
+            CODE_OF_CONDUCT.md
+            LICENSE
+      - name: Build website
+        run: python3 site/build.py
+      - name: Check website and docs
+        run: python3 site/check.py --markdown
