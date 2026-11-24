@@ -12,6 +12,7 @@
 
 #include "ovrn_camera.hpp"
 #include "ovrn_device.hpp"
+#include "ovrn_presence_log.hpp"
 #include "ovrn_settings.hpp"
 
 #include "os/os_time.h"
@@ -29,6 +30,36 @@ namespace ovrn {
 class Hmd final : public TrackedDevice, public vr::IVRDisplayComponent
 {
 public:
+	//! SteamVR's verdict on the headset (user interaction, standby), for the presence log (ovrn_presence_log.hpp).
+	void
+	presenceEvent(PresenceLog::Event e)
+	{
+		m_presence.event(e, now_ns());
+	}
+
+	//! The presence log's lines due now (RunFrame thread; at_shutdown: what's left and the session totals).
+	void
+	presenceLog(int64_t now, bool at_shutdown = false)
+	{
+		for (const std::string &line : m_presence.tick(now, at_shutdown)) {
+			log("%s\n", line.c_str());
+		}
+	}
+
+	//! The headset's index in SteamVR, k_unTrackedDeviceIndexInvalid when not active.
+	uint32_t
+	objectIndex() const
+	{
+		return m_objectId.load();
+	}
+
+	//! SteamVR putting the headset in standby (it was idle: still and not worn, or the power menu). Logged only.
+	void
+	EnterStandby() override
+	{
+		presenceEvent(PresenceLog::DriverEnterStandby);
+	}
+
 	/*!
 	 * See-through view on or off (RunFrame thread): as Sony's driver does in its see-through mode, ask SteamVR to
 	 * pause the game and render less while the camera picture is all there is to see. Controllers stay SteamVR's to
@@ -55,11 +86,12 @@ public:
 	 * OVRN_HEAD_BUTTON=off: not reported.
 	 */
 	void
-	updateInputs(int64_t)
+	updateInputs(int64_t now)
 	{
 		updateEyeTracking();
 		if (m_proximityHandle != vr::k_ulInvalidInputComponentHandle) {
 			const bool worn = m_backend->headWorn();
+			m_presence.worn(worn, now);
 			if (worn != m_wornSent || !m_wornSentOnce) {
 				m_wornSent = worn;
 				m_wornSentOnce = true;
@@ -119,6 +151,7 @@ public:
 		if (!m_backend->headPose(now_ns + predict_ns.load(), &t) || !t.orientation_valid) {
 			pose.poseIsValid = false;
 			pose.result = vr::TrackingResult_Uninitialized;
+			m_presence.headPose(false, now_ns);
 			submitPose(pose);
 			return;
 		}
@@ -143,6 +176,7 @@ public:
 			// The pose is for now_ns; SteamVR takes it as valid at the moment of the call plus this offset.
 			pose.poseTimeOffset = (double)(now_ns - ovrn::now_ns()) * 1e-9;
 		}
+		m_presence.headPose(pose.result == vr::TrackingResult_Running_OK, now_ns);
 		submitPose(pose);
 
 		// The IPD dial: twice a second, new eye poses go to SteamVR when they changed.
@@ -506,6 +540,7 @@ private:
 	bool m_buttonSent = false;
 	vr::VRInputComponentHandle_t m_proximityHandle = vr::k_ulInvalidInputComponentHandle;
 	bool m_wornSent = false;
+	PresenceLog m_presence; //!< wear sensor, head tracking and SteamVR's standby verdicts, logged every 30 s
 	bool m_wornSentOnce = false;
 	vr::VRInputComponentHandle_t m_eyeHandle = vr::k_ulInvalidInputComponentHandle;
 	uint64_t m_eyeUpdates = 0; //!< RunFrame thread: gaze updates sent, and how many carried valid gaze

@@ -89,6 +89,9 @@ public:
 		for (auto &c : m_controllers) {
 			c->hapticLog(now_ns(), true); // what's left of the vibration summary
 		}
+		if (m_hmd) {
+			m_hmd->presenceLog(now_ns(), true); // and of the headset presence summary
+		}
 		m_controllers.clear();
 		m_hands.clear();
 		m_hmd.reset();
@@ -161,6 +164,25 @@ public:
 				log("ovrn: see-through %s\n", on ? "on (game paused, SteamVR renders less)" : "off");
 				continue;
 			}
+			if (m_hmd != nullptr) {
+				// SteamVR's own verdict on the headset, for the presence log (logging only).
+				const bool head = event.trackedDeviceIndex == m_hmd->objectIndex();
+				switch (event.eventType) {
+				case vr::VREvent_TrackedDeviceUserInteractionStarted:
+					if (head) {
+						m_hmd->presenceEvent(PresenceLog::UserInteractionStarted);
+					}
+					continue;
+				case vr::VREvent_TrackedDeviceUserInteractionEnded:
+					if (head) {
+						m_hmd->presenceEvent(PresenceLog::UserInteractionEnded);
+					}
+					continue;
+				case vr::VREvent_EnterStandbyMode: m_hmd->presenceEvent(PresenceLog::StandbyEntered); continue;
+				case vr::VREvent_LeaveStandbyMode: m_hmd->presenceEvent(PresenceLog::StandbyLeft); continue;
+				default: break;
+				}
+			}
 			if (event.eventType != vr::VREvent_Input_HapticVibration) {
 				continue;
 			}
@@ -174,6 +196,9 @@ public:
 		for (auto &c : m_controllers) {
 			c->hapticLog(now_ns());
 		}
+		if (m_hmd) {
+			m_hmd->presenceLog(now_ns());
+		}
 	}
 
 	bool
@@ -183,10 +208,18 @@ public:
 	}
 	void
 	EnterStandby() override
-	{}
+	{
+		if (m_hmd) {
+			m_hmd->presenceEvent(PresenceLog::DriverEnterStandby);
+		}
+	}
 	void
 	LeaveStandby() override
-	{}
+	{
+		if (m_hmd) {
+			m_hmd->presenceEvent(PresenceLog::DriverLeaveStandby);
+		}
+	}
 
 private:
 	static constexpr const char *kAsyncSection = "steamvr";
