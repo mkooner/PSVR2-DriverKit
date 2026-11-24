@@ -58,7 +58,7 @@ public:
 			return vr::VRInitError_Driver_HmdUnknown;
 		}
 		// After the backend: in driver direct mode there's no camera for SteamVR (ovrn_hmd.hpp setupCamera).
-		applySeeThroughSettings(m_backend->directMode() != nullptr);
+		applySeeThroughSettings(m_backend->directMode() != nullptr && !direct_mode_camera_test());
 		m_hmd.reset(new Hmd(m_backend.get()));
 		if (!m_hmd->registerDevice()) {
 			Cleanup();
