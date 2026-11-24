@@ -109,6 +109,8 @@ main(int argc, char **argv)
 	if (getenv("HT_REPLAY_EMPTY"))
 		sscanf(getenv("HT_REPLAY_EMPTY"), "%lf-%lf", &e_lo, &e_hi);
 	int q_hands = 0, q_empty = 0, act_hands[2] = {0, 0}, act_empty[2] = {0, 0};
+	double gap_start[2] = {-1, -1}, last_active[2] = {-1, -1}, gap_time[2][5] = {{0}};
+	int gap_count[2][5] = {{0}}, held_hands[2][2] = {{0}};
 	struct rusage ru0;
 	getrusage(RUSAGE_SELF, &ru0);
 	double sx = 0, sy = 0, sz = 0;
@@ -146,6 +148,30 @@ main(int argc, char **argv)
 					const double ts = (now - start) / 1e9;
 					if (s.is_active && ts >= h_lo && ts <= h_hi)
 						act_hands[h]++;
+					// Gaps while hands are in view: how much lost time comes from short dropouts, and what holding
+					// the last pose for 0.15 / 0.3 s after a loss would give.
+					if (ts >= h_lo && ts <= h_hi) {
+						if (s.is_active) {
+							if (gap_start[h] >= 0) {
+								const double g = ts - gap_start[h];
+								const int b = g < 0.1 ? 0 : g < 0.25 ? 1 : g < 0.5 ? 2 : g < 1.0 ? 3 : 4;
+								gap_time[h][b] += g;
+								if (g >= 1.0 && getenv("HT_REPLAY_GAPS"))
+									printf("GAP %s hand lost %.2f-%.2f s (%.2f s)\n", h ? "right" : "left",
+									       gap_start[h], ts, g);
+								gap_count[h][b]++;
+								gap_start[h] = -1;
+							}
+							last_active[h] = ts;
+						} else if (gap_start[h] < 0 && last_active[h] >= 0) {
+							gap_start[h] = ts;
+						}
+						for (int k = 0; k < 2; k++) {
+							const double hold = k ? 0.3 : 0.15;
+							if (s.is_active || (last_active[h] >= 0 && ts - last_active[h] <= hold))
+								held_hands[h][k]++;
+						}
+					}
 					if (s.is_active && ts >= e_lo && ts <= e_hi)
 						act_empty[h]++;
 					if (s.is_active) {
@@ -177,6 +203,14 @@ main(int argc, char **argv)
 		}
 		psvr2_hand_tracking_push_transfer(ht, buf, len, os_monotonic_get_ns());
 		pushed++;
+	}
+	static const char *const bucket[5] = {"<0.1 s", "0.1-0.25 s", "0.25-0.5 s", "0.5-1 s", ">1 s"};
+	for (int h = 0; h < 2; h++) {
+		printf("%s hand gaps in view (count, lost s):", h ? "right" : "left");
+		for (int b = 0; b < 5; b++)
+			printf(" %s %d/%.1f", bucket[b], gap_count[h][b], gap_time[h][b]);
+		printf("; with a hold of 0.15 s %.0f%%, 0.3 s %.0f%%\n", q_hands ? 100.0 * held_hands[h][0] / q_hands : 0,
+		       q_hands ? 100.0 * held_hands[h][1] / q_hands : 0);
 	}
 	printf("%d frames offered over %.1f s, %d queries: left active %.0f%%, right active %.0f%%",
 	       pushed, (os_monotonic_get_ns() - start) / 1e9, queries, 100.0 * act[0] / queries,
