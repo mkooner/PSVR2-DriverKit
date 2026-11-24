@@ -186,6 +186,72 @@ if command -v getcap >/dev/null && [ -f "$LAUNCHER" ]; then
 		echo "       (SteamVR's setup step; DriverKit: Compile Driver tab, SteamVR features, Allow high priority)"
 	fi
 fi
+# WayVR (https://github.com/wayvr-org/wayvr, GPL-3.0): a separate desktop overlay program the user installs; we only
+# start it. WAYVR=1 (DriverKit Settings: Start WayVR with SteamVR) runs `wayvr --openvr --wait` as the user, in this
+# graphical session, before SteamVR, as WayVR's README asks (started by SteamVR, inside Steam's runtime, its screens
+# don't work), and stops it after SteamVR. The Sense controllers' WayVR bindings come with our plugin.
+WAYVR="${WAYVR:-0}"
+WAYVR_BIN=""
+find_wayvr() {
+	if command -v wayvr >/dev/null; then
+		command -v wayvr
+		return
+	fi
+	local f
+	for f in "$HOME"/Applications/*.AppImage "$HOME"/AppImages/*.AppImage "$HOME"/.local/bin/*.AppImage; do
+		case "${f##*/}" in [Ww]ay[Vv][Rr]*) [ -x "$f" ] && { echo "$f"; return; } ;; esac
+	done
+}
+# WayVR's own single-instance pid file ($XDG_RUNTIME_DIR/wayvr.pid): the pid when that WayVR still runs.
+wayvr_running_pid() {
+	local f="${XDG_RUNTIME_DIR:-/tmp}/wayvr.pid" p
+	[ -r "$f" ] || return 1
+	p=$(tr -dc 0-9 <"$f")
+	[ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"
+}
+WAYVR_BIN=$(find_wayvr)
+if [ "$WAYVR" = 1 ]; then
+	if [ -z "$WAYVR_BIN" ]; then
+		echo "  [!!] WayVR (desktop in VR) is on but not installed: Arch: the AUR package wayvr; others: the AppImage from"
+		echo "       https://github.com/wayvr-org/wayvr/releases in ~/Applications. SteamVR starts without it."
+		WAYVR=0
+	else
+		echo "  [ok] WayVR: $WAYVR_BIN"
+		# Its mouse and keyboard go through /dev/uinput; without access it runs, but clicks and typing do nothing.
+		if [ -w /dev/uinput ]; then
+			echo "  [ok] WayVR may send mouse and keyboard input (/dev/uinput)"
+		else
+			echo "  [??] WayVR can't send mouse or keyboard input: no write access to /dev/uinput (WayVR asks for the"
+			echo "       input group: sudo usermod -aG input $USER, then log out and in)"
+		fi
+		if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+			# Wayland: screens come through the desktop's screen-cast portal and PipeWire (WayVR picks its own method).
+			if command -v busctl >/dev/null; then
+				if v=$(busctl --user get-property org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop \
+					org.freedesktop.portal.ScreenCast version 2>/dev/null); then
+					echo "  [ok] screen-cast portal (version ${v#u }): WayVR asks which screens to show the first time"
+				else
+					echo "  [??] no screen-cast portal answers (xdg-desktop-portal and your desktop's portal backend):"
+					echo "       WayVR can't show your screens"
+				fi
+			fi
+			if [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pipewire-0" ]; then
+				echo "  [ok] PipeWire running"
+			else
+				echo "  [??] PipeWire isn't running: WayVR can't show your screens"
+			fi
+		elif [ -n "${DISPLAY:-}" ]; then
+			echo "  [ok] X11 desktop ($DISPLAY): WayVR's X11 capture (slower, no HiDPI scaling; restart it after display changes)"
+		else
+			echo "  [??] no Wayland or X11 desktop in this environment: WayVR can't show your screens"
+		fi
+		if p=$(wayvr_running_pid); then
+			echo "  [ok] WayVR already running (pid $p): left as it is, not started again or stopped"
+		fi
+	fi
+elif [ -n "$WAYVR_BIN" ]; then
+	echo "  [--] WayVR installed ($WAYVR_BIN); DriverKit Settings: Start WayVR with SteamVR to start it with each session"
+fi
 if [ -f "$BACKUP" ]; then
 	echo "  [!!] a backup from a previous run exists; restoring it before continuing"
 	restore_config
@@ -194,7 +260,7 @@ fi
 echo
 echo "== Registering our plugin (Sony's driver disabled for this session)"
 cp -f "$VRPATH" "$BACKUP"
-trap 'restore_config; controllers_off' EXIT
+trap 'restore_config; controllers_off; declare -F wayvr_stop >/dev/null && wayvr_stop' EXIT
 trap 'echo; echo "Interrupted, stopping SteamVR..."; pkill -INT -x vrmonitor; pkill -INT -x vrserver; sleep 3' INT TERM
 
 python3 -I - "$BACKUP" "$VRPATH" "$PLUGIN" <<'EOF'
@@ -418,6 +484,64 @@ if [ "${TRACKING:-0}" = 1 ] || [ "${JITTER_CHECK:-0}" = 1 ]; then
 	fi
 fi
 
+# WayVR supervision: started before SteamVR (--wait: it connects when SteamVR is up), restarted after 5, 15 and 60 s
+# if it dies while SteamVR runs (then left off, with the reason in its log), stopped after SteamVR exits. The AppImage
+# variables of DriverKit's own AppImage are taken out: WayVR reads APPIMAGE as its own path.
+WAYVR_SUP_PID=""
+WAYVR_STOP_FLAG=""
+wayvr_supervise() {
+	local delays=(5 15 60) n=0 pid rc
+	while :; do
+		env -u APPIMAGE -u APPDIR -u ARGV0 -u OWD -u PSVR2_DRIVERKIT_FROM_APPIMAGE \
+			"$WAYVR_BIN" --openvr --wait --log-to "$WAYVR_LOG" >>"$WAYVR_LOG.out" 2>&1 &
+		pid=$!
+		echo "$pid" >"$WAYVR_STOP_FLAG.pid"
+		wait "$pid"
+		rc=$?
+		[ -e "$WAYVR_STOP_FLAG" ] && return 0
+		if ! pgrep -x vrserver >/dev/null; then
+			echo "  WayVR exited (code $rc) as SteamVR ended"
+			return 0
+		fi
+		if [ "$n" -ge ${#delays[@]} ]; then
+			echo "  [!!] WayVR stopped (code $rc) for the 4th time; not restarted. Its log: $WAYVR_LOG"
+			return 1
+		fi
+		echo "  [??] WayVR stopped unexpectedly (code $rc); restarting in ${delays[$n]} s (log: $WAYVR_LOG)"
+		sleep "${delays[$n]}"
+		[ -e "$WAYVR_STOP_FLAG" ] && return 0
+		n=$((n + 1))
+	done
+}
+wayvr_stop() {
+	[ -n "$WAYVR_SUP_PID" ] || return 0
+	: >"$WAYVR_STOP_FLAG"
+	local pid i
+	pid=$(cat "$WAYVR_STOP_FLAG.pid" 2>/dev/null)
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		kill -TERM "$pid" 2>/dev/null
+		for i in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+		if kill -0 "$pid" 2>/dev/null; then
+			kill -KILL "$pid" 2>/dev/null
+			echo "  WayVR didn't stop within 5 s; killed"
+		else
+			echo "  WayVR stopped"
+		fi
+	fi
+	kill "$WAYVR_SUP_PID" 2>/dev/null
+	wait "$WAYVR_SUP_PID" 2>/dev/null
+	rm -f "$WAYVR_STOP_FLAG" "$WAYVR_STOP_FLAG.pid"
+	WAYVR_SUP_PID=""
+}
+if [ "$WAYVR" = 1 ] && ! wayvr_running_pid >/dev/null; then
+	WAYVR_LOG="$LOGDIR/wayvr-$STAMP.log"
+	WAYVR_STOP_FLAG="$LOGDIR/.wayvr-stop-$STAMP"
+	rm -f "$WAYVR_STOP_FLAG"
+	wayvr_supervise &
+	WAYVR_SUP_PID=$!
+	echo "  WayVR started, waiting for SteamVR (log: $WAYVR_LOG). Show/hide its overlays: double-press Triangle"
+fi
+
 echo
 echo "== Starting SteamVR (close SteamVR or press Ctrl+C here when done)"
 echo "   Hold both Sense controllers in front of the headset after it shows up."
@@ -504,6 +628,7 @@ else
 	while pgrep -x vrserver >/dev/null; do sleep 2; done
 	[ -n "$ROOM_SETUP_PID" ] && kill "$ROOM_SETUP_PID" 2>/dev/null
 	echo "  SteamVR exited."
+	wayvr_stop
 	if [ -n "$GAME_PID" ]; then
 		wait "$GAME_PID" 2>/dev/null
 		echo; echo "== The game's OpenXR frame timing on SteamVR"

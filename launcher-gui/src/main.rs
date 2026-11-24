@@ -152,6 +152,8 @@ fn default_settings() -> Vec<Setting> {
               "on (default): see-through on the headset button and SteamVR's Room View. noimages: SteamVR's camera set up, but no picture sent. off: no camera for SteamVR at all (your SteamVR camera settings left alone). For Intel Arc GPUs, where SteamVR's compositor crashes (-203) about 2 s after start: one start with each value shows which part triggers it.", "on", true).steamvr(),
         value("OVRN_SONY_PROPS", "Sony's extra display properties",
               "Which of Sony's headset properties to report: all (the plugin's default, as Sony's driver and PSVR2Toolkit), none, or a list of throttle, framerate, syslayer, texindex, supersample, dsc, edid, display, mask.", "all", false).steamvr(),
+        toggle("WAYVR", "Start WayVR with SteamVR (desktop in VR)",
+               "Off (default). On: Start SteamVR also starts WayVR (a separate desktop overlay program you install yourself: Arch AUR package wayvr, or its AppImage from github.com/wayvr-org/wayvr/releases in ~/Applications), before SteamVR as WayVR asks, and stops it afterwards. Your screens in VR on Wayland and X11; the first time, your desktop asks which screens to share. Sense controllers: double-press Triangle shows/hides it, L2/R2 click, L1/R1 grab, sticks scroll. This is WayVR, not SteamVR's own Desktop panel.", false).steamvr(),
         toggle("RECORD_DATASET", "Record controller dataset", "Record LED tracking data (logs/).", false).steamvr(),
         toggle("RECORD_SLAM", "Record headset SLAM", "Record the headset's raw SLAM stream (logs/).", false).steamvr(),
         toggle("RECORD_CAMERA", "Record camera images", "Record camera transfers (~2 GB/min, logs/).", false).steamvr(),
