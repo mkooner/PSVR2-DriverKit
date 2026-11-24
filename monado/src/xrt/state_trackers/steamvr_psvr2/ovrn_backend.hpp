@@ -17,6 +17,8 @@
 #include <utility>
 #include <vector>
 
+class OvrnDirectMode; // ovrn_direct_mode.hpp
+
 namespace ovrn {
 
 //! CLOCK_MONOTONIC in ns: the one clock of the driver and its backends.
@@ -374,13 +376,25 @@ public:
 	//! Once per SteamVR frame (RunFrame thread): read the controllers' inputs, room housekeeping.
 	virtual void
 	runFrame(int64_t now_ns) = 0;
+
+	/*!
+	 * Driver direct mode (DriverKit's setting, off by default; ovrn_settings.hpp direct_mode_wanted): the component
+	 * SteamVR hands its finished frames to, shown by Monado's compositor. Owned by the backend; nullptr when direct
+	 * mode is off or Monado's compositor couldn't start (SteamVR then drives the display as usual).
+	 */
+	virtual OvrnDirectMode *
+	directMode()
+	{
+		return nullptr;
+	}
 };
 
 //! A simulated headset and two controllers at fixed poses (no hardware): for the driver skeleton and its tests.
 std::unique_ptr<Backend>
 make_sim_backend();
 
-//! Monado's devices (the PS VR2 and Sense drivers, unchanged), created inside vrserver without a compositor.
+//! Monado's devices (the PS VR2 and Sense drivers, unchanged), created inside vrserver; with Monado's compositor only
+//! in driver direct mode.
 std::unique_ptr<Backend>
 make_monado_backend();
 

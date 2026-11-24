@@ -4,13 +4,15 @@
  * @file
  * @brief  The headset: a plain display device. SteamVR owns the display, composites, paces and reprojects; the
  *         driver describes the display and hands over head poses (after ALVR's HMD.cpp on Linux: IVRDisplayComponent,
- *         IsDisplayRealDisplay true, no direct mode component).
+ *         IsDisplayRealDisplay true). In driver direct mode (DriverKit's setting, off by default) SteamVR hands its
+ *         frames to the driver instead and Monado's compositor shows them (ovrn_direct_mode.hpp).
  * @ingroup st_ovrn
  */
 
 #pragma once
 
 #include "ovrn_camera.hpp"
+#include "ovrn_direct_mode.hpp"
 #include "ovrn_device.hpp"
 #include "ovrn_presence_log.hpp"
 #include "ovrn_settings.hpp"
@@ -111,7 +113,7 @@ public:
 
 	explicit Hmd(Backend *backend)
 	    : TrackedDevice(vr::TrackedDeviceClass_HMD, backend->headInfo().serial), m_backend(backend),
-	      m_info(backend->headInfo()), m_display(backend->display())
+	      m_info(backend->headInfo()), m_display(backend->display()), m_direct(backend->directMode())
 	{
 		// OVRN_POSE_MODEL=predicted: the driver predicts (one refresh plus vsync-to-photons ahead, OVRN_PREDICT_MS)
 		// and hands the pose over with zero velocity, as ALVR does. Default: SteamVR predicts (see updatePose).
@@ -144,39 +146,14 @@ public:
 	void
 	updatePose(int64_t now_ns) override
 	{
-		TrackedPose t;
-		vr::DriverPose_t pose = identityPose();
-		pose.deviceIsConnected = true;
-		setWorld(pose, m_backend->worldFromDriver());
-		if (!m_backend->headPose(now_ns + predict_ns.load(), &t) || !t.orientation_valid) {
-			pose.poseIsValid = false;
-			pose.result = vr::TrackingResult_Uninitialized;
-			m_presence.headPose(false, now_ns);
-			submitPose(pose);
-			return;
+		vr::DriverPose_t pose;
+		int64_t frame_target = 0;
+		if (directFramePose(now_ns, &pose, &frame_target)) {
+			m_direct->logSubmittedPose(frame_target, pose);
+		} else {
+			pose = buildPose(now_ns + predict_ns.load(), !m_driverPredicts, now_ns);
 		}
-		pose.poseIsValid = true;
-		pose.result = t.orientation_tracked ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange;
-		pose.qRotation = {t.pose.orientation.w, t.pose.orientation.x, t.pose.orientation.y, t.pose.orientation.z};
-		if (t.position_valid) {
-			m_lastPosition = t.pose.position;
-		}
-		// Without a position the last known one is kept (not the origin: the view would jump there).
-		pose.vecPosition[0] = m_lastPosition.x;
-		pose.vecPosition[1] = m_lastPosition.y;
-		pose.vecPosition[2] = m_lastPosition.z;
-		if (!m_driverPredicts) {
-			pose.vecVelocity[0] = t.linear_velocity.x;
-			pose.vecVelocity[1] = t.linear_velocity.y;
-			pose.vecVelocity[2] = t.linear_velocity.z;
-			const Vec3 w = rotateInverse(t.pose.orientation, t.angular_velocity);
-			pose.vecAngularVelocity[0] = w.x;
-			pose.vecAngularVelocity[1] = w.y;
-			pose.vecAngularVelocity[2] = w.z;
-			// The pose is for now_ns; SteamVR takes it as valid at the moment of the call plus this offset.
-			pose.poseTimeOffset = (double)(now_ns - ovrn::now_ns()) * 1e-9;
-		}
-		m_presence.headPose(pose.result == vr::TrackingResult_Running_OK, now_ns);
+		m_presence.headPose(pose.poseIsValid && pose.result == vr::TrackingResult_Running_OK, now_ns);
 		submitPose(pose);
 
 		// The IPD dial: twice a second, new eye poses go to SteamVR when they changed.
@@ -184,6 +161,16 @@ public:
 			m_eyeCheckNs = now_ns;
 			Pose eyes[2];
 			if (m_backend->eyePoses(eyes)) {
+				if (m_direct != nullptr) {
+					struct xrt_pose x[2];
+					for (int e = 0; e < 2; e++) {
+						x[e].orientation = {(float)eyes[e].orientation.x, (float)eyes[e].orientation.y,
+						                    (float)eyes[e].orientation.z, (float)eyes[e].orientation.w};
+						x[e].position = {(float)eyes[e].position.x, (float)eyes[e].position.y,
+						                 (float)eyes[e].position.z};
+					}
+					m_direct->setEyes(x);
+				}
 				// The pose thread: under withActive, so not after Deactivate.
 				withActive([&](uint32_t id, vr::PropertyContainerHandle_t container) {
 					const float ipd = (float)(eyes[1].position.x - eyes[0].position.x);
@@ -201,6 +188,10 @@ public:
 	{
 		if (name != nullptr && std::string(name) == vr::IVRDisplayComponent_Version) {
 			return static_cast<vr::IVRDisplayComponent *>(this);
+		}
+		if (name != nullptr && m_direct != nullptr && std::string(name) == vr::IVRDriverDirectModeComponent_Version) {
+			log("ovrn: direct mode: SteamVR asked for the direct mode component\n");
+			return static_cast<vr::IVRDriverDirectModeComponent *>(m_direct);
 		}
 		if (name != nullptr && m_camera && std::string(name) == vr::IVRCameraComponent_Version) {
 			return static_cast<vr::IVRCameraComponent *>(m_camera.get());
@@ -225,10 +216,11 @@ public:
 		return false;
 	}
 
+	//! In direct mode the frames come to the driver: SteamVR must not take the headset's display itself (as ALVR).
 	bool
 	IsDisplayRealDisplay() override
 	{
-		return true;
+		return m_direct == nullptr;
 	}
 
 	void
@@ -289,6 +281,9 @@ protected:
 	{
 		if (m_camera) {
 			m_camera->shutdown();
+		}
+		if (m_direct != nullptr) {
+			m_direct->stop();
 		}
 	}
 
@@ -358,6 +353,7 @@ protected:
 		}
 		vr::VRServerDriverHost()->SetDisplayEyeToHead(object_id, eye[0], eye[1]);
 		loadHiddenArea();
+		setupDirectMode();
 		setupCamera();
 		setupHeadButton();
 		setupProximity();
@@ -366,13 +362,107 @@ protected:
 		    "head pose: %s, backend %s\n",
 		    m_info.model.c_str(), m_info.serial.c_str(), m_display.width, m_display.height, m_display.refresh_hz,
 		    m_display.eye[0].render_w, m_display.eye[0].render_h, ipd * 1000.0, m_display.vsync_to_photons_s,
-		    m_driverPredicts ? "predicted by the driver, zero velocity (OVRN_POSE_MODEL=predicted)"
-		                     : "for now with velocities and its age, SteamVR predicts",
+		    m_direct != nullptr ? "Monado's prediction for each frame's display time, zero velocity (direct mode)"
+		    : m_driverPredicts  ? "predicted by the driver, zero velocity (OVRN_POSE_MODEL=predicted)"
+		                        : "for now with velocities and its age, SteamVR predicts",
 		    m_backend->name());
 		return vr::VRInitError_None;
 	}
 
 private:
+	/*!
+	 * The head pose at @p at_ns as SteamVR takes it: with its velocities and age (@p with_velocity, SteamVR predicts
+	 * from it), else zero velocity (a pose already predicted for its display time). Any thread: the last position is
+	 * kept under its own mutex.
+	 */
+	vr::DriverPose_t
+	buildPose(int64_t at_ns, bool with_velocity, int64_t now_ns)
+	{
+		TrackedPose t;
+		vr::DriverPose_t pose = identityPose();
+		pose.deviceIsConnected = true;
+		setWorld(pose, m_backend->worldFromDriver());
+		if (!m_backend->headPose(at_ns, &t) || !t.orientation_valid) {
+			pose.poseIsValid = false;
+			pose.result = vr::TrackingResult_Uninitialized;
+			return pose;
+		}
+		pose.poseIsValid = true;
+		pose.result = t.orientation_tracked ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange;
+		pose.qRotation = {t.pose.orientation.w, t.pose.orientation.x, t.pose.orientation.y, t.pose.orientation.z};
+		Vec3 position;
+		{
+			std::lock_guard<std::mutex> lock(m_lastPositionMutex);
+			if (t.position_valid) {
+				m_lastPosition = t.pose.position;
+			}
+			// Without a position the last known one is kept (not the origin: the view would jump there).
+			position = m_lastPosition;
+		}
+		pose.vecPosition[0] = position.x;
+		pose.vecPosition[1] = position.y;
+		pose.vecPosition[2] = position.z;
+		if (with_velocity) {
+			pose.vecVelocity[0] = t.linear_velocity.x;
+			pose.vecVelocity[1] = t.linear_velocity.y;
+			pose.vecVelocity[2] = t.linear_velocity.z;
+			const Vec3 w = rotateInverse(t.pose.orientation, t.angular_velocity);
+			pose.vecAngularVelocity[0] = w.x;
+			pose.vecAngularVelocity[1] = w.y;
+			pose.vecAngularVelocity[2] = w.z;
+			// The pose is for now_ns; SteamVR takes it as valid at the moment of the call plus this offset.
+			pose.poseTimeOffset = (double)(now_ns - ovrn::now_ns()) * 1e-9;
+		}
+		return pose;
+	}
+
+	/*!
+	 * Direct mode: one head pose per frame, Monado's prediction for the display time of the frame being rendered
+	 * (zero velocity), the same pose for that frame from every thread (OvrnFramePose: the game's pose and SteamVR's
+	 * layer label must match, or Monado re-warps from the wrong pose). False when not in direct mode or no frame
+	 * target near now (before the first frame): the usual pose then.
+	 */
+	bool
+	directFramePose(int64_t now_ns, vr::DriverPose_t *out, int64_t *out_target)
+	{
+		if (m_direct == nullptr) {
+			return false;
+		}
+		const int64_t at = m_direct->displayTarget();
+		if (at <= now_ns - 30'000'000LL || at >= now_ns + 100'000'000LL) {
+			return false;
+		}
+		*out = m_framePose.get(at, [&] { return buildPose(at, false, now_ns); }, out_target);
+		return true;
+	}
+
+	/*!
+	 * Driver direct mode (DriverKit's setting): SteamVR renders into images the driver allocates and hands each
+	 * finished frame over (IVRDriverDirectModeComponent, paced by the driver's vsync events), and Monado's compositor
+	 * shows them on the headset. Before PostPresent's vsync event the new frame's pose is submitted, so SteamVR has it
+	 * when it wakes the game (Valve's direct-mode sequence).
+	 */
+	void
+	setupDirectMode()
+	{
+		if (m_direct == nullptr) {
+			return;
+		}
+		vr::CVRPropertyHelpers *props = vr::VRProperties();
+		props->SetBoolProperty(m_container, vr::Prop_HasDriverDirectModeComponent_Bool, true);
+		props->SetBoolProperty(m_container, vr::Prop_DriverDirectModeSendsVsyncEvents_Bool, true);
+		m_direct->on_frame_start = [this](int64_t display_ns) {
+			withActive([&](uint32_t id, vr::PropertyContainerHandle_t) {
+				int64_t used = display_ns;
+				const vr::DriverPose_t pose =
+				    m_framePose.get(display_ns, [&] { return buildPose(display_ns, false, now_ns()); }, &used);
+				m_direct->logSubmittedPose(used, pose);
+				vr::VRServerDriverHost()->TrackedDevicePoseUpdated(id, pose, sizeof(vr::DriverPose_t));
+			});
+		};
+		m_direct->start((float)m_display.refresh_hz, getenv("OVRN_DIRECT_MODE_LOG"));
+	}
+
 	/*!
 	 * The passthrough cameras (SteamVR's Room View and the camera in Room Setup), when the backend has them. Their
 	 * calibration comes with the headset's calibration block; waits up to 3 s for it. OVRN_CAMERA=0: no camera.
@@ -506,6 +596,18 @@ private:
 	void
 	setupCamera()
 	{
+		/*
+		 * Driver direct mode: no camera for SteamVR. With a direct-mode driver SteamVR's compositor always uses its
+		 * Facet renderer (vrcompositor 2.18.4 forces useFacetRenderer on when its IVRDriverDirectInternal interface
+		 * is there, whatever the setting), and Facet aborts on SteamVR's tracked-camera code: "ASSERT NOIMPL at
+		 * facetrenderer.cpp:3572" < 1 s after Room View was created, 2026-11-24 11:37:30 and 11:37:54 (-203);
+		 * SteamVR-for-Linux #909, the same assert with a PS VR2: Facet lacks the event queries the camera uses.
+		 */
+		if (m_direct != nullptr) {
+			log("ovrn: headset cameras: off in direct mode (SteamVR's Facet renderer, which direct mode uses, can't "
+			    "show its camera views: SteamVR-for-Linux #909)\n");
+			return;
+		}
 		std::string source, invalid;
 		const CameraMode mode = camera_mode(&source, &invalid);
 		if (!invalid.empty()) {
@@ -619,7 +721,10 @@ private:
 	const DeviceInfo m_info;
 	const DisplayInfo m_display;
 	bool m_driverPredicts = false;
-	Vec3 m_lastPosition;      //!< pose thread only
+	OvrnDirectMode *const m_direct; //!< the backend's, nullptr unless driver direct mode is on
+	OvrnFramePose m_framePose;      //!< direct mode: the one head pose of each frame
+	std::mutex m_lastPositionMutex;
+	Vec3 m_lastPosition; //!< under m_lastPositionMutex (pose thread, direct mode's frame thread)
 	int64_t m_eyeCheckNs = 0; //!< pose thread only
 };
 

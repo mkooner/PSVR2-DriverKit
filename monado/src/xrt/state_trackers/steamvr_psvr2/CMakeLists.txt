@@ -12,6 +12,8 @@ add_library(
 	ovrn_camera_fit.hpp
 	ovrn_controller.hpp
 	ovrn_device.hpp
+	ovrn_direct_mode.hpp
+	ovrn_frame_recorder.hpp
 	ovrn_hand_skeleton.hpp
 	ovrn_hmd.hpp
 	ovrn_interface.h
@@ -23,11 +25,16 @@ add_library(
 	ovrn_room_log.hpp
 	ovrn_room_state.hpp
 	ovrn_settings.hpp
+	ovrn_steamvr_sync.hpp
+	ovrn_vk_wait.hpp
 	)
 target_include_directories(st_ovrn INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(
 	st_ovrn PRIVATE xrt-external-openvr xrt-external-bcdec xrt-external-cjson xrt-interfaces aux_math aux_util
 	)
+
+# Driver direct mode waits on SteamVR's per-texture timeline semaphores with a small Vulkan device.
+target_link_libraries(st_ovrn PRIVATE Vulkan::Vulkan)
 
 # Disconnecting the Sense controllers through BlueZ when SteamVR closes (system D-Bus).
 if(XRT_HAVE_DBUS)

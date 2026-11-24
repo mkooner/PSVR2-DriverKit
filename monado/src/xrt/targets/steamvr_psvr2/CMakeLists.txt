@@ -5,7 +5,6 @@
 set(OVRN_DIR "${PROJECT_BINARY_DIR}/steamvr-monado-psvr2")
 
 add_library(driver_monado_psvr2 MODULE main.c)
-# Monado's devices without a compositor: SteamVR owns the display.
 target_link_libraries(
 	driver_monado_psvr2
 	PRIVATE
@@ -14,8 +13,15 @@ target_link_libraries(
 		aux_util
 		st_prober
 		target_lists
-		target_instance_no_comp
 	)
+# With Monado's compositor when it is built: driver direct mode (DriverKit's setting, off by default) runs it inside
+# vrserver to show SteamVR's frames. With direct mode off no compositor is created (devices only, SteamVR owns the
+# display), the same as with target_instance_no_comp.
+if(TARGET target_instance)
+	target_link_libraries(driver_monado_psvr2 PRIVATE target_instance)
+else()
+	target_link_libraries(driver_monado_psvr2 PRIVATE target_instance_no_comp)
+endif()
 
 file(COPY driver.vrdrivermanifest DESTINATION ${OVRN_DIR})
 

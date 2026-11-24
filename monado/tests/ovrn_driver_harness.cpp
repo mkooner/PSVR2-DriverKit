@@ -1132,16 +1132,38 @@ main(int argc, char **argv)
 
 		IVRDisplayComponent *display = (IVRDisplayComponent *)hmd->GetComponent(IVRDisplayComponent_Version);
 		check(display != nullptr, "the headset has a display component");
-		check(hmd->GetComponent(IVRDriverDirectModeComponent_Version) == nullptr &&
-		          hmd->GetComponent(IVRVirtualDisplay_Version) == nullptr,
-		      "no direct mode or virtual display component: SteamVR owns the display");
+		// Driver direct mode (OVRN_DIRECT_MODE=1 with --monado and XRT_COMPOSITOR_NULL=true: Monado's compositor
+		// without a display): SteamVR hands its frames to the driver instead of owning the display.
+		const char *direct_env = getenv("OVRN_DIRECT_MODE");
+		const bool direct = monado && direct_env != nullptr && strcmp(direct_env, "1") == 0;
+		if (direct) {
+			bool has_dm = false, sends_vsync = false;
+			check(hmd->GetComponent(IVRDriverDirectModeComponent_Version) != nullptr &&
+			          hmd->GetComponent(IVRVirtualDisplay_Version) == nullptr,
+			      "direct mode: the headset hands SteamVR the direct mode component");
+			check(prop(0, Prop_HasDriverDirectModeComponent_Bool, &has_dm) && has_dm &&
+			          prop(0, Prop_DriverDirectModeSendsVsyncEvents_Bool, &sends_vsync) && sends_vsync,
+			      "direct mode: it reports the component and that it sends the vsync events");
+			check(hmd->GetComponent(IVRCameraComponent_Version) == nullptr,
+			      "direct mode: no camera for SteamVR (its Facet renderer aborts on camera views, #909)");
+		} else {
+			check(hmd->GetComponent(IVRDriverDirectModeComponent_Version) == nullptr &&
+			          hmd->GetComponent(IVRVirtualDisplay_Version) == nullptr,
+			      "no direct mode or virtual display component: SteamVR owns the display");
+		}
 		if (display != nullptr) {
 			int32_t x, y;
 			uint32_t w, h;
 			display->GetWindowBounds(&x, &y, &w, &h);
 			check(monado ? (w > 0 && h > 0) : (w == 4000 && h == 2040), "window bounds are the panel size");
 			const uint32_t pw = w, ph = h;
-			check(display->IsDisplayRealDisplay() && !display->IsDisplayOnDesktop(), "real display, not on desktop");
+			if (direct) {
+				check(!display->IsDisplayRealDisplay() && !display->IsDisplayOnDesktop(),
+				      "direct mode: not a real display for SteamVR (it doesn't take the headset's display)");
+			} else {
+				check(display->IsDisplayRealDisplay() && !display->IsDisplayOnDesktop(),
+				      "real display, not on desktop");
+			}
 			uint32_t rw, rh;
 			display->GetRecommendedRenderTargetSize(&rw, &rh);
 			check(monado ? (rw > 0 && rh > 0) : (rw == 2000 && rh == 2040), "recommended render target per eye");
