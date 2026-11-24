@@ -723,6 +723,9 @@ struct Launcher {
     deps: Arc<Mutex<DepsState>>,
     /// The Compile tab's Version list: the releases on GitHub.
     releases: Arc<Mutex<ReleasesState>>,
+    /// A file/folder dialog open on its own thread (rfd's dialogs wait until they close; on the UI thread the window
+    /// stopped answering and GNOME offered to force-quit DriverKit). Its result, picked up by apply_picked.
+    picker: Arc<Mutex<PickerState>>,
     /// SteamVR's high-priority GPU queue state (getcap), checked at most every 5 s.
     high_priority: Option<(Instant, Option<bool>)>,
     /// --screenshot <file.png> [launcher|settings|compile]: render one tab, save it, quit (for checking the design).
@@ -806,6 +809,7 @@ impl Launcher {
             check: Arc::new(Mutex::new(CheckState::default())),
             deps: Arc::new(Mutex::new(DepsState::default())),
             releases: Arc::new(Mutex::new(ReleasesState::default())),
+            picker: Arc::new(Mutex::new(PickerState::default())),
             high_priority: None,
             screenshot: None,
             reg_cache: None,
@@ -1256,6 +1260,19 @@ fn short_date(iso: &str) -> String {
 }
 
 /// The Compile tab's Version list (list_releases, on a thread when the tab is first shown or on Refresh).
+/// What a dialog picks: the OpenXR app to launch, or the install folder.
+#[derive(Clone, Copy, PartialEq)]
+enum PickFor {
+    App,
+    InstallDir,
+}
+
+#[derive(Default)]
+struct PickerState {
+    open: bool,
+    picked: Option<(PickFor, PathBuf)>,
+}
+
 #[derive(Default)]
 struct ReleasesState {
     running: bool,
@@ -1769,7 +1786,42 @@ impl Launcher {
         }
     }
 
+    /// Opens a file (App) or folder (InstallDir) dialog on its own thread; one at a time.
+    fn open_picker(&mut self, ctx: &egui::Context, what: PickFor) {
+        {
+            let mut p = self.picker.lock().unwrap();
+            if p.open {
+                return;
+            }
+            p.open = true;
+        }
+        let state = self.picker.clone();
+        let ctx = ctx.clone();
+        let dir = self.cfg.install_dir.clone();
+        thread::spawn(move || {
+            let r = match what {
+                PickFor::App => rfd::FileDialog::new().pick_file(),
+                PickFor::InstallDir => rfd::FileDialog::new().set_directory(&dir).pick_folder(),
+            };
+            let mut p = state.lock().unwrap();
+            p.open = false;
+            p.picked = r.map(|path| (what, path));
+            ctx.request_repaint();
+        });
+    }
+
+    /// The path the dialog thread picked, into the field it was for.
+    fn apply_picked(&mut self) {
+        let picked = self.picker.lock().unwrap().picked.take();
+        match picked {
+            Some((PickFor::App, p)) => self.app_path = p.display().to_string(),
+            Some((PickFor::InstallDir, p)) => self.cfg.install_dir = p.display().to_string(),
+            None => {}
+        }
+    }
+
     fn launcher_tab(&mut self, ui: &mut egui::Ui, st: &Status) {
+        self.apply_picked();
         let steamvr = st.steamvr || self.steamvr.is_some();
         theme::section(ui, "SteamVR with our driver", |ui| {
             theme::note(ui, "Starts SteamVR with the PS VR2 driver. Games you start from Steam then run in the headset.");
@@ -1850,10 +1902,9 @@ impl Launcher {
                 ui.label("App");
                 let w = (ui.available_width() - 100.0).max(200.0);
                 ui.add(egui::TextEdit::singleline(&mut self.app_path).hint_text("Path to an OpenXR app").desired_width(w));
-                if ui.button("Browse...").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().pick_file() {
-                        self.app_path = p.display().to_string();
-                    }
+                let picking = self.picker.lock().unwrap().open;
+                if ui.add_enabled(!picking, egui::Button::new("Browse...")).clicked() {
+                    self.open_picker(ui.ctx(), PickFor::App);
                 }
             });
             ui.horizontal(|ui| {
@@ -2087,6 +2138,7 @@ impl Launcher {
     }
 
     fn compile_tab(&mut self, ui: &mut egui::Ui, st: &Status) {
+        self.apply_picked();
         let steamvr = st.steamvr || self.steamvr.is_some();
         let (running, frac, done, total, step, result, tail) = {
             let b = self.build.lock().unwrap();
@@ -2100,10 +2152,9 @@ impl Launcher {
                 ui.label("Install location");
                 let w = (ui.available_width() - 200.0).max(240.0);
                 ui.add(egui::TextEdit::singleline(&mut self.cfg.install_dir).desired_width(w));
-                if ui.button("Browse...").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().set_directory(&self.cfg.install_dir).pick_folder() {
-                        self.cfg.install_dir = p.display().to_string();
-                    }
+                let picking = self.picker.lock().unwrap().open;
+                if ui.add_enabled(!picking, egui::Button::new("Browse...")).clicked() {
+                    self.open_picker(ui.ctx(), PickFor::InstallDir);
                 }
                 if ui.button("Default").on_hover_text(default_install_dir()).clicked() {
                     self.cfg.install_dir = default_install_dir();
