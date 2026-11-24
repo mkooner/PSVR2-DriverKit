@@ -57,3 +57,6 @@ launcher-gui/target/
 tools/xreyetest
 dist/
 appimage/.tools/
+
+# Website build output (site/build.py)
+site/_site/

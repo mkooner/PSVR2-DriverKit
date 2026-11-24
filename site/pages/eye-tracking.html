@@ -1,0 +1,21 @@
+<!--
+{"path": "eye-tracking/", "title": "PSVR2 Eye Tracking on Linux for SteamVR and OpenXR", "description": "PlayStation VR2 eye tracking on Linux: gaze for SteamVR's eye-tracking input and OpenXR's XR_EXT_eye_gaze_interaction. Works today; per-user calibration is planned.", "breadcrumb": "Eye tracking"}
+-->
+<h1>PSVR2 eye tracking on Linux</h1>
+<p class="lead">PSVR2-DriverKit passes the headset's built-in eye tracking on to SteamVR and OpenXR apps. Nothing to
+  set up: it's on whenever the driver runs.</p>
+
+<div class="table-wrap"><table>
+  <thead><tr><th>Runtime</th><th>Interface</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>SteamVR</td><td>SteamVR's eye-tracking input on the headset</td><td><span class="status part">Works</span></td></tr>
+    <tr><td>OpenXR (Monado)</td><td><code>XR_EXT_eye_gaze_interaction</code></td><td><span class="status part">Works</span></td></tr>
+  </tbody>
+</table></div>
+
+<h2>Limitations</h2>
+<ul>
+  <li><strong>No per-user calibration yet.</strong> Gaze comes from the headset's own estimate and can be a few degrees off for some people. Calibration is planned.</li>
+  <li>Only games and apps that read eye-gaze input use it.</li>
+</ul>
+<p>Technical details: <a href="{{repo}}/blob/main/docs/psvr2-eye-tracking.md">eye tracking documentation</a>.</p>

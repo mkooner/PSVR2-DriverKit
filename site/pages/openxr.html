@@ -1,0 +1,31 @@
+<!--
+{"path": "openxr/", "title": "PSVR2 OpenXR on Linux with Monado (Without SteamVR)", "description": "Run native Linux OpenXR apps on the PlayStation VR2 with Monado, without SteamVR: head and controller tracking, eye gaze and how to launch apps.", "breadcrumb": "OpenXR"}
+-->
+<h1>PSVR2 with OpenXR on Linux</h1>
+<p class="lead">PSVR2-DriverKit includes a fork of <a href="https://monado.freedesktop.org/">Monado</a>, the
+  open-source OpenXR runtime, with the PS VR2 and Sense controller drivers. Native Linux OpenXR apps run on it
+  directly, without SteamVR.</p>
+
+<h2>What OpenXR apps get</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Feature</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>Headset 6DoF, distortion, IPD</td><td><span class="status stable">Stable</span></td></tr>
+    <tr><td>Sense controllers: 6DoF, inputs, haptics</td><td><span class="status stable">Stable</span></td></tr>
+    <tr><td>Eye gaze (<code>XR_EXT_eye_gaze_interaction</code>)</td><td><span class="status part">Works</span> (no per-user calibration)</td></tr>
+    <tr><td>Bare-hand tracking</td><td><span class="status exp">Experimental</span></td></tr>
+    <tr><td>Passthrough</td><td><span class="status no">Not available</span></td></tr>
+  </tbody>
+</table></div>
+
+<h2>Launch an app</h2>
+<p><strong>In DriverKit:</strong> Launcher → <strong>Start monado-service</strong>, then <strong>Launch app</strong>.</p>
+<p><strong>In a terminal:</strong></p>
+<pre><code>~/.local/share/PSVR2-DriverKit/kit/launch-openxr.sh /path/to/openxr-app</code></pre>
+<p>The script starts monado-service, points the app at it with <code>XR_RUNTIME_JSON</code>, and stops the service
+  when the app exits.</p>
+
+<h2>SteamVR or Monado?</h2>
+<p>Use SteamVR for SteamVR games, Proton games, Room View and room setup. Use Monado for native Linux OpenXR apps
+  without SteamVR. Only one can use the headset at a time.</p>
+<p>Technical details: <a href="{{repo}}/blob/main/docs/psvr2-openxr-linux.md">OpenXR documentation</a>.</p>

@@ -1,0 +1,46 @@
+<!--
+{"path": "compatibility/", "title": "PSVR2 Linux Compatibility: GPUs, Desktops and Distributions", "description": "Which GPUs, desktops and Linux distributions work with PSVR2-DriverKit, what has been tested, and which features work in SteamVR and OpenXR.", "breadcrumb": "Compatibility"}
+-->
+<h1>PSVR2 Linux compatibility</h1>
+<p class="lead">"Tested" means someone ran it and sent logs. "Expected" means it should work, but nobody has reported
+  it yet. Reports are welcome.</p>
+
+<h2>Hardware</h2>
+<ul>
+  <li>PlayStation VR2 headset with <strong>Sony's PS VR2 PC adapter</strong> (required).</li>
+  <li>PS VR2 Sense controllers over Bluetooth.</li>
+</ul>
+
+<h2>GPUs</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>GPU</th><th>Status</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>NVIDIA</td><td><span class="status stable">Tested</span></td><td>RTX 5080, proprietary driver.</td></tr>
+    <tr><td>AMD</td><td><span class="status part">Expected</span></td><td>No session reported yet.</td></tr>
+    <tr><td>Intel Arc</td><td><span class="status exp">Runs, with limits</span></td><td>A750 (xe and i915): no async reprojection; Room View can crash SteamVR's compositor.</td></tr>
+  </tbody>
+</table></div>
+
+<h2>Desktops and distributions</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>GNOME Wayland</td><td><span class="status stable">Tested</span></td></tr>
+    <tr><td>KDE Plasma, Sway, Hyprland, X11</td><td><span class="status part">Expected</span></td></tr>
+    <tr><td>Arch-, Debian-, Fedora-based (automatic package install)</td><td>CachyOS tested</td></tr>
+    <tr><td>Steam from Flatpak or Snap</td><td><span class="status no">Not supported</span></td></tr>
+  </tbody>
+</table></div>
+
+<h2>Features by runtime</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Feature</th><th>SteamVR</th><th>OpenXR (Monado)</th></tr></thead>
+  <tbody>
+    <tr><td>Headset and controller 6DoF, inputs, haptics</td><td>Yes</td><td>Yes</td></tr>
+    <tr><td>Eye tracking</td><td>Yes</td><td>Yes</td></tr>
+    <tr><td>Room View passthrough, room setup</td><td>Yes</td><td>No</td></tr>
+    <tr><td>Bare-hand tracking (experimental)</td><td>Yes</td><td>Yes</td></tr>
+    <tr><td>Desktop in VR via WayVR (experimental)</td><td>Yes</td><td>No</td></tr>
+  </tbody>
+</table></div>
+<p>Ran it on something new? <a href="{{repo}}/issues/new?template=hardware_report.yml">Send a hardware compatibility report</a>.</p>

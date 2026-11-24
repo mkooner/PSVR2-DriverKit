@@ -1,0 +1,38 @@
+<!--
+{"path": "troubleshooting/", "title": "PSVR2 Linux Troubleshooting: Controllers, Flicker, Crashes", "description": "Fixes for common PSVR2 Linux problems: controllers not found, another program holding the headset, flicker without reprojection, Intel Arc crashes, compile errors.", "breadcrumb": "Troubleshooting"}
+-->
+<h1>PSVR2 Linux troubleshooting</h1>
+<p class="lead">Start SteamVR from DriverKit → Launcher → <strong>Start SteamVR</strong>: its pre-flight list catches
+  most problems, and it collects logs in <code>~/.local/share/PSVR2-DriverKit/kit/logs/</code> when SteamVR exits.</p>
+
+<h2>Controllers aren't found</h2>
+<ul>
+  <li><em>No udev rules:</em> press <strong>Install dependencies</strong>, then turn the controllers off and on.</li>
+  <li><em>Paired but not connected:</em> press PS on each controller.</li>
+  <li><em>Never paired:</em> hold Create + PS until the light flashes, and pair it in Bluetooth settings.</li>
+</ul>
+
+<h2>"Something already holds the headset"</h2>
+<p>Close SteamVR or a running monado-service. A leftover Sony driver helper from Wine/Proton:
+  <code>pkill -f ignition_server.exe</code>.</p>
+
+<h2>Flicker or judder when frames are late</h2>
+<ul>
+  <li>Press <strong>Allow high priority</strong> (Compile Driver → SteamVR features), so SteamVR can use async reprojection.</li>
+  <li>Intel Arc can't get async reprojection on Linux. Lower the game's settings or the render size.</li>
+</ul>
+
+<h2>SteamVR crashes with Room View (Intel Arc)</h2>
+<p>Set Settings → <strong>Headset cameras in SteamVR</strong> to <code>off</code>.</p>
+
+<h2>Compile Driver fails</h2>
+<p>Press <strong>Install dependencies</strong> first. For hand tracking, your distribution needs onnxruntime packages.
+  Attach <code>compile.log</code> from the install folder to an issue.</p>
+
+<h2>A game opens on the desktop</h2>
+<p>Start SteamVR first, then the game. For Windows games, use UMU-Proton, and check that the game supports OpenVR or
+  OpenXR.</p>
+
+<h2>Still stuck?</h2>
+<p><a href="{{repo}}/issues/new/choose">Open an issue</a> with the zipped logs folder. The complete list is in the
+  <a href="{{repo}}/blob/main/docs/troubleshooting.md">troubleshooting documentation</a>.</p>

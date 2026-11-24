@@ -1,0 +1,75 @@
+<!--
+{"path": "", "title": "PSVR2-DriverKit: Native PlayStation VR2 Support for Linux", "description": "Open-source PSVR2 Linux driver: native SteamVR driver and OpenXR through Monado, 6DoF headset and Sense controllers, eye tracking, Room View and haptics."}
+-->
+<section class="hero">
+  <div>
+    <h1>PSVR2-DriverKit</h1>
+    <p class="subtitle">Native PlayStation VR2 Support for Linux</p>
+    <p class="lead">Use the Sony PlayStation VR2 and its Sense controllers on Linux, with SteamVR games and OpenXR
+      apps. It's an open-source driver based on <a href="https://monado.freedesktop.org/">Monado</a>, the open-source
+      OpenXR runtime, and it's native: no Windows driver or Wine underneath. A desktop app installs, compiles and
+      launches everything.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="{{root}}installation/">Get Started</a>
+      <a class="btn btn-ghost" href="{{repo}}">GitHub Repository</a>
+      <a class="btn btn-ghost" href="{{repo}}/releases/latest">Download Latest Release</a>
+    </div>
+    <ul class="badge-row" aria-label="Project facts">
+      <li>Open source (BSL-1.0)</li>
+      <li>Built on Monado</li>
+      <li>Linux</li>
+    </ul>
+  </div>
+  <figure>
+    <img src="{{root}}assets/og.png" width="1280" height="640" alt="Drawing of the PlayStation VR2 headset and both Sense controllers with the PSVR2-DriverKit name">
+  </figure>
+</section>
+
+<h2>What you get</h2>
+<div class="grid">
+  <div class="card"><h3>Native SteamVR integration <span class="status stable">Stable</span></h3>
+    <p>A SteamVR driver registered with Steam: SteamVR starts with the PS VR2 like any headset, from the Library or a game.</p>
+    <a class="more" href="{{root}}steamvr/">SteamVR on Linux</a></div>
+  <div class="card"><h3>OpenXR support <span class="status stable">Stable</span></h3>
+    <p>Native Linux OpenXR apps run on Monado's runtime without SteamVR, on the same PS VR2 drivers.</p>
+    <a class="more" href="{{root}}openxr/">OpenXR with Monado</a></div>
+  <div class="card"><h3>Headset &amp; controller tracking <span class="status stable">Stable</span></h3>
+    <p>6DoF head tracking and 6DoF Sense controllers: the headset's cameras track the controllers' LEDs, fused with their motion sensors.</p>
+    <a class="more" href="{{root}}controllers/">Sense controllers</a></div>
+  <div class="card"><h3>Eye tracking <span class="status part">Works</span></h3>
+    <p>Gaze for SteamVR games and for OpenXR apps (<code>XR_EXT_eye_gaze_interaction</code>). No per-user calibration yet.</p>
+    <a class="more" href="{{root}}eye-tracking/">Eye tracking</a></div>
+  <div class="card"><h3>Passthrough <span class="status stable">Stable</span></h3>
+    <p>SteamVR Room View from the headset's cameras, toggled with the headset's function button, plus the camera near your play-area walls.</p>
+    <a class="more" href="{{root}}passthrough/">Passthrough</a></div>
+  <div class="card"><h3>Haptics &amp; every input <span class="status stable">Stable</span></h3>
+    <p>All buttons, sticks and triggers, capacitive touch, finger-distance sensors, vibration, and a finger skeleton for games that animate hands.</p>
+    <a class="more" href="{{root}}controllers/">Controller details</a></div>
+  <div class="card"><h3>Wayland integration <span class="status stable">Tested on GNOME</span></h3>
+    <p>Works on Wayland compositors that lease the headset's display. Your desktop in VR through WayVR is experimental.</p>
+    <a class="more" href="{{root}}wayland/">Wayland &amp; X11</a></div>
+  <div class="card"><h3>GUI management <span class="status stable">Stable</span></h3>
+    <p>The PSVR2-DriverKit app installs packages and udev rules, compiles the driver, registers it with Steam, and launches it with pre-flight checks.</p>
+    <a class="more" href="{{root}}installation/">Installation</a></div>
+</div>
+
+<h2>Experimental</h2>
+<div class="grid">
+  <div class="card"><h3>Bare-hand tracking <span class="status exp">Experimental</span></h3>
+    <p>Hands tracked by the headset's cameras with Monado's Mercury tracker while a controller is off. Off by default; needs a driver compiled with hand tracking.</p></div>
+  <div class="card"><h3>Desktop in VR (WayVR) <span class="status exp">Experimental</span></h3>
+    <p>Starts the separate WayVR overlay with SteamVR, with Sense controller bindings included. Off by default and not yet tested with a headset.</p></div>
+</div>
+
+<h2>What you need</h2>
+<ul>
+  <li>The PS VR2 with <strong>Sony's PS VR2 PC adapter</strong>, and a GPU with a free DisplayPort output.</li>
+  <li>A Linux PC with Steam (native package) and SteamVR. Arch-, Debian- and Fedora-based distributions get automatic package installation.</li>
+  <li>Sense controllers paired over Bluetooth.</li>
+</ul>
+<p>Tested on NVIDIA with GNOME Wayland; Intel Arc runs without async reprojection; AMD is expected but not yet reported.
+  See <a href="{{root}}compatibility/">compatibility</a>.</p>
+
+<h2>Help and feedback</h2>
+<p><a href="{{root}}troubleshooting/">Troubleshooting</a> covers the common problems. Found a bug, or tested a new GPU
+  or desktop? <a href="{{repo}}/issues/new/choose">Open an issue</a> with your logs.</p>

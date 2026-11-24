@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <!-- PSVR2-DriverKit social preview (1280x640). Drawn from scratch: stylized headset and Sense controllers, no logos.
+       Render: rsvg-convert -w 1280 -h 640 site/assets/social-preview.svg -o docs/images/social-preview.png -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070b18"/>
+      <stop offset="0.55" stop-color="#0d1530"/>
+      <stop offset="1" stop-color="#111c42"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#3d6bff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#3d6bff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d9deea"/>
+    </linearGradient>
+    <linearGradient id="visor" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2340"/>
+      <stop offset="0.5" stop-color="#05070f"/>
+      <stop offset="1" stop-color="#141b33"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#2a3a73" stroke-opacity="0.35" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  <ellipse cx="930" cy="330" rx="360" ry="250" fill="url(#glow)"/>
+
+  <g transform="translate(985 300) scale(0.84) translate(-930 -330)">
+  <!-- Headset: halo band behind, front unit with black visor -->
+  <ellipse cx="930" cy="250" rx="235" ry="118" fill="none" stroke="#c9d0e2" stroke-width="30"/>
+  <ellipse cx="930" cy="250" rx="235" ry="118" fill="none" stroke="#ffffff" stroke-width="10" stroke-opacity="0.6"
+           stroke-dasharray="380 1000" stroke-dashoffset="-560"/>
+  <path d="M760 300 Q930 360 1100 300" fill="none" stroke="#e6eaf3" stroke-width="34" stroke-linecap="round"/>
+  <rect x="790" y="270" width="280" height="140" rx="66" fill="url(#shell)"/>
+  <rect x="808" y="284" width="244" height="112" rx="54" fill="url(#visor)"/>
+  <rect x="822" y="292" width="216" height="26" rx="13" fill="url(#shine)"/>
+  <rect x="902" y="402" width="56" height="10" rx="5" fill="#3d6bff"/>
+
+  <!-- Left Sense controller: orb ring and grip -->
+  <g transform="translate(760 470) rotate(-18)">
+    <rect x="-22" y="40" width="44" height="104" rx="22" fill="url(#shell)"/>
+    <rect x="-12" y="54" width="24" height="40" rx="12" fill="#0b1020"/>
+    <circle cx="0" cy="0" r="62" fill="none" stroke="#e6eaf3" stroke-width="16"/>
+    <circle cx="0" cy="0" r="62" fill="none" stroke="#3d6bff" stroke-width="3" stroke-opacity="0.9"/>
+  </g>
+  <!-- Right Sense controller -->
+  <g transform="translate(1100 470) rotate(18)">
+    <rect x="-22" y="40" width="44" height="104" rx="22" fill="url(#shell)"/>
+    <rect x="-12" y="54" width="24" height="40" rx="12" fill="#0b1020"/>
+    <circle cx="0" cy="0" r="62" fill="none" stroke="#e6eaf3" stroke-width="16"/>
+    <circle cx="0" cy="0" r="62" fill="none" stroke="#3d6bff" stroke-width="3" stroke-opacity="0.9"/>
+  </g>
+  </g>
+
+  <!-- Text -->
+  <g font-family="Noto Sans, Adwaita Sans, DejaVu Sans, sans-serif">
+    <text x="80" y="232" font-size="74" font-weight="800" fill="#ffffff" letter-spacing="-1">PSVR2-DriverKit</text>
+    <text x="82" y="290" font-size="34" font-weight="500" fill="#b8c4ea">Native PlayStation VR2 for Linux</text>
+    <g font-size="22" font-weight="600" fill="#e9eeff">
+      <rect x="80" y="338" width="200" height="46" rx="23" fill="#1c2a5c" stroke="#3d6bff"/>
+      <text x="180" y="368" text-anchor="middle">SteamVR driver</text>
+      <rect x="294" y="338" width="226" height="46" rx="23" fill="#1c2a5c" stroke="#3d6bff"/>
+      <text x="407" y="368" text-anchor="middle">OpenXR · Monado</text>
+      <rect x="534" y="338" width="176" height="46" rx="23" fill="#1c2a5c" stroke="#3d6bff"/>
+      <text x="622" y="368" text-anchor="middle">Open source</text>
+    </g>
+    <text x="82" y="440" font-size="24" fill="#c9d3f2">6DoF headset · 6DoF Sense controllers</text>
+    <text x="82" y="474" font-size="24" fill="#c9d3f2">eye tracking · Room View · haptics</text>
+    <text x="82" y="566" font-size="22" fill="#8696c8" font-family="JetBrainsMono NF, monospace">github.com/mkooner/PSVR2-DriverKit</text>
+  </g>
+</svg>

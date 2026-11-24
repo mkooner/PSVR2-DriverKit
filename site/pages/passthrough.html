@@ -1,0 +1,28 @@
+<!--
+{"path": "passthrough/", "title": "PSVR2 Passthrough on Linux: SteamVR Room View", "description": "See your room through the PlayStation VR2 on Linux: SteamVR Room View on the headset's function button, the wall camera, and the settings for slower PCs.", "breadcrumb": "Passthrough"}
+-->
+<h1>PSVR2 passthrough on Linux</h1>
+<p class="lead">PSVR2-DriverKit gives SteamVR the headset's cameras, so Room View shows your surroundings.</p>
+
+<h2>What you get <span class="status stable">Stable</span></h2>
+<ul>
+  <li><strong>Room View:</strong> press the headset's function button (under the visor) or use the SteamVR dashboard.</li>
+  <li><strong>The wall camera:</strong> the camera picture appears near your play-area boundary.</li>
+  <li><strong>Camera during room setup.</strong></li>
+</ul>
+<p>Turn it on once: DriverKit → Compile Driver → <strong>Turn on PS VR2 features</strong> (SteamVR closed).
+  <em>Undo</em> restores your previous SteamVR settings.</p>
+
+<h2>Settings</h2>
+<ul>
+  <li><strong>Headset cameras in SteamVR:</strong> <code>on</code>, <code>noimages</code> or <code>off</code>.</li>
+  <li><strong>Lighter camera picture:</strong> half size for PCs where Room View stutters.</li>
+</ul>
+
+<h2>Limitations</h2>
+<ul>
+  <li>SteamVR only; there's no passthrough on Monado.</li>
+  <li>On Intel Arc, SteamVR's compositor can crash building the camera view (a Mesa issue): set the cameras to <code>off</code>.</li>
+  <li>The picture comes from the headset's black-and-white tracking cameras.</li>
+</ul>
+<p>Technical details: <a href="{{repo}}/blob/main/docs/psvr2-passthrough.md">passthrough documentation</a>.</p>

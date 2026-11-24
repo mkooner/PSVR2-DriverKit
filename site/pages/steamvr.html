@@ -1,0 +1,45 @@
+<!--
+{"path": "steamvr/", "title": "PSVR2 SteamVR on Linux: Native Driver Setup and Settings", "description": "Run the PlayStation VR2 in SteamVR on Linux with a native driver: registration, controller bindings, Room View, room setup, Proton games and key settings.", "breadcrumb": "SteamVR"}
+-->
+<h1>PSVR2 with SteamVR on Linux</h1>
+<p class="lead">PSVR2-DriverKit's native SteamVR driver presents the PS VR2 and Sense controllers to SteamVR. Steam
+  starts it like any headset, from the Library or from a VR game.</p>
+
+<h2>Setup</h2>
+<ol class="steps">
+  <li>Install and compile (see <a href="{{root}}installation/">installation</a>).</li>
+  <li>DriverKit → Compile Driver → <strong>Register our driver</strong>.</li>
+  <li><strong>Turn on PS VR2 features</strong> for Room View and the wall camera.</li>
+  <li>Start SteamVR. Or use DriverKit → Launcher → <strong>Start SteamVR</strong> for pre-flight checks (udev rules, controller connections, GPU queue, conflicting programs) and a log summary afterwards.</li>
+</ol>
+
+<h2>What SteamVR gets</h2>
+<ul>
+  <li>The headset: 6DoF tracking, distortion, IPD, wear sensor, eye tracking, and the function button for Room View.</li>
+  <li>The Sense controllers: 6DoF, every input including touch and finger distance, haptics, a finger skeleton, and the PS button for the dashboard.</li>
+  <li>PS VR2 bindings for SteamVR, and layouts for older games: Oculus Touch by default, or Vive, Index or native.</li>
+  <li>Room setup from the dashboard's Playspace menu.</li>
+  <li>Sony's controller models and icons, when the PlayStation VR2 App is installed.</li>
+</ul>
+
+<h2>Windows games through Proton</h2>
+<p>Start SteamVR first, then the game. Games need OpenVR or OpenXR support;
+  <a href="https://github.com/Open-Wine-Components/umu-proton">UMU-Proton</a> works best for VR.</p>
+
+<h2>Settings</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Setting (DriverKit → Settings)</th><th>Default</th><th>Use</th></tr></thead>
+  <tbody>
+    <tr><td>Render size per eye</td><td>140%</td><td>Lower it on slower GPUs.</td></tr>
+    <tr><td>Display refresh</td><td>89.91 Hz</td><td>Or 119.88 Hz.</td></tr>
+    <tr><td>Legacy games' controllers</td><td>touch</td><td>vive, knuckles or native for games without SteamVR Input.</td></tr>
+    <tr><td>Headset cameras in SteamVR</td><td>on</td><td><code>off</code> on Intel Arc (see troubleshooting).</td></tr>
+  </tbody>
+</table></div>
+
+<h2>Limitations</h2>
+<ul>
+  <li>Async reprojection needs SteamVR's high-priority GPU queue (<em>Allow high priority</em>) and isn't available on Intel Arc.</li>
+  <li>SteamVR's own Desktop panel is blank on Wayland (a SteamVR issue). See <a href="{{root}}wayland/">Wayland</a> for WayVR.</li>
+</ul>
+<p>Technical details: <a href="{{repo}}/blob/main/docs/psvr2-steamvr-linux.md">SteamVR documentation</a>.</p>

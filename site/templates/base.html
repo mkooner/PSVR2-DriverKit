@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}}</title>
+<meta name="description" content="{{description}}">
+<link rel="canonical" href="{{canonical}}">
+<meta name="robots" content="{{robots}}">
+<meta name="theme-color" content="#0b1020">
+{{verification}}<meta property="og:type" content="{{og_type}}">
+<meta property="og:site_name" content="{{site_name}}">
+<meta property="og:title" content="{{title}}">
+<meta property="og:description" content="{{description}}">
+<meta property="og:url" content="{{canonical}}">
+<meta property="og:image" content="{{og_image}}">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="{{og_image_alt}}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{title}}">
+<meta name="twitter:description" content="{{description}}">
+<meta name="twitter:image" content="{{og_image}}">
+<link rel="icon" href="{{root}}assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="{{root}}assets/style.css">
+<script type="application/ld+json">
+{{jsonld}}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="{{root}}" aria-label="PSVR2-DriverKit home"><img src="{{root}}assets/favicon.svg" alt="" width="28" height="28"><span>PSVR2-DriverKit</span></a>
+    <nav aria-label="Main">
+      <ul class="nav">
+{{nav}}
+        <li><a class="nav-gh" href="{{repo}}">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+<main id="main" class="wrap">
+{{breadcrumbs}}{{content}}
+</main>
+<footer class="site-footer">
+  <div class="wrap footer-grid">
+    <div>
+      <p><strong>PSVR2-DriverKit</strong>: open-source PlayStation VR2 support for Linux.</p>
+      <p>Licensed under the <a href="{{license_url}}">{{license_name}}</a>. Built on <a href="https://monado.freedesktop.org/">Monado</a>.</p>
+      <p class="small">PlayStation, PS VR2 and Sense are trademarks of Sony Interactive Entertainment; SteamVR is a trademark of Valve. This project is independent and not affiliated with or endorsed by either.</p>
+    </div>
+    <nav aria-label="Footer">
+      <ul class="footer-links">
+        <li><a href="{{root}}wayland/">Wayland &amp; X11</a></li>
+        <li><a href="{{root}}eye-tracking/">Eye tracking</a></li>
+        <li><a href="{{root}}passthrough/">Passthrough</a></li>
+        <li><a href="{{root}}about/">About</a></li>
+        <li><a href="{{repo}}/issues/new/choose">Report a problem</a></li>
+        <li><a href="{{repo}}">Source code</a></li>
+      </ul>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

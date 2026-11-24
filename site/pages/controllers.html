@@ -1,0 +1,30 @@
+<!--
+{"path": "controllers/", "title": "PSVR2 Sense Controllers on Linux: 6DoF, Inputs and Haptics", "description": "PlayStation VR2 Sense controllers on Linux: Bluetooth pairing, 6DoF LED tracking, every button and touch sensor, haptics and SteamVR bindings for older games.", "breadcrumb": "Sense controllers"}
+-->
+<h1>PSVR2 Sense controllers on Linux</h1>
+<p class="lead">Full 6DoF tracking, every input and haptics, in SteamVR and in OpenXR apps.</p>
+
+<h2>Pairing</h2>
+<ol class="steps">
+  <li>Hold <strong>Create + PS</strong> until the light flashes.</li>
+  <li>Pair it in your Bluetooth settings.</li>
+  <li>Repeat with the other controller. Later, pressing PS reconnects it.</li>
+</ol>
+
+<h2>Tracking <span class="status stable">Stable</span></h2>
+<p>The headset's cameras see the controllers' LEDs; the driver identifies each one by its blink pattern and fuses the
+  camera positions with the controllers' motion sensors. Hold the controllers in view for about 5 seconds after
+  starting. Very bright sunlight interrupts tracking.</p>
+
+<h2>Inputs and haptics <span class="status stable">Stable</span></h2>
+<ul>
+  <li>Cross, Circle, Square, Triangle, Create, Options, PS; sticks with click; L1/R1; L2/R2.</li>
+  <li>Capacitive touch on triggers, grips, sticks and face buttons; finger-distance sensors.</li>
+  <li>Vibration.</li>
+  <li>A finger skeleton for SteamVR games that animate hands.</li>
+</ul>
+
+<h2>Bindings</h2>
+<p>SteamVR gets PS VR2 input profiles; the PS button opens the dashboard. Games without SteamVR Input see Oculus
+  Touch controllers by default; DriverKit → Settings switches to Vive, Index or the native PS VR2 layout.</p>
+<p>Technical details: <a href="{{repo}}/blob/main/docs/psvr2-sense-controllers.md">controller documentation</a>.</p>

@@ -1,0 +1,46 @@
+<!--
+{"path": "installation/", "title": "Install the PSVR2 Driver on Linux: Step-by-Step Guide", "description": "Install PSVR2-DriverKit on Linux: download the AppImage or build from source, install packages, compile the driver, register it with SteamVR and start playing.", "breadcrumb": "Installation"}
+-->
+<h1>Install the PSVR2 driver on Linux</h1>
+<p class="lead">About 15 minutes, most of it compiling. The PSVR2-DriverKit app does the work; you press four buttons.</p>
+
+<h2>Before you start</h2>
+<ul>
+  <li><strong>Steam and SteamVR</strong> from your distribution's native Steam package. Flatpak and Snap Steam aren't supported. Start SteamVR once so it creates its settings.</li>
+  <li><strong>The PS VR2 on Sony's PC adapter</strong>, connected to a DisplayPort output and a USB port.</li>
+  <li><strong>Recommended:</strong> Sony's free <em>PlayStation VR2 App</em> from Steam, installed <em>before</em> compiling, so SteamVR shows the real Sense controller models.</li>
+  <li><strong>Pair the controllers</strong> in your Bluetooth settings: hold Create + PS until the light flashes.</li>
+</ul>
+
+<h2>1. Get the app</h2>
+<h3>AppImage (easiest)</h3>
+<p>Download <code>PSVR2-DriverKit-x86_64-&lt;version&gt;.AppImage</code> from the
+  <a href="{{repo}}/releases/latest">latest release</a>, then:</p>
+<pre><code>chmod +x PSVR2-DriverKit-x86_64-*.AppImage
+./PSVR2-DriverKit-x86_64-*.AppImage</code></pre>
+<h3>Or from source</h3>
+<pre><code>git clone https://github.com/mkooner/PSVR2-DriverKit.git
+cd PSVR2-DriverKit &amp;&amp; ./install-deps.sh
+cd launcher-gui &amp;&amp; cargo build --release
+./target/release/PSVR2-DriverKit</code></pre>
+
+<h2>2. In the Compile Driver tab</h2>
+<ol class="steps">
+  <li><strong>Install dependencies.</strong> Installs the build packages with pacman, apt or dnf, and the udev rules that let you open the headset and controllers without root. It asks for your password.</li>
+  <li><strong>Compile Driver.</strong> Downloads the latest source and builds the SteamVR driver, monado-service and a fresh DriverKit into <code>~/.local/share/PSVR2-DriverKit</code>. Afterwards DriverKit runs from <code>&lt;install folder&gt;/kit</code>.</li>
+  <li><strong>Register our driver.</strong> Steam now starts SteamVR with the PS VR2.</li>
+  <li><strong>Turn on PS VR2 features</strong> (once, SteamVR closed): Room View and the wall camera.</li>
+</ol>
+<div class="note info"><strong>Optional:</strong> <em>Allow high priority</em> (SteamVR features) lets SteamVR's compositor use a high-priority GPU queue, which async reprojection needs. It's your choice and isn't done by default.</div>
+<div class="note"><strong>Hand tracking (experimental):</strong> tick <em>Compile hand tracking</em> before Install dependencies. It needs Debian 13, Ubuntu 25.04, Fedora 43 or newer, or an Arch-based system.</div>
+
+<h2>3. Play</h2>
+<p>Start SteamVR from Steam, or a VR game. On the first start, draw your play area from the SteamVR dashboard's
+  <strong>Playspace</strong> menu, and hold the controllers in front of the headset for a few seconds.</p>
+
+<h2>Updating and uninstalling</h2>
+<p>To update, press <strong>Compile Driver</strong> again. To uninstall, press <strong>Unregister</strong>, then delete
+  <code>~/.local/share/PSVR2-DriverKit</code> and <code>~/.config/PSVR2-DriverKit</code>.</p>
+
+<p>Stuck? See <a href="{{root}}troubleshooting/">troubleshooting</a>. The full technical guide is in the
+  <a href="{{repo}}/blob/main/docs/psvr2-installation.md">repository docs</a>.</p>

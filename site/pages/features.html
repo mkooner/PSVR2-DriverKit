@@ -1,0 +1,61 @@
+<!--
+{"path": "features/", "title": "PSVR2 Linux Features: What Works and What's Experimental", "description": "Every PSVR2-DriverKit feature with its status: SteamVR and OpenXR, 6DoF tracking, Sense controller inputs and haptics, eye tracking, passthrough, hand tracking.", "breadcrumb": "Features"}
+-->
+<h1>PSVR2-DriverKit features</h1>
+<p class="lead">What PSVR2-DriverKit does on Linux today. <span class="status stable">Stable</span> means in regular
+  use; <span class="status exp">Experimental</span> means off by default or lightly tested;
+  <span class="status no">Not available</span> means it isn't supported.</p>
+
+<h2>Headset</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>6DoF head tracking</td><td><span class="status stable">Stable</span></td><td>The headset's inside-out tracking, smoothed by the driver's pose filter.</td></tr>
+    <tr><td>Lens distortion correction</td><td><span class="status stable">Stable</span></td><td>Distortion mesh for SteamVR and Monado.</td></tr>
+    <tr><td>IPD from the headset's dial</td><td><span class="status stable">Stable</span></td><td>Eye positions follow the dial.</td></tr>
+    <tr><td>Wear sensor</td><td><span class="status stable">Stable</span></td><td>SteamVR knows when the headset is on your head.</td></tr>
+    <tr><td>Function button</td><td><span class="status stable">Stable</span></td><td>Toggles SteamVR Room View.</td></tr>
+    <tr><td>Eye tracking</td><td><span class="status part">Works</span></td><td>SteamVR and OpenXR; no per-user calibration yet. <a href="{{root}}eye-tracking/">More</a></td></tr>
+    <tr><td>Room View passthrough, wall camera</td><td><span class="status stable">Stable</span></td><td>SteamVR only; not on Intel Arc. <a href="{{root}}passthrough/">More</a></td></tr>
+  </tbody>
+</table></div>
+
+<h2>Sense controllers</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>6DoF tracking</td><td><span class="status stable">Stable</span></td><td>Camera LED tracking fused with motion sensors; drops in bright sunlight.</td></tr>
+    <tr><td>Buttons, sticks, triggers, grip</td><td><span class="status stable">Stable</span></td><td>All of them, including Create, Options and PS.</td></tr>
+    <tr><td>Capacitive touch and finger distance</td><td><span class="status stable">Stable</span></td><td>Trigger, grip, stick and face-button touch.</td></tr>
+    <tr><td>Haptics</td><td><span class="status stable">Stable</span></td><td></td></tr>
+    <tr><td>Hand skeleton from controller sensors</td><td><span class="status stable">Stable</span></td><td>For SteamVR games that animate fingers.</td></tr>
+  </tbody>
+</table></div>
+
+<h2>Runtimes and integration</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Native SteamVR driver</td><td><span class="status stable">Stable</span></td><td>Registered with Steam; runs in Steam's runtime container. <a href="{{root}}steamvr/">More</a></td></tr>
+    <tr><td>OpenXR on Monado</td><td><span class="status stable">Stable</span></td><td>Native Linux OpenXR apps without SteamVR. <a href="{{root}}openxr/">More</a></td></tr>
+    <tr><td>Room setup in the headset</td><td><span class="status stable">Stable</span></td><td>SteamVR's Playspace menu.</td></tr>
+    <tr><td>Wayland (DRM leasing)</td><td><span class="status stable">Tested on GNOME</span></td><td>Other compositors with leasing expected. <a href="{{root}}wayland/">More</a></td></tr>
+    <tr><td>Bare-hand tracking</td><td><span class="status exp">Experimental</span></td><td>Off by default; compile with hand tracking.</td></tr>
+    <tr><td>Desktop in VR via WayVR</td><td><span class="status exp">Experimental</span></td><td>Off by default; WayVR installed separately.</td></tr>
+    <tr><td>Passthrough on Monado / OpenXR</td><td><span class="status no">Not available</span></td><td></td></tr>
+    <tr><td>Windows</td><td><span class="status no">Not available</span></td><td>Linux only.</td></tr>
+  </tbody>
+</table></div>
+
+<h2>The PSVR2-DriverKit app</h2>
+<figure>
+  <img src="{{root}}assets/driverkit-compile.png" width="1225" height="1350" loading="lazy" alt="The PSVR2-DriverKit app's Compile Driver tab, with buttons to install dependencies, compile the driver and register it with SteamVR">
+  <figcaption>The Compile Driver tab: install dependencies, compile, register with SteamVR, turn on the PS VR2's camera features.</figcaption>
+</figure>
+<ul>
+  <li><strong>Compile Driver:</strong> installs packages and udev rules, builds the driver, registers it with Steam, and turns on SteamVR's camera features.</li>
+  <li><strong>Launcher:</strong> starts SteamVR or monado-service with pre-flight checks and log collection; sets the play area.</li>
+  <li><strong>Settings:</strong> render size, refresh rate, controller layouts for older games, cameras, hand tracking, WayVR.</li>
+  <li><strong>Device status:</strong> headset and controllers.</li>
+</ul>
+<p>Planned: per-user eye calibration and a built-in hidden-area mask. See the <a href="{{repo}}#roadmap">roadmap</a>.</p>

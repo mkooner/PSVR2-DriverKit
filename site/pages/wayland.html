@@ -1,0 +1,31 @@
+<!--
+{"path": "wayland/", "title": "PSVR2 on Wayland and X11: DRM Leasing and Desktop in VR", "description": "Does the PlayStation VR2 work on Wayland? Yes, on compositors with DRM leasing, tested on GNOME. Plus experimental desktop-in-VR through WayVR.", "breadcrumb": "Wayland"}
+-->
+<h1>PSVR2 on Wayland and X11</h1>
+<p class="lead">SteamVR and Monado take over the headset's display by <em>leasing</em> it from your desktop. On Wayland
+  your compositor has to support DRM leasing (<code>wp_drm_lease_device_v1</code>).</p>
+
+<div class="table-wrap"><table>
+  <thead><tr><th>Desktop</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>GNOME Wayland (Shell 51)</td><td><span class="status stable">Tested</span></td></tr>
+    <tr><td>KDE Plasma, Sway, Hyprland (Wayland)</td><td><span class="status part">Expected</span> (DRM leasing), untested by us</td></tr>
+    <tr><td>X11</td><td><span class="status part">Expected</span>, untested by us</td></tr>
+    <tr><td>Compositors without DRM leasing</td><td><span class="status no">Not possible</span></td></tr>
+  </tbody>
+</table></div>
+<p>Tested a setup we haven't? <a href="{{repo}}/issues/new?template=hardware_report.yml">Send a hardware report</a>.</p>
+
+<h2>Your desktop inside VR <span class="status exp">Experimental</span></h2>
+<p>SteamVR's own Desktop panel stays blank on Wayland. That's a
+  <a href="https://github.com/ValveSoftware/SteamVR-for-Linux/issues/693">SteamVR issue</a>, not something this driver
+  can fix. PSVR2-DriverKit works with <a href="https://github.com/wayvr-org/wayvr">WayVR</a>, a separate open-source
+  overlay for Wayland and X11 screens:</p>
+<ol class="steps">
+  <li>Install WayVR (Arch AUR <code>wayvr</code>, or its AppImage in <code>~/Applications</code>).</li>
+  <li>DriverKit → Settings → <strong>Start WayVR with SteamVR</strong>.</li>
+  <li>Allow the screen-share prompt the first time.</li>
+</ol>
+<p>The driver includes Sense bindings for it: double-press <strong>Triangle</strong> to show or hide, triggers to
+  click, L1/R1 to grab, sticks to scroll. It hasn't been tested with a headset yet.</p>
+<p>Technical details: <a href="{{repo}}/blob/main/docs/psvr2-wayland.md">Wayland documentation</a>.</p>

@@ -1,0 +1,23 @@
+{
+  "name": "PSVR2-DriverKit",
+  "base_url": "https://mkooner.github.io/PSVR2-DriverKit/",
+  "cname": "",
+  "repo": "https://github.com/mkooner/PSVR2-DriverKit",
+  "license_url": "https://github.com/mkooner/PSVR2-DriverKit/blob/main/LICENSE",
+  "license_name": "Boost Software License 1.0",
+  "author": "mkooner",
+  "og_image": "assets/og.png",
+  "og_image_alt": "PSVR2-DriverKit: native PlayStation VR2 for Linux, with a drawing of the headset and the two Sense controllers",
+  "google_site_verification": "",
+  "bing_site_verification": "",
+  "nav": [
+    ["Features", "features/"],
+    ["Install", "installation/"],
+    ["SteamVR", "steamvr/"],
+    ["OpenXR", "openxr/"],
+    ["Controllers", "controllers/"],
+    ["Compatibility", "compatibility/"],
+    ["Help", "troubleshooting/"],
+    ["Download", "downloads/"]
+  ]
+}
