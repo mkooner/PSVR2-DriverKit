@@ -52,6 +52,13 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_gamma, "PSVR2_HT_GAMMA", 0.5f)
  * hands were faint grey on grey, the left camera's darker than the right's. PSVR2_HT_LEVELS=0: the fixed curve only.
  */
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_ht_levels, "PSVR2_HT_LEVELS", true)
+/*!
+ * Hold a hand's last pose this long (ms) when Mercury loses it, so brief dropouts don't flash the hand away. A
+ * smoothing step, not better detection: on the 2026-11-23 recordings the right hand's losses were mostly 0.1-0.25 s
+ * gaps (10 in 32 s); a 0.3 s hold took it 82% -> 89% and the left 63% -> 71% (its losses are mostly longer than 1 s,
+ * which the hold doesn't hide). 0: off.
+ */
+DEBUG_GET_ONCE_NUM_OPTION(psvr2_ht_hold_ms, "PSVR2_HT_HOLD_MS", 300)
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_levels_lo, "PSVR2_HT_LEVELS_LO", 0.01f)
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_levels_hi, "PSVR2_HT_LEVELS_HI", 0.95f)
 //! Unwarped image size (square).
@@ -113,7 +120,10 @@ struct psvr2_hand_tracking
 
 	// Status report every 5 s from get_hand_tracking (under pose_lock): how often each hand is found and where.
 	int64_t stats_since_ns;
-	uint32_t stats_queries[2], stats_active[2];
+	uint32_t stats_queries[2], stats_active[2], stats_held[2];
+	//! Under pose_lock: each hand's last found joints (room space) and when, for the short hold (PSVR2_HT_HOLD_MS).
+	struct xrt_hand_joint_set last_found[2];
+	int64_t last_found_ns[2];
 	struct xrt_vec3 stats_wrist_head[2], stats_wrist_world[2]; // last seen
 
 	// Read by get_hand_tracking.
@@ -242,7 +252,13 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 	 * hand pickups on the left hand. Costs one more detector run per view (Mercury ~4.9 -> 6.7 ms per frame).
 	 */
 	setenv("MERCURY_DETECTION_MIRROR_LEFT", "1", 0);
-	setenv("MERCURY_ACQUIRE_CONFIDENCE", "0.7", 0);
+	/*
+	 * 0.55 since 2026-11-23 (with the auto levels): small hands far out in front, side by side near a bright monitor
+	 * (the user's second headset, dark room) were seen but scored below 0.7, so the left hand was rarely picked up.
+	 * Replays: left 57% -> 85% and 19% -> 78% on the two new recordings, right unchanged (70-87%); old desk recording
+	 * left 68-79%, right 81%; no false hands in any empty stretch. 0.4 started a phantom left hand (6%) there.
+	 */
+	setenv("MERCURY_ACQUIRE_CONFIDENCE", "0.55", 0);
 	/*
 	 * Keep a view only while the keypoint model is 98% sure it's a hand (Mercury: 97%). A right hand raised quickly
 	 * out of the top of the view left its joints on dark furniture for half a second at 0.93-0.98 (real hands: median
@@ -523,16 +539,18 @@ psvr2_ht_get_hand_tracking(struct xrt_device *xdev,
 			h->stats_since_ns = now;
 		} else if (now - h->stats_since_ns > 5 * U_TIME_1S_IN_NS) {
 			HT_INFO(h,
-			        "Hands (5 s): left found %u/%u, right found %u/%u queries (%llu frames processed); last "
+			        "Hands (5 s): left found %u/%u (+%u held), right found %u/%u (+%u held) queries (%llu frames "
+			        "processed); last "
 			        "right wrist: head frame %.2f %.2f %.2f m, room %.2f %.2f %.2f m; last left wrist: head "
 			        "frame %.2f %.2f %.2f m",
-			        h->stats_active[0], h->stats_queries[0], h->stats_active[1], h->stats_queries[1],
-			        (unsigned long long)h->processed, h->stats_wrist_head[1].x, h->stats_wrist_head[1].y,
+			        h->stats_active[0], h->stats_queries[0], h->stats_held[0], h->stats_active[1],
+			        h->stats_queries[1], h->stats_held[1], (unsigned long long)h->processed, h->stats_wrist_head[1].x, h->stats_wrist_head[1].y,
 			        h->stats_wrist_head[1].z, h->stats_wrist_world[1].x, h->stats_wrist_world[1].y,
 			        h->stats_wrist_world[1].z, h->stats_wrist_head[0].x, h->stats_wrist_head[0].y,
 			        h->stats_wrist_head[0].z);
 			memset(h->stats_queries, 0, sizeof(h->stats_queries));
 			memset(h->stats_active, 0, sizeof(h->stats_active));
+			memset(h->stats_held, 0, sizeof(h->stats_held));
 			h->stats_since_ns = now;
 		}
 		os_mutex_unlock(&h->pose_lock);
@@ -550,8 +568,18 @@ psvr2_ht_get_hand_tracking(struct xrt_device *xdev,
 	int hand = name == XRT_INPUT_HT_UNOBSTRUCTED_RIGHT ? 1 : 0;
 	h->async->get_hand(h->async, name, at_timestamp_ns, out_value, out_timestamp_ns);
 	if (!out_value->is_active) {
+		const int64_t hold_ns = (int64_t)debug_get_num_option_psvr2_ht_hold_ms() * U_TIME_1MS_IN_NS;
 		os_mutex_lock(&h->pose_lock);
 		h->stats_queries[hand]++;
+		const bool hold = hold_ns > 0 && h->last_found_ns[hand] != 0 &&
+		                  at_timestamp_ns - h->last_found_ns[hand] <= hold_ns &&
+		                  at_timestamp_ns >= h->last_found_ns[hand];
+		if (hold) {
+			// The last found hand, where it was in the room, stands in for a moment (no velocity: it stays put).
+			*out_value = h->last_found[hand];
+			*out_timestamp_ns = at_timestamp_ns;
+			h->stats_held[hand]++;
+		}
 		os_mutex_unlock(&h->pose_lock);
 		return XRT_SUCCESS;
 	}
@@ -595,6 +623,10 @@ psvr2_ht_get_hand_tracking(struct xrt_device *xdev,
 	                                     XRT_SPACE_RELATION_POSITION_VALID_BIT |
 	                                     XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
 	                                     XRT_SPACE_RELATION_POSITION_TRACKED_BIT));
+	os_mutex_lock(&h->pose_lock);
+	h->last_found[hand] = *out_value;
+	h->last_found_ns[hand] = *out_timestamp_ns;
+	os_mutex_unlock(&h->pose_lock);
 	return XRT_SUCCESS;
 }
 
