@@ -20,7 +20,7 @@ compositor has to offer DRM leasing; on X11 the X server does.
 Older guidance says GNOME Wayland lacks DRM leasing. Current GNOME has it: a GNOME Shell 51 session leased the
 headset to SteamVR without trouble.
 
-## Your desktop inside VR (WayVR, experimental)
+## Your desktop inside VR (WayVR)
 
 SteamVR's own Desktop panel in the dashboard is blank on Wayland. That's a SteamVR issue
 ([SteamVR-for-Linux #693](https://github.com/ValveSoftware/SteamVR-for-Linux/issues/693)), not ours, and we can't
@@ -28,7 +28,7 @@ fix it. Instead, PSVR2-DriverKit works with [WayVR](https://github.com/wayvr-org
 overlay that shows Wayland and X11 screens in SteamVR.
 
 1. Install WayVR: Arch AUR package `wayvr`, or its AppImage in `~/Applications`. It isn't part of this project.
-2. DriverKit → Settings → **Start WayVR with SteamVR**. DriverKit starts WayVR before SteamVR (as WayVR asks),
+2. DriverKit → Settings → **Start WayVR with SteamVR**. DriverKit starts WayVR once SteamVR's compositor runs,
    restarts it if it stops unexpectedly, and stops it afterwards.
 3. The first time, your desktop asks which screens to share. Pick them in the order WayVR asks.
 
@@ -42,6 +42,9 @@ Sense controller bindings for WayVR come with the driver:
 | Scroll | sticks |
 | Right / middle click | touch Triangle or Circle / Square or Cross while clicking |
 
-This is new and not yet tested with a headset. Reports are welcome.
+Tested working with SteamVR 2.18.4, GNOME Wayland and an NVIDIA GPU. Close SteamVR's dashboard (PS button) before
+using WayVR: WayVR gets no controller input while the dashboard is open.
+
+With Monado: Settings → Monado section → Start WayVR with monado-service (new, not yet tested with a headset).
 
 [Troubleshooting](troubleshooting.md) · [Compatibility](compatibility.md)

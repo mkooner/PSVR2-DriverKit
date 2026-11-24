@@ -16,7 +16,7 @@
 </table></div>
 <p>Tested a setup we haven't? <a href="{{repo}}/issues/new?template=hardware_report.yml">Send a hardware report</a>.</p>
 
-<h2>Your desktop inside VR <span class="status exp">Experimental</span></h2>
+<h2>Your desktop inside VR <span class="status stable">Works</span></h2>
 <p>SteamVR's own Desktop panel stays blank on Wayland. That's a
   <a href="https://github.com/ValveSoftware/SteamVR-for-Linux/issues/693">SteamVR issue</a>, not something this driver
   can fix. PSVR2-DriverKit works with <a href="https://github.com/wayvr-org/wayvr">WayVR</a>, a separate open-source
@@ -27,5 +27,7 @@
   <li>Allow the screen-share prompt the first time.</li>
 </ol>
 <p>The driver includes Sense bindings for it: double-press <strong>Triangle</strong> to show or hide, triggers to
-  click, L1/R1 to grab, sticks to scroll. It hasn't been tested with a headset yet.</p>
+  click, L1/R1 to grab, sticks to scroll. Close SteamVR's dashboard (PS button) first.</p>
+<p>Tested with SteamVR 2.18.4, GNOME Wayland and an NVIDIA GPU. With Monado: Settings → Start WayVR with
+  monado-service (new, untested).</p>
 <p>Technical details: <a href="{{repo}}/blob/main/docs/psvr2-wayland.md">Wayland documentation</a>.</p>

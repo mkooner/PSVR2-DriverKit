@@ -41,7 +41,7 @@ See the full table with status in [compatibility](compatibility.md). In short:
 | Room View passthrough and the camera near play-area walls (SteamVR) | Stable, not on Intel Arc |
 | Eye tracking (SteamVR and OpenXR) | Works, no per-user calibration yet |
 | Bare-hand tracking | Experimental, off by default |
-| Desktop in VR through WayVR | Experimental, off by default |
+| Desktop in VR through WayVR | Works, off by default |
 
 ## What you need
 

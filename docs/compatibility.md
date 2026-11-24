@@ -53,7 +53,7 @@ Arch-based system (onnxruntime packages).
 | Room View passthrough, wall camera | ✓ | – | Stable (not on Intel Arc) |
 | Room setup in the headset | ✓ | – | Stable |
 | Bare-hand tracking | ✓ | ✓ | Experimental |
-| Desktop in VR (WayVR) | ✓ | – | Experimental, untested with a headset |
+| Desktop in VR (WayVR) | ✓ | ✓ (untested) | Works (tested with SteamVR 2.18.4) |
 | Async reprojection | GPU-dependent | Monado's own | Not on Intel Arc |
 | Windows | – | – | Not supported |
 

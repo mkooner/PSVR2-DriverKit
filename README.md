@@ -31,7 +31,7 @@ and Sense drivers serve both SteamVR games and native OpenXR apps.
 | Room setup in the headset (SteamVR Playspace menu) | Stable |
 | Eye tracking (SteamVR and OpenXR `XR_EXT_eye_gaze_interaction`) | Works, no per-user calibration yet |
 | Bare-hand tracking (Monado's Mercury tracker) | Experimental, off by default |
-| Your desktop in VR through [WayVR](https://github.com/wayvr-org/wayvr) | Experimental, off by default |
+| Your desktop in VR through [WayVR](https://github.com/wayvr-org/wayvr) | Works, off by default |
 | PSVR2-DriverKit app: install, compile, register, launch, settings, device status | Stable |
 
 ### Headset
@@ -68,7 +68,7 @@ and Sense drivers serve both SteamVR games and native OpenXR apps.
 - **The PS VR2 and Sense controller models and icons** in SteamVR, when Sony's PlayStation VR2 App is installed (see
   the install guide).
 
-### Desktop in VR (with WayVR, experimental)
+### Desktop in VR (with WayVR)
 - **Your Linux desktop inside SteamVR,** on Wayland and X11, through
   [WayVR](https://github.com/wayvr-org/wayvr), a separate overlay program you install yourself (Arch: the AUR package
   `wayvr`; other distributions: its AppImage in `~/Applications`). It isn't part of this repository.
@@ -76,8 +76,11 @@ and Sense drivers serve both SteamVR games and native OpenXR apps.
   L2/R2 click (touch shows the pointer), L1/R1 grab (move; grab + trigger + stick resizes), the sticks scroll, and
   touching Triangle/Circle or Square/Cross while clicking gives a right or middle click.
 - **Started with SteamVR:** turn on Start WayVR with SteamVR in DriverKit's Settings tab. DriverKit then starts WayVR
-  before SteamVR (as WayVR asks), restarts it if it stops unexpectedly, and stops it after SteamVR. The first time,
-  your desktop asks which screens to share: pick them in the order WayVR asks.
+  once SteamVR's compositor runs, restarts it if it stops unexpectedly, and stops it after SteamVR. Close SteamVR's
+  dashboard (PS button), then double-press Triangle. The first time, your desktop asks which screen to share.
+- **Tested working** with SteamVR 2.18.4, GNOME Wayland and an NVIDIA GPU.
+- **With Monado (new, untested with a headset):** Settings → Monado section → Start WayVR with monado-service starts
+  WayVR on our OpenXR runtime with monado-service.
 
 ### OpenXR with Monado
 - **Native OpenXR apps run directly on Monado's runtime** (monado-service), without SteamVR. See
