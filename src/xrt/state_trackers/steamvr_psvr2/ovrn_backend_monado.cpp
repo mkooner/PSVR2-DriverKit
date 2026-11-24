@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  Backend on Monado's devices: an xrt_instance without a compositor inside vrserver, the head device and
- *         the hand controllers read through the generic xrt_device interface. Nothing in Monado is changed for it.
+ * @brief  Backend on Monado's devices: an xrt_instance inside vrserver, the head device and the hand controllers
+ *         read through the generic xrt_device interface. Without a compositor, except in driver direct mode
+ *         (DriverKit's setting, off by default), where Monado's compositor shows SteamVR's frames on the headset.
+ *         Nothing in Monado is changed for it.
  * @ingroup st_ovrn
  */
 
@@ -14,6 +16,8 @@
 
 // The room calibration (ovrn_room*, from the previous plugin, removed 2026-11-18): the saved room and its files stay valid.
 #include "ovrn_room_state.hpp"
+#include "ovrn_direct_mode.hpp"
+#include "xrt/xrt_session.h"
 
 #include "math/m_api.h"
 #include "math/m_space.h"
@@ -82,6 +86,15 @@ DEBUG_GET_ONCE_FLOAT_OPTION(ovrn_play_area_size, "OVRD_PLAY_AREA_SIZE", 2.0f)
 // launch-steamvr.sh): used when they're there. OVRD_PSSENSE_RENDER_MODELS / OVRD_PSVR2_SONY_ICONS = 0 or 1 override.
 DEBUG_GET_ONCE_TRISTATE_OPTION(ovrn_pssense_render_models, "OVRD_PSSENSE_RENDER_MODELS")
 DEBUG_GET_ONCE_TRISTATE_OPTION(ovrn_psvr2_sony_icons, "OVRD_PSVR2_SONY_ICONS")
+// Driver direct mode's tuning (ovrn_direct_mode.hpp), the old plugin's defaults; the switch itself is DriverKit's
+// DIRECT_MODE setting or OVRN_DIRECT_MODE (ovrn_settings.hpp).
+DEBUG_GET_ONCE_BOOL_OPTION(ovrn_direct_mode_gpu_sync, "OVRN_DIRECT_MODE_GPU_SYNC", true)
+DEBUG_GET_ONCE_BOOL_OPTION(ovrn_direct_mode_copy, "OVRN_DIRECT_MODE_COPY", true)
+DEBUG_GET_ONCE_BOOL_OPTION(ovrn_direct_mode_label_fix, "OVRN_DIRECT_MODE_LABEL_FIX", true)
+DEBUG_GET_ONCE_BOOL_OPTION(ovrn_direct_mode_hold, "OVRN_DIRECT_MODE_HOLD", true)
+DEBUG_GET_ONCE_FLOAT_OPTION(ovrn_direct_mode_vsync_lead_ms, "OVRN_DIRECT_MODE_VSYNC_LEAD_MS", 12.0f)
+DEBUG_GET_ONCE_NUM_OPTION(ovrn_direct_mode_layers, "OVRN_DIRECT_MODE_LAYERS", 8)
+DEBUG_GET_ONCE_FLOAT_OPTION(ovrn_direct_mode_capture_s, "OVRN_DIRECT_MODE_CAPTURE", 0.0f)
 
 namespace {
 
@@ -262,8 +275,17 @@ public:
 			*why = "xrt_instance_create failed";
 			return false;
 		}
-		// Devices only: SteamVR owns the display, so no Monado compositor is created.
-		xrt_result_t xret = xrt_instance_create_system(m_xinst, &m_xsys, &m_xsysd, &m_xso, NULL);
+		// Devices only (SteamVR owns the display), except in driver direct mode: then with Monado's compositor too.
+		std::string direct_source;
+		const bool direct = direct_mode_wanted(&direct_source);
+		xrt_result_t xret = xrt_instance_create_system(m_xinst, &m_xsys, &m_xsysd, &m_xso, direct ? &m_xsysc : NULL);
+		if (direct && (xret < 0 || m_xsysc == NULL)) {
+			ovrd_log("ovrn: direct mode (%s): Monado's compositor didn't start (%d), SteamVR drives the display as "
+			         "usual\n",
+			         direct_source.c_str(), (int)xret);
+			destroySystem();
+			xret = xrt_instance_create_system(m_xinst, &m_xsys, &m_xsysd, &m_xso, NULL);
+		}
 		if (xret < 0 || m_xsysd == NULL || m_xsysd->static_roles.head == NULL || m_xsysd->static_roles.head->hmd == NULL) {
 			*why = "no headset found by Monado";
 			stop();
@@ -305,11 +327,22 @@ public:
 			}
 		}
 		readEyes(m_eyes);
+		if (m_xsysc != NULL) {
+			startDirectMode(direct_source);
+		} else {
+			ovrd_log("ovrn: direct mode off (%s): SteamVR drives the headset's display\n", direct_source.c_str());
+		}
 		startEyeTracking();
 #ifdef OVRN_CONTROLLER_HOTPLUG
 		startHotplug();
 #endif
 		return true;
+	}
+
+	OvrnDirectMode *
+	directMode() override
+	{
+		return m_direct.get();
 	}
 
 	void
@@ -335,6 +368,9 @@ public:
 				sense.push_back(x->serial);
 			}
 		}
+		// Direct mode's threads and images, then Monado's compositor, before the devices it shows the head of.
+		m_direct.reset();
+		stopDirectModeCompositor();
 		m_head = NULL;
 		m_hand[0] = m_hand[1] = NULL;
 		if (m_xso != NULL) {
@@ -1351,6 +1387,117 @@ private:
 #endif
 	}
 
+	//! Everything xrt_instance_create_system made, in reverse (to make the system again without a compositor).
+	void
+	destroySystem()
+	{
+		xrt_syscomp_destroy(&m_xsysc);
+		if (m_xso != NULL) {
+			xrt_space_overseer_destroy(&m_xso);
+		}
+		if (m_xsysd != NULL) {
+			xrt_system_devices_destroy(&m_xsysd);
+		}
+		if (m_xsys != NULL) {
+			xrt_system_destroy(&m_xsys);
+		}
+	}
+
+	/*!
+	 * Driver direct mode: a session on Monado's compositor, as an in-process OpenXR session makes one
+	 * (oxr_session_create_native_compositor + xrBeginSession), and the component SteamVR hands its frames to. On any
+	 * failure the compositor goes and SteamVR drives the display as usual (never a dark headset).
+	 */
+	void
+	startDirectMode(const std::string &source)
+	{
+		struct xrt_session_info xsi = {};
+		xrt_result_t xret = xrt_system_create_session(m_xsys, &xsi, &m_xs, &m_xcn);
+		if (xret != XRT_SUCCESS || m_xcn == NULL) {
+			ovrd_log("ovrn: direct mode (%s): no session on Monado's compositor (%d), SteamVR drives the display\n",
+			         source.c_str(), (int)xret);
+			stopDirectModeCompositor();
+			return;
+		}
+		if (m_xsysc->xmcc != NULL) {
+			xrt_syscomp_set_state(m_xsysc, &m_xcn->base, true, true, os_monotonic_get_ns());
+			xrt_syscomp_set_z_order(m_xsysc, &m_xcn->base, 0);
+		}
+		struct xrt_begin_session_info begin = {};
+		begin.view_type = XRT_VIEW_TYPE_STEREO;
+		xret = xrt_comp_begin_session(&m_xcn->base, &begin);
+		if (xret != XRT_SUCCESS) {
+			ovrd_log("ovrn: direct mode (%s): Monado's compositor won't begin the session (%d), SteamVR drives the "
+			         "display\n",
+			         source.c_str(), (int)xret);
+			xrt_comp_native_destroy(&m_xcn);
+			stopDirectModeCompositor();
+			return;
+		}
+		m_xcnBegun = true;
+
+		m_direct.reset(new OvrnDirectMode());
+		OvrnDirectMode &dm = *m_direct;
+		// SteamVR's world -> the head device's own space: undo the room, then the tracking origin's offset (the
+		// reverse of devicePose plus the driver's world transform).
+		struct xrt_device *head = m_head;
+		OvrdRoom *room = &m_room;
+		dm.world_to_device = [head, room](const struct xrt_pose &world) {
+			const ovrd_room_transform T = room->transform();
+			struct xrt_pose r = {T.rotation, T.translation};
+			struct xrt_pose r_inv, offset_inv, driver, device;
+			math_pose_invert(&r, &r_inv);
+			math_pose_transform(&r_inv, &world, &driver);
+			math_pose_invert(&head->tracking_origin->initial_offset, &offset_inv);
+			math_pose_transform(&offset_inv, &driver, &device);
+			return device;
+		};
+		dm.check_head = m_head;
+		dm.gpu_sync = debug_get_bool_option_ovrn_direct_mode_gpu_sync();
+		dm.label_fix = debug_get_bool_option_ovrn_direct_mode_label_fix();
+		dm.copy_mode = debug_get_bool_option_ovrn_direct_mode_copy();
+		dm.vsync_lead_ns = (int64_t)(debug_get_float_option_ovrn_direct_mode_vsync_lead_ms() * 1e6);
+		dm.hold = debug_get_bool_option_ovrn_direct_mode_hold();
+		dm.max_layers = std::max(1, (int)debug_get_num_option_ovrn_direct_mode_layers());
+		dm.capture_after_s = debug_get_float_option_ovrn_direct_mode_capture_s();
+		OvrnDirectMode::Output out;
+		out.xcn = m_xcn;
+		out.head = m_head;
+		// SteamVR renders each eye with GetProjectionRaw's frustum (the device's fov) and our eye-to-head poses.
+		out.fov[0] = m_head->hmd->distortion.fov[0];
+		out.fov[1] = m_head->hmd->distortion.fov[1];
+		for (int e = 0; e < 2; e++) {
+			out.eye_in_head[e] = toXrt(m_eyes[e]);
+		}
+		dm.setOutput(out);
+		ovrd_log("ovrn: direct mode on (%s): Monado's compositor shows SteamVR's frames on the headset\n",
+		         source.c_str());
+	}
+
+	void
+	stopDirectModeCompositor()
+	{
+		if (m_xcn != NULL) {
+			if (m_xcnBegun) {
+				xrt_comp_end_session(&m_xcn->base);
+			}
+			xrt_comp_native_destroy(&m_xcn);
+		}
+		m_xcnBegun = false;
+		xrt_session_destroy(&m_xs);
+		xrt_syscomp_destroy(&m_xsysc);
+	}
+
+	static struct xrt_pose
+	toXrt(const Pose &p)
+	{
+		struct xrt_pose x;
+		x.orientation = {(float)p.orientation.x, (float)p.orientation.y, (float)p.orientation.z,
+		                 (float)p.orientation.w};
+		x.position = {(float)p.position.x, (float)p.position.y, (float)p.position.z};
+		return x;
+	}
+
 	void
 	readEyes(Pose out[2])
 	{
@@ -1402,6 +1549,12 @@ private:
 
 	struct xrt_instance *m_xinst = NULL;
 	struct xrt_system *m_xsys = NULL;
+	//! Driver direct mode only: Monado's system compositor, the session on it and its native compositor.
+	struct xrt_system_compositor *m_xsysc = NULL;
+	struct xrt_session *m_xs = NULL;
+	struct xrt_compositor_native *m_xcn = NULL;
+	std::unique_ptr<OvrnDirectMode> m_direct;
+	bool m_xcnBegun = false;
 	struct xrt_system_devices *m_xsysd = NULL;
 	struct xrt_space_overseer *m_xso = NULL;
 	struct xrt_device *m_head = NULL;

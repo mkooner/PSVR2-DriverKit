@@ -47,7 +47,6 @@ public:
 		// Which build this is (git describe of the source at configure time), to compare users' logs.
 		log("ovrn: driver build %s\n", u_git_tag);
 		applyCompositorDefaults();
-		applySeeThroughSettings();
 		// OVRN_BACKEND=sim: the simulated headset (tests); otherwise Monado's devices.
 		const char *which = getenv("OVRN_BACKEND");
 		m_backend = (which != nullptr && strcmp(which, "sim") == 0) ? make_sim_backend() : make_monado_backend();
@@ -58,6 +57,8 @@ public:
 			VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 			return vr::VRInitError_Driver_HmdUnknown;
 		}
+		// After the backend: in driver direct mode there's no camera for SteamVR (ovrn_hmd.hpp setupCamera).
+		applySeeThroughSettings(m_backend->directMode() != nullptr);
 		m_hmd.reset(new Hmd(m_backend.get()));
 		if (!m_hmd->registerDevice()) {
 			Cleanup();
@@ -367,7 +368,7 @@ private:
 	}
 
 	void
-	applySeeThroughSettings()
+	applySeeThroughSettings(bool direct_mode)
 	{
 		const char *e = getenv("OVRN_SEE_THROUGH");
 		vr::IVRSettings *settings = vr::VRSettings();
@@ -378,7 +379,7 @@ private:
 		}
 		vr::EVRSettingsError err = vr::VRSettingsError_None;
 		const bool noted = settings->GetBool(kOwnSection, kSeeThroughNoteKey, &err) && err == vr::VRSettingsError_None;
-		if (camera_mode(&source, &invalid) == CameraMode::Off) {
+		if (direct_mode || camera_mode(&source, &invalid) == CameraMode::Off) {
 			// A session that ended without Cleanup left ours in place: put the user's back now.
 			if (noted) {
 				m_seeThroughSet = true;

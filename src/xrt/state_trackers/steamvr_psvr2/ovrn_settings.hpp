@@ -117,4 +117,23 @@ camera_mode(std::string *out_source, std::string *out_invalid)
 	return CameraMode::On;
 }
 
+/*!
+ * Driver direct mode (ovrn_direct_mode.hpp), off by default: SteamVR hands its finished frames to the driver and
+ * Monado's compositor shows them on the headset, instead of SteamVR's compositor driving the headset's display. For
+ * GPUs where SteamVR's own output to the headset flickers (Intel Arc: SteamVR-for-Linux #932 reports black frames
+ * interleaved with the image, gone with Monado's compositor on the same machine). OVRN_DIRECT_MODE=1 or 0 (tests,
+ * DriverKit's launch), else DIRECT_MODE=1 in DriverKit's settings file.
+ */
+inline bool
+direct_mode_wanted(std::string *out_source)
+{
+	const char *env = getenv("OVRN_DIRECT_MODE");
+	if (env != nullptr && env[0] != '\0') {
+		*out_source = "OVRN_DIRECT_MODE";
+		return strcmp(env, "1") == 0;
+	}
+	*out_source = "DriverKit's setting";
+	return driverkit_setting("DIRECT_MODE") == "1";
+}
+
 } // namespace ovrn
