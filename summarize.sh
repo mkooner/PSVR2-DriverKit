@@ -70,6 +70,17 @@ END {
 	if (worn + notworn > 0) printf "  headset worn at %d, not worn at %d; moving at %d, still at %d\n", worn, notworn, moving, still
 }' "$LOG"
 echo
+# What can make SteamVR dim, fade or blank the view (ovrn_presence_log.hpp, since 2026-11-23): the wear sensor's
+# changes, head pose drops out of Running_OK, SteamVR's user-interaction and standby verdicts, per 30 s window.
+echo "== Headset presence (wear sensor, head tracking drops, SteamVR standby; one line per 30 s with any)"
+if grep -q "ovrn: headset presence\|ovrn: headset wear sensor at the start" "$LOG"; then
+	grep -o "ovrn: headset wear sensor at the start: .*" "$LOG" | tail -1 | sed 's/^ovrn: /  /'
+	grep -o "ovrn: headset presence in the last 30 s.*" "$LOG" | sed 's/^ovrn: headset presence /  /' | tail -20
+	grep -o "ovrn: headset presence this session.*" "$LOG" | tail -1 | sed 's/^ovrn: headset presence /  /'
+else
+	echo "  not in this log (driver older than 2026-11-23)"
+fi
+echo
 echo "== Clock check (ts host-now should be a few ms negative)"
 grep -E "LD stats:" "$LOG" | grep -o "ts host-now [+-][0-9.]*ms" | sort | uniq -c | sort -rn | head -5
 
