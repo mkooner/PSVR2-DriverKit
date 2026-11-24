@@ -153,13 +153,15 @@ fn default_settings() -> Vec<Setting> {
         value("OVRN_SONY_PROPS", "Sony's extra display properties",
               "Which of Sony's headset properties to report: all (the plugin's default, as Sony's driver and PSVR2Toolkit), none, or a list of throttle, framerate, syslayer, texindex, supersample, dsc, edid, display, mask.", "all", false).steamvr(),
         toggle("WAYVR", "Start WayVR with SteamVR (desktop in VR)",
-               "Off (default). On: Start SteamVR also starts WayVR (a separate desktop overlay program you install yourself: Arch AUR package wayvr, or its AppImage from github.com/wayvr-org/wayvr/releases in ~/Applications), before SteamVR as WayVR asks, and stops it afterwards. Your screens in VR on Wayland and X11; the first time, your desktop asks which screens to share. Sense controllers: double-press Triangle shows/hides it, L2/R2 click, L1/R1 grab, sticks scroll. This is WayVR, not SteamVR's own Desktop panel.", false).steamvr(),
+               "Off (default). On: Start SteamVR also starts WayVR (a separate desktop overlay program you install yourself: Arch AUR package wayvr, or its AppImage from github.com/wayvr-org/wayvr/releases in ~/Applications), once SteamVR's compositor runs (outside Steam's runtime, as WayVR asks), and stops it afterwards. Close SteamVR's dashboard (PS button) before using it. Your screens in VR on Wayland and X11; the first time, your desktop asks which screens to share. Sense controllers: double-press Triangle shows/hides it, L2/R2 click, L1/R1 grab, sticks scroll. This is WayVR, not SteamVR's own Desktop panel.", false).steamvr(),
         toggle("RECORD_DATASET", "Record controller dataset", "Record LED tracking data (logs/).", false).steamvr(),
         toggle("RECORD_SLAM", "Record headset SLAM", "Record the headset's raw SLAM stream (logs/).", false).steamvr(),
         toggle("RECORD_CAMERA", "Record camera images", "Record camera transfers (~2 GB/min, logs/).", false).steamvr(),
     ];
     v.extend(headset_settings(Target::SteamVR, true));
     // OpenXR (monado-service)
+    v.push(toggle("WAYVR", "Start WayVR with monado-service (desktop in VR)",
+                  "Off (default). On: Start monado-service (or Launch app) also starts WayVR on Monado (OpenXR, pointed at this build's runtime) once the service is up, and stops it with the service. WayVR is a separate program you install yourself (Arch AUR package wayvr, or its AppImage in ~/Applications). The first time, your desktop asks which screen to share. Sense controllers: double-press Triangle shows/hides it.", false).monado());
     v.push(value("OXR_VIEWPORT_SCALE_PERCENTAGE", "Render size (%)",
                  "Recommended render size for apps on monado-service, on top of Monado's own 140% (100, the default: 2800x2856 per eye).", "100", true).monado());
     v.extend(headset_settings(Target::Monado, false));
@@ -706,6 +708,8 @@ struct Launcher {
     steamvr: Option<Child>,
     service: Option<(Child, ChildStdin)>,
     app: Option<Child>,
+    /// WayVR started with monado-service (Settings: Start WayVR with monado-service); set once the service is up.
+    wayvr: Arc<Mutex<Option<Child>>>,
     app_path: String,
     app_args: String,
     message: String,
@@ -741,6 +745,38 @@ fn signal(child: &Child, sig: &str) {
     let _ = Command::new("kill").args([sig, &child.id().to_string()]).status();
 }
 
+/// The user's WayVR (as launch-steamvr.sh finds it): `wayvr` on PATH, else a WayVR AppImage in ~/Applications,
+/// ~/AppImages or ~/.local/bin.
+fn find_wayvr() -> Option<PathBuf> {
+    if let Ok(o) = Command::new("sh").args(["-c", "command -v wayvr"]).output() {
+        let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if o.status.success() && !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    for dir in ["Applications", "AppImages", ".local/bin"] {
+        if let Ok(rd) = fs::read_dir(Path::new(&home).join(dir)) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_lowercase();
+                if name.starts_with("wayvr") && name.ends_with(".appimage") {
+                    return Some(e.path());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Whether a WayVR already runs (its own single-instance pid file, $XDG_RUNTIME_DIR/wayvr.pid).
+fn wayvr_running() -> bool {
+    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    fs::read_to_string(Path::new(&runtime).join("wayvr.pid"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
+}
+
 impl Launcher {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
@@ -760,6 +796,7 @@ impl Launcher {
             steamvr: None,
             service: None,
             app: None,
+            wayvr: Arc::new(Mutex::new(None)),
             app_path: String::new(),
             app_args: String::new(),
             message: String::new(),
@@ -970,6 +1007,7 @@ impl Launcher {
                 let stdin = c.stdin.take().expect("piped stdin");
                 self.service = Some((c, stdin));
                 self.message = format!("monado-service starting (log {})", log.display());
+                self.start_wayvr_with_service();
                 true
             }
             Err(e) => {
@@ -979,7 +1017,69 @@ impl Launcher {
         }
     }
 
+    /// Settings → Start WayVR with monado-service: once the service's socket is up (up to 20 s, on a thread), WayVR in
+    /// OpenXR mode with XR_RUNTIME_JSON pointing at this build's runtime, as the user, outside any Steam runtime;
+    /// DriverKit's own AppImage variables taken out (WayVR reads APPIMAGE as its own path). Its output goes to
+    /// logs/wayvr-monado-<time>.log. Left alone if a WayVR already runs.
+    fn start_wayvr_with_service(&mut self) {
+        let on = self.cfg.settings.iter().any(|s| s.key == "WAYVR" && s.target == Target::Monado && s.enabled);
+        if !on || wayvr_running() || self.wayvr.lock().unwrap().is_some() {
+            return;
+        }
+        let Some(bin) = find_wayvr() else {
+            self.message = "Start WayVR with monado-service is on, but WayVR isn't installed (Arch: AUR package wayvr; others: its AppImage in ~/Applications).".into();
+            return;
+        };
+        let log = self.logs_dir().join(format!("wayvr-monado-{}.log", stamp()));
+        let manifest = self.cfg.manifest();
+        let slot = self.wayvr.clone();
+        let shown = log.display().to_string();
+        thread::spawn(move || {
+            let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+            let sock = Path::new(&runtime).join("monado_comp_ipc");
+            let t0 = Instant::now();
+            while !sock.exists() && t0.elapsed() < Duration::from_secs(20) {
+                thread::sleep(Duration::from_millis(200));
+            }
+            if !sock.exists() {
+                return;
+            }
+            let Ok(out) = fs::File::create(&log) else { return };
+            let err = out.try_clone().ok();
+            let mut cmd = Command::new(&bin);
+            cmd.args(["--openxr", "--log-to"]).arg(&log).env("XR_RUNTIME_JSON", &manifest);
+            for v in ["APPIMAGE", "APPDIR", "ARGV0", "OWD", "PSVR2_DRIVERKIT_FROM_APPIMAGE"] {
+                cmd.env_remove(v);
+            }
+            cmd.stdin(Stdio::null()).stdout(out);
+            if let Some(e) = err {
+                cmd.stderr(e);
+            }
+            if let Ok(c) = cmd.spawn() {
+                *slot.lock().unwrap() = Some(c);
+            }
+        });
+        self.message = format!("monado-service starting; WayVR follows once it's up (log {shown})");
+    }
+
+    fn stop_wayvr(&mut self) {
+        if let Some(mut c) = self.wayvr.lock().unwrap().take() {
+            signal(&c, "-TERM");
+            thread::spawn(move || {
+                for _ in 0..50 {
+                    if let Ok(Some(_)) = c.try_wait() {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                let _ = c.kill();
+                let _ = c.wait();
+            });
+        }
+    }
+
     fn stop_service(&mut self) {
+        self.stop_wayvr();
         if let Some((c, mut stdin)) = self.service.take() {
             let _ = stdin.write_all(b"\n"); // the service's own "press enter to quit"
             drop(stdin);
