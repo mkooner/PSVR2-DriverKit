@@ -154,6 +154,8 @@ fn default_settings() -> Vec<Setting> {
               "Which of Sony's headset properties to report: all (the plugin's default, as Sony's driver and PSVR2Toolkit), none, or a list of throttle, framerate, syslayer, texindex, supersample, dsc, edid, display, mask.", "all", false).steamvr(),
         toggle("WAYVR", "Start WayVR with SteamVR (desktop in VR)",
                "Off (default). On: Start SteamVR also starts WayVR (a separate desktop overlay program you install yourself: Arch AUR package wayvr, or its AppImage from github.com/wayvr-org/wayvr/releases in ~/Applications), once SteamVR's compositor runs (outside Steam's runtime, as WayVR asks), and stops it afterwards. Close SteamVR's dashboard (PS button) before using it. Your screens in VR on Wayland and X11; the first time, your desktop asks which screens to share. Sense controllers: double-press Triangle shows/hides it, L2/R2 click, L1/R1 grab, sticks scroll. This is WayVR, not SteamVR's own Desktop panel.", false).steamvr(),
+        toggle("OVRN_DIRECT_MODE", "Direct mode (experimental)",
+               "Off (default): SteamVR's compositor drives the headset's display. On: SteamVR hands its finished frames to the driver and Monado's compositor shows them on the headset, the way the OpenXR (monado-service) path does. For GPUs where the picture flickers or strobes in SteamVR but not on Monado (reported on Intel Arc). Applies at the next SteamVR start; if Monado's compositor can't start, SteamVR drives the display as usual.", false).steamvr(),
         toggle("RECORD_DATASET", "Record controller dataset", "Record LED tracking data (logs/).", false).steamvr(),
         toggle("RECORD_SLAM", "Record headset SLAM", "Record the headset's raw SLAM stream (logs/).", false).steamvr(),
         toggle("RECORD_CAMERA", "Record camera images", "Record camera transfers (~2 GB/min, logs/).", false).steamvr(),
@@ -376,11 +378,12 @@ fn write_driver_settings(cfg: &Config) -> Result<(), String> {
             .unwrap_or_default()
     };
     let text = format!(
-        "# Written by PSVR2-DriverKit (Settings tab); the SteamVR driver reads it when SteamVR starts.\nHAND_TRACKING={}\nLEGACY_CONTROLLER={}\nCAMERA_HALF={}\nCAMERA={}\n",
+        "# Written by PSVR2-DriverKit (Settings tab); the SteamVR driver reads it when SteamVR starts.\nHAND_TRACKING={}\nLEGACY_CONTROLLER={}\nCAMERA_HALF={}\nCAMERA={}\nDIRECT_MODE={}\n",
         if on("PSVR2_HAND_TRACKING") { 1 } else { 0 },
         value_of("OVRN_LEGACY_CONTROLLER"),
         if on("OVRN_CAMERA_HALF") { 1 } else { 0 },
-        value_of("OVRN_CAMERA_MODE")
+        value_of("OVRN_CAMERA_MODE"),
+        if on("OVRN_DIRECT_MODE") { 1 } else { 0 }
     );
     let path = config_dir().join("settings.conf");
     if fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
