@@ -136,4 +136,16 @@ direct_mode_wanted(std::string *out_source)
 	return driverkit_setting("DIRECT_MODE") == "1";
 }
 
+/*!
+ * Test switch (OVRN_DIRECT_MODE_CAMERA=1, off by default): offer the headset cameras in direct mode anyway, to test
+ * whether the SteamVRLinuxFixes layer's Facet event-query patch (keep the layer with OVRN_LINUX_FIXES=1) lets
+ * SteamVR's camera views run under Facet (SteamVR-for-Linux #909). Without the patch SteamVR's compositor aborts.
+ */
+inline bool
+direct_mode_camera_test()
+{
+	const char *e = getenv("OVRN_DIRECT_MODE_CAMERA");
+	return e != nullptr && strcmp(e, "1") == 0;
+}
+
 } // namespace ovrn

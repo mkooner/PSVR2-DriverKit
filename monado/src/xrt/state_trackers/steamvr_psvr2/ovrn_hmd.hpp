@@ -603,7 +603,10 @@ private:
 		 * facetrenderer.cpp:3572" < 1 s after Room View was created, 2026-11-24 11:37:30 and 11:37:54 (-203);
 		 * SteamVR-for-Linux #909, the same assert with a PS VR2: Facet lacks the event queries the camera uses.
 		 */
-		if (m_direct != nullptr) {
+		if (m_direct != nullptr && direct_mode_camera_test()) {
+			log("ovrn: headset cameras: on in direct mode (OVRN_DIRECT_MODE_CAMERA=1, test: needs the SteamVRLinuxFixes "
+			    "layer's Facet patch, OVRN_LINUX_FIXES=1)\n");
+		} else if (m_direct != nullptr) {
 			log("ovrn: headset cameras: off in direct mode (SteamVR's Facet renderer, which direct mode uses, can't "
 			    "show its camera views: SteamVR-for-Linux #909)\n");
 			return;
