@@ -1,0 +1,51 @@
+name: Hardware compatibility report
+description: Tell us how PSVR2-DriverKit runs on your GPU, desktop and distribution, whether it works or not.
+labels: ["hardware-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports from setups we haven't tested (AMD GPUs, KDE Plasma, Sway, Hyprland, X11, other distributions) help everyone. Successful sessions are just as useful as failures.
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+      placeholder: "AMD RX 6800, Mesa 25.2 (RADV)"
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution and kernel
+      placeholder: "Fedora 43, 6.17"
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop and session type
+      placeholder: "KDE Plasma 6.5, Wayland"
+    validations:
+      required: true
+  - type: checkboxes
+    id: works
+    attributes:
+      label: What worked?
+      options:
+        - label: SteamVR starts with the headset showing the picture
+        - label: Head tracking
+        - label: Both Sense controllers tracked (6DoF)
+        - label: Controller buttons and haptics
+        - label: Room View / passthrough
+        - label: Eye tracking (in an app that uses it)
+        - label: OpenXR app on monado-service
+        - label: Async reprojection ("Enabling async support!" in SteamVR's compositor log, with no "Insufficient permission" after it)
+  - type: textarea
+    id: notes
+    attributes:
+      label: What didn't work, or anything else
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Attach the zipped `~/.local/share/PSVR2-DriverKit/kit/logs` folder.

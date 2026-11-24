@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/mkooner/PSVR2-DriverKit/blob/main/docs/troubleshooting.md
+    about: Fixes for the most common problems (controllers not found, flicker, Intel Arc, compile failures).
+  - name: Security vulnerability
+    url: https://github.com/mkooner/PSVR2-DriverKit/security/advisories/new
+    about: Please report security problems privately.

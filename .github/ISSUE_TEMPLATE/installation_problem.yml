@@ -1,0 +1,37 @@
+name: Installation problem
+description: Install dependencies, Compile Driver, Register or the AppImage doesn't work.
+labels: ["installation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        See the [installation guide](https://github.com/mkooner/PSVR2-DriverKit/blob/main/docs/psvr2-installation.md) and [troubleshooting](https://github.com/mkooner/PSVR2-DriverKit/blob/main/docs/troubleshooting.md#compile-driver-fails) first.
+  - type: dropdown
+    id: step
+    attributes:
+      label: Which step fails?
+      options:
+        - Starting the AppImage
+        - Building the DriverKit app from source
+        - Install dependencies / install-deps.sh
+        - Compile Driver
+        - Register our driver
+        - Turn on PS VR2 features
+        - First SteamVR start
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution and version
+      placeholder: "Ubuntu 25.04"
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Error output
+      description: Paste the message DriverKit shows, and attach `download.log`, `configure.log`, `compile.log` or `driverkit-build.log` from the install folder (default `~/.local/share/PSVR2-DriverKit/`).
+      render: text
+    validations:
+      required: true

@@ -1,0 +1,61 @@
+name: Bug report
+description: Something in the driver, SteamVR, OpenXR or the DriverKit app doesn't work as described.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Logs make most problems solvable: start SteamVR from DriverKit → Launcher → **Start SteamVR**, reproduce the problem, quit SteamVR, then zip `~/.local/share/PSVR2-DriverKit/kit/logs/` and attach it below.
+        Check [troubleshooting](https://github.com/mkooner/PSVR2-DriverKit/blob/main/docs/troubleshooting.md) first.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      placeholder: "The picture pulses bright/dark in SteamVR Home; expected a steady picture."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start SteamVR from DriverKit
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      options:
+        - SteamVR
+        - OpenXR (monado-service)
+        - DriverKit app only
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      placeholder: "NVIDIA RTX 4070, 580.xx / AMD RX 7800 XT, Mesa 25.x / Intel Arc A750, xe"
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution, desktop and session type
+      placeholder: "CachyOS, GNOME 51, Wayland"
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: When did you last run Compile Driver?
+      placeholder: "2026-11-23 (or the AppImage version)"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Attach the zipped `kit/logs` folder (drag and drop). Logs include your user name in paths and device serial numbers.
+    validations:
+      required: false
