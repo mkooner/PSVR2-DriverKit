@@ -45,6 +45,15 @@ DEBUG_GET_ONCE_LOG_OPTION(psvr2_ht_log, "PSVR2_HT_LOG", U_LOGGING_INFO)
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_fov, "PSVR2_HT_FOV", 120.0f)
 //! Brightening, out = 255 * (in/255)^gamma. 0.5 was best of 0.35-1 on the recordings (frames average ~25/255).
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_gamma, "PSVR2_HT_GAMMA", 0.5f)
+/*!
+ * Auto levels per camera before the brightening: each view's tones between its LEVELS_LO and LEVELS_HI percentiles
+ * (smoothed over ~0.3 s) are stretched to the full range, so a bright monitor or lamp in view no longer squeezes the
+ * hands into a narrow band of grey. A dark room lit by a monitor (2026-11-23 recording, the user's second headset):
+ * hands were faint grey on grey, the left camera's darker than the right's. PSVR2_HT_LEVELS=0: the fixed curve only.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_ht_levels, "PSVR2_HT_LEVELS", true)
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_levels_lo, "PSVR2_HT_LEVELS_LO", 0.01f)
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_levels_hi, "PSVR2_HT_LEVELS_HI", 0.95f)
 //! Unwarped image size (square).
 DEBUG_GET_ONCE_NUM_OPTION(psvr2_ht_size, "PSVR2_HT_SIZE", 640)
 //! Offline diagnosis: a folder to save every 30th pair of images Mercury gets (raw and unwarped, PGM). Off when unset.
@@ -88,7 +97,12 @@ struct psvr2_hand_tracking
 	struct t_hand_tracking_async *async; // NULL until Mercury is running
 	int out_size;
 	float *map_x[2], *map_y[2]; // per unwarped pixel, the source position, -1 outside
-	uint8_t lut[256];
+	uint8_t lut[256];           // the fixed brightening curve (also the first frame's, before auto levels)
+	uint8_t view_lut[2][256];   // each view's curve: auto levels then the brightening
+	uint32_t view_hist[2][256]; // each view's tones in the current frame (every 4th pixel), for the next frame's levels
+	float level_lo[2], level_hi[2];
+	bool levels_init[2];
+	float gamma;
 	uint8_t *decoded[2];        // CAM_W x CAM_H each
 	uint64_t processed;
 	//! Worker thread: brightness of the images Mercury gets (unwarped view 0, before the brightening), per 5 s.
@@ -157,9 +171,12 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 	float gamma = debug_get_float_option_psvr2_ht_gamma();
 	int n = (int)debug_get_num_option_psvr2_ht_size();
 	h->out_size = n;
+	h->gamma = gamma;
 	for (int i = 0; i < 256; i++) {
 		h->lut[i] = (uint8_t)lroundf(255.0f * powf(i / 255.0f, gamma));
 	}
+	memcpy(h->view_lut[0], h->lut, sizeof(h->lut));
+	memcpy(h->view_lut[1], h->lut, sizeof(h->lut));
 	for (int v = 0; v < 2; v++) {
 		build_unwarp(h, v, &cams[v], fov, n);
 		h->decoded[v] = U_TYPED_ARRAY_CALLOC(uint8_t, (size_t)CAM_W * CAM_H);
@@ -278,7 +295,7 @@ log_brightness(struct psvr2_hand_tracking *h, int64_t ts)
 	for (int i = 0; i < 256; i++) {
 		total += h->bright_hist[i];
 		sum += (uint64_t)i * h->bright_hist[i];
-		sum_out += (uint64_t)h->lut[i] * h->bright_hist[i];
+		sum_out += (uint64_t)h->view_lut[0][i] * h->bright_hist[i];
 	}
 	int pct[3] = {0, 0, 0};
 	const double want[3] = {0.5, 0.95, 0.99};
@@ -295,11 +312,65 @@ log_brightness(struct psvr2_hand_tracking *h, int64_t ts)
 		        "Camera brightness (5 s, %llu frames): mean %.1f, median %d, 95%% %d, 99%% %d of 255; after the "
 		        "brightening mean %.1f, 95%% %d, 99%% %d",
 		        (unsigned long long)h->bright_frames, (double)sum / (double)total, pct[0], pct[1], pct[2],
-		        (double)sum_out / (double)total, h->lut[pct[1]], h->lut[pct[2]]);
+		        (double)sum_out / (double)total, h->view_lut[0][pct[1]], h->view_lut[0][pct[2]]);
 	}
 	memset(h->bright_hist, 0, sizeof(h->bright_hist));
 	h->bright_frames = 0;
 	h->bright_since_ns = ts;
+}
+
+/*!
+ * The next frame's curve for view @p v from this frame's tones: the LEVELS_LO..LEVELS_HI percentile range (smoothed,
+ * at least 24 levels wide) stretched to 0..255, then the brightening (gamma).
+ */
+static void
+update_levels(struct psvr2_hand_tracking *h, int v)
+{
+	uint32_t *hist = h->view_hist[v];
+	uint64_t total = 0;
+	for (int i = 0; i < 256; i++) {
+		total += hist[i];
+	}
+	if (total < 1000 || !debug_get_bool_option_psvr2_ht_levels()) {
+		memset(hist, 0, sizeof(h->view_hist[v]));
+		return;
+	}
+	const double want_lo = debug_get_float_option_psvr2_ht_levels_lo() * (double)total;
+	const double want_hi = debug_get_float_option_psvr2_ht_levels_hi() * (double)total;
+	int lo = 0, hi = 255;
+	uint64_t run = 0;
+	bool have_lo = false;
+	for (int i = 0; i < 256; i++) {
+		run += hist[i];
+		if (!have_lo && (double)run >= want_lo) {
+			lo = i;
+			have_lo = true;
+		}
+		if ((double)run >= want_hi) {
+			hi = i;
+			break;
+		}
+	}
+	memset(hist, 0, sizeof(h->view_hist[v]));
+	// ~0.3 s smoothing at 60 frames a second, so the picture doesn't pump when a hand or the monitor moves in view.
+	const float a = 0.05f;
+	if (!h->levels_init[v]) {
+		h->level_lo[v] = (float)lo;
+		h->level_hi[v] = (float)hi;
+		h->levels_init[v] = true;
+	} else {
+		h->level_lo[v] += a * ((float)lo - h->level_lo[v]);
+		h->level_hi[v] += a * ((float)hi - h->level_hi[v]);
+	}
+	float l = h->level_lo[v], top = h->level_hi[v];
+	if (top - l < 24.0f) {
+		top = l + 24.0f;
+	}
+	for (int i = 0; i < 256; i++) {
+		float t = ((float)i - l) / (top - l);
+		t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+		h->view_lut[v][i] = (uint8_t)lroundf(255.0f * powf(t, h->gamma));
+	}
 }
 
 static void
@@ -321,6 +392,8 @@ decode_and_push(struct psvr2_hand_tracking *h, const uint8_t *transfer, int64_t 
 		u_frame_create_one_off(XRT_FORMAT_L8, n, n, &out[v]);
 		out[v]->timestamp = ts;
 		const float *mx = h->map_x[v], *my = h->map_y[v];
+		const uint8_t *lut = h->view_lut[v];
+		uint32_t *vh = h->view_hist[v];
 		for (int y = 0; y < n; y++) {
 			uint8_t *row = out[v]->data + (size_t)y * out[v]->stride;
 			for (int x = 0; x < n; x++) {
@@ -334,12 +407,16 @@ decode_and_push(struct psvr2_hand_tracking *h, const uint8_t *transfer, int64_t 
 					float bot = p[CAM_W] + (p[CAM_W + 1] - p[CAM_W]) * fx;
 					val = (uint8_t)(top + (bot - top) * fy + 0.5f);
 				}
-				row[x] = h->lut[val];
-				if (v == 0 && ((x | y) & 3) == 0 && mx[i] >= 0) {
-					h->bright_hist[val]++;
+				row[x] = lut[val];
+				if (((x | y) & 3) == 0 && mx[i] >= 0) {
+					vh[val]++;
+					if (v == 0) {
+						h->bright_hist[val]++;
+					}
 				}
 			}
 		}
+		update_levels(h, v);
 	}
 	log_brightness(h, ts);
 	const char *dump = debug_get_option_psvr2_ht_dump();
