@@ -294,6 +294,14 @@
     {
       "app_key": "openvr.component.vrcompositor",
       "binding_url": "vrcompositor_binding_playstation_vr2_sense_controller.json"
+    },
+    {
+      "app_key": "system.generated.wayvr",
+      "binding_url": "wayvr_binding_playstation_vr2_sense_controller.json"
+    },
+    {
+      "app_key": "wlx-team.wayvr",
+      "binding_url": "wayvr_binding_playstation_vr2_sense_controller.json"
     }
   ]
 }
