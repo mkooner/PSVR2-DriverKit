@@ -183,6 +183,10 @@ struct Config {
     /// --hand-tracking), and install its packages with Install dependencies.
     #[serde(default)]
     compile_hand_tracking: bool,
+    /// Compile Driver tab: which version Compile Driver builds: empty for nightly (the latest on the main branch,
+    /// the default), or a release tag such as v0.2 (build-driver.sh --ref).
+    #[serde(default)]
+    compile_ref: String,
     /// Settings format: 2 = async reprojection off by default (SteamVR's own choice); 3 = SteamVR render scale 170;
 /// 4 = smooth SLAM corrections on.
     #[serde(default)]
@@ -205,6 +209,7 @@ impl Default for Config {
             steamvr_dir: String::new(),
             install_dir: default_install_dir(),
             compile_hand_tracking: false,
+            compile_ref: String::new(),
             version: CONFIG_VERSION,
         }
     }
@@ -712,6 +717,8 @@ struct Launcher {
     check: Arc<Mutex<CheckState>>,
     /// The Compile tab's Install dependencies (install-deps.sh through pkexec).
     deps: Arc<Mutex<DepsState>>,
+    /// The Compile tab's Version list: the releases on GitHub.
+    releases: Arc<Mutex<ReleasesState>>,
     /// SteamVR's high-priority GPU queue state (getcap), checked at most every 5 s.
     high_priority: Option<(Instant, Option<bool>)>,
     /// --screenshot <file.png> [launcher|settings|compile]: render one tab, save it, quit (for checking the design).
@@ -761,6 +768,7 @@ impl Launcher {
             build: Arc::new(Mutex::new(BuildState::default())),
             check: Arc::new(Mutex::new(CheckState::default())),
             deps: Arc::new(Mutex::new(DepsState::default())),
+            releases: Arc::new(Mutex::new(ReleasesState::default())),
             high_priority: None,
             screenshot: None,
             reg_cache: None,
@@ -1147,7 +1155,57 @@ fn short_date(iso: &str) -> String {
         .unwrap_or_else(|| iso.to_string())
 }
 
+/// The Compile tab's Version list (list_releases, on a thread when the tab is first shown or on Refresh).
+#[derive(Default)]
+struct ReleasesState {
+    running: bool,
+    fetched: bool,
+    /// Release tags, newest first.
+    tags: Vec<String>,
+    error: Option<String>,
+}
+
+/// The release tags on GitHub (v0.1, v0.2, ...), newest first: git ls-remote, no login or API limit needed.
+fn list_releases() -> Result<Vec<String>, String> {
+    let o = Command::new("git")
+        .args(["ls-remote", "--tags", "--refs", &format!("https://{REPO_WEB}.git"), "refs/tags/v*"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("couldn't run git: {e}"))?;
+    if !o.status.success() {
+        return Err("couldn't reach GitHub for the release list".into());
+    }
+    let mut tags: Vec<String> = String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1)?.strip_prefix("refs/tags/").map(str::to_string))
+        .filter(|t| t.starts_with('v'))
+        .collect();
+    tags.sort_by(|a, b| version_key(b).cmp(&version_key(a)));
+    Ok(tags)
+}
+
+/// v0.2 -> [0, 2], v1.0-rc1 -> [1, 0, 1]: the numbers in a tag, for sorting and comparing releases.
+fn version_key(tag: &str) -> Vec<u64> {
+    tag.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect()
+}
+
+/// Whether a version can be compiled with hand tracking: nightly and releases from v0.2 on (v0.1 had none).
+fn ref_has_hand_tracking(r: &str) -> bool {
+    r.is_empty() || version_key(r) >= vec![0, 2]
+}
+
 fn check_build(dest: &Path) -> CheckResult {
+    // A release built on purpose (Version list): say so instead of offering nightly as an update.
+    let env = driver_env();
+    let built_ref = env.iter().find(|(k, _)| k == "SOURCE_REF").map(|(_, v)| v.clone()).unwrap_or_default();
+    if built_ref.starts_with('v') {
+        if let Some((ic, id)) = installed_build(dest) {
+            return CheckResult::UpToDate(format!(
+                "Release {built_ref} installed (build {}, {}). For the latest, choose Nightly and press Compile Driver.",
+                &ic[..7.min(ic.len())], short_date(&id)));
+        }
+    }
     let installed = installed_build(dest);
     let latest = latest_on_github();
     match (installed, latest) {
@@ -1775,7 +1833,9 @@ impl Launcher {
         let _ = save_config(&self.cfg);
         *self.build.lock().unwrap() = BuildState { running: true, ..Default::default() };
         let state = self.build.clone();
-        let hand_tracking = self.cfg.compile_hand_tracking;
+        let compile_ref = self.cfg.compile_ref.trim().to_string();
+        // v0.1 has no hand tracking: the checkbox is greyed out for it, and the flag isn't passed.
+        let hand_tracking = self.cfg.compile_hand_tracking && ref_has_hand_tracking(&compile_ref);
         let log = Path::new(&dest).join("compile-output.log");
         self.message = format!("Compiling into {dest} (log {})", log.display());
         thread::spawn(move || {
@@ -1784,6 +1844,9 @@ impl Launcher {
             cmd.arg(&script).args(["--dest", &dest]);
             if hand_tracking {
                 cmd.arg("--hand-tracking");
+            }
+            if !compile_ref.is_empty() {
+                cmd.args(["--ref", &compile_ref]);
             }
             let child = cmd
                 .stdin(Stdio::null())
@@ -1931,7 +1994,7 @@ impl Launcher {
             (b.running, b.fraction(), b.done, b.total, b.step, b.result.clone(), tail)
         };
         theme::section(ui, "Compile the driver", |ui| {
-            theme::note(ui, "Downloads the latest PSVR2-DriverKit from GitHub and builds everything into one folder: the SteamVR driver, Monado's OpenXR service, the launch scripts and tools, and a new PSVR2-DriverKit app. This app then uses that folder.");
+            theme::note(ui, "Downloads PSVR2-DriverKit from GitHub (the latest, or a release you pick under Version) and builds everything into one folder: the SteamVR driver, Monado's OpenXR service, the launch scripts and tools, and a new PSVR2-DriverKit app. This app then uses that folder.");
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label("Install location");
@@ -1946,10 +2009,71 @@ impl Launcher {
                     self.cfg.install_dir = default_install_dir();
                 }
             });
-            theme::note(ui, &format!("Source: {REPO_WEB} (main branch)"));
+            // Version: nightly (the latest on main, the default) or a release to roll back to.
+            {
+                let mut rel = self.releases.lock().unwrap();
+                if !rel.fetched && !rel.running {
+                    rel.running = true;
+                    let state = self.releases.clone();
+                    thread::spawn(move || {
+                        let r = list_releases();
+                        let mut st = state.lock().unwrap();
+                        st.running = false;
+                        st.fetched = true;
+                        match r {
+                            Ok(t) => {
+                                st.tags = t;
+                                st.error = None;
+                            }
+                            Err(e) => st.error = Some(e),
+                        }
+                    });
+                }
+            }
+            let (tags, rel_running, rel_error) = {
+                let rel = self.releases.lock().unwrap();
+                (rel.tags.clone(), rel.running, rel.error.clone())
+            };
+            ui.horizontal(|ui| {
+                ui.label("Version:");
+                let shown = if self.cfg.compile_ref.is_empty() { "Nightly (latest on GitHub)".to_string() } else { format!("Release {}", self.cfg.compile_ref) };
+                ui.add_enabled_ui(!running, |ui| {
+                    egui::ComboBox::from_id_salt("compile_ref").selected_text(shown).width(230.0).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.cfg.compile_ref, String::new(), "Nightly (latest on GitHub)");
+                        // The saved choice stays selectable even when the list couldn't be fetched (offline).
+                        let mut all = tags.clone();
+                        if !self.cfg.compile_ref.is_empty() && !all.contains(&self.cfg.compile_ref) {
+                            all.push(self.cfg.compile_ref.clone());
+                        }
+                        for t in all {
+                            let label = format!("Release {t}");
+                            ui.selectable_value(&mut self.cfg.compile_ref, t, label);
+                        }
+                    });
+                });
+                if ui.add_enabled(!running && !rel_running, egui::Button::new("Refresh")).on_hover_text("Fetch the list of releases from GitHub again.").clicked() {
+                    self.releases.lock().unwrap().fetched = false;
+                }
+                if rel_running {
+                    ui.spinner();
+                }
+            });
+            if let Some(e) = rel_error {
+                theme::note(ui, &format!("Release list: {e}. Nightly still works."));
+            }
+            if self.cfg.compile_ref.is_empty() {
+                theme::note(ui, &format!("Source: {REPO_WEB}, the latest on the main branch (nightly)."));
+            } else {
+                theme::note(ui, &format!("Builds release {}: its driver, scripts and its own DriverKit, which replaces this one. Older releases don't get fixes. To come back to the latest, press Compile Driver in that DriverKit (it builds nightly), then restart it.", self.cfg.compile_ref));
+            }
             ui.add_space(6.0);
             let deps_running = self.deps.lock().unwrap().running;
-            ui.add_enabled(!running && !deps_running, egui::Checkbox::new(&mut self.cfg.compile_hand_tracking, "Compile hand tracking (experimental)"))
+            let ht_ok = ref_has_hand_tracking(&self.cfg.compile_ref);
+            // A release without hand tracking shows the box unticked (it won't be built), keeping the saved choice for nightly.
+            let mut ht_none = false;
+            let ht_value = if ht_ok { &mut self.cfg.compile_hand_tracking } else { &mut ht_none };
+            ui.add_enabled(!running && !deps_running && ht_ok, egui::Checkbox::new(ht_value, "Compile hand tracking (experimental)"))
+                .on_disabled_hover_text(if ht_ok { "Busy..." } else { "This release has no hand tracking: it came with v0.2." })
                 .on_hover_text("Builds Monado's Mercury hand tracking into the driver: needs OpenCV and onnxruntime (Install dependencies adds them; Debian 13, Ubuntu 25.04, Fedora 43 or newer, or any Arch based system), downloads its two models, and the driver gets several hundred MB bigger. Turn it on afterwards in Settings: Hand tracking.");
             ui.horizontal(|ui| {
                 if ui

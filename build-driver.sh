@@ -5,8 +5,11 @@
 # Compile the PS VR2 driver and install everything PSVR2-DriverKit needs into one folder, from our GitHub repository
 # (https://github.com/mkooner/PSVR2-DriverKit, cloned or updated into <dest>/source; the source isn't selectable):
 #
-#   ./build-driver.sh [--dest <install folder>] [--hand-tracking]
+#   ./build-driver.sh [--dest <install folder>] [--hand-tracking] [--ref <release>]
 #
+#   --ref <release>  build a release (a tag such as v0.2) instead of the latest on the main branch ("nightly", the
+#                    default; --ref nightly is the same). The release's own scripts and DriverKit are installed with
+#                    it; DriverKit's Compile Driver in that older version builds the latest again.
 #   --hand-tracking  build with Monado's Mercury hand tracking (experimental): needs OpenCV and onnxruntime
 #                    (install-deps.sh --hand-tracking), and downloads its two models into
 #                    ~/.local/share/monado/hand-tracking-models
@@ -29,6 +32,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/mkooner/PSVR2-DriverKit.git"
 REPO_BRANCH="main"
+REPO_REF="" # a release tag, or empty for nightly (the main branch)
 DEST="${HOME}/.local/share/PSVR2-DriverKit"
 HAND_TRACKING=0
 ORIG_ARGS=("$@")
@@ -36,10 +40,17 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--dest) DEST="$2"; shift 2 ;;
 	--hand-tracking) HAND_TRACKING=1; shift ;;
-	-h | --help) sed -n '4,27p' "$0"; exit 0 ;;
+	--ref) REPO_REF="$2"; shift 2 ;;
+	-h | --help) sed -n '4,30p' "$0"; exit 0 ;;
 	*) echo "unknown option $1"; exit 2 ;;
 	esac
 done
+[ "$REPO_REF" = nightly ] && REPO_REF=""
+# Release tags only (v0.2, v1.0-rc1): nothing that git could read as an option or a path.
+if [ -n "$REPO_REF" ] && ! [[ "$REPO_REF" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]; then
+	echo "ERROR: --ref takes a release tag such as v0.2 (or nightly), not '$REPO_REF'"
+	exit 2
+fi
 mkdir -p "$DEST"
 DEST="$(cd "$DEST" && pwd)"
 REPO="$DEST/source"
@@ -50,7 +61,11 @@ KIT="$DEST/kit"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/PSVR2-DriverKit"
 
 echo "== PSVR2-DriverKit driver build"
-echo "  source:  $REPO_URL ($REPO_BRANCH)"
+if [ -n "$REPO_REF" ]; then
+	echo "  source:  $REPO_URL (release $REPO_REF)"
+else
+	echo "  source:  $REPO_URL (nightly: the latest on $REPO_BRANCH)"
+fi
 echo "  install: $DEST"
 echo "  hand tracking: $([ "$HAND_TRACKING" = 1 ] && echo "yes (experimental)" || echo no)"
 
@@ -69,8 +84,16 @@ if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
 	GIT_AUTH=(-c credential.helper= -c "credential.helper=!gh auth git-credential")
 fi
 NO_LOGIN="couldn't reach GitHub: check your internet connection"
+# What to fetch: the main branch, or the release's tag (the same shallow fetch and hard reset either way, so switching
+# between nightly and a release in the same install folder just moves the source to it).
+FETCH_REF="$REPO_BRANCH"
+[ -n "$REPO_REF" ] && FETCH_REF="refs/tags/$REPO_REF"
+if [ -n "$REPO_REF" ] && ! git "${GIT_AUTH[@]}" ls-remote --exit-code --tags "$REPO_URL" "$FETCH_REF" >/dev/null 2>&1; then
+	echo "ERROR: no release $REPO_REF on GitHub (or $NO_LOGIN)"
+	exit 1
+fi
 if [ -d "$REPO/.git" ]; then
-	if ! git "${GIT_AUTH[@]}" -C "$REPO" fetch --depth 1 origin "$REPO_BRANCH" >"$DEST/download.log" 2>&1 ||
+	if ! git "${GIT_AUTH[@]}" -C "$REPO" fetch --depth 1 origin "$FETCH_REF" >"$DEST/download.log" 2>&1 ||
 		! git -C "$REPO" reset --hard FETCH_HEAD >>"$DEST/download.log" 2>&1; then
 		tail -3 "$DEST/download.log"
 		echo "ERROR: couldn't update $REPO from GitHub: $NO_LOGIN"
@@ -82,7 +105,7 @@ else
 		exit 1
 	fi
 	rmdir "$REPO" 2>/dev/null || true
-	if ! git "${GIT_AUTH[@]}" clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$REPO" >"$DEST/download.log" 2>&1; then
+	if ! git "${GIT_AUTH[@]}" clone --depth 1 --branch "${REPO_REF:-$REPO_BRANCH}" "$REPO_URL" "$REPO" >"$DEST/download.log" 2>&1; then
 		tail -3 "$DEST/download.log"
 		echo "ERROR: couldn't download $REPO_URL: $NO_LOGIN"
 		exit 1
@@ -93,10 +116,20 @@ echo "  $(git -C "$REPO" log -1 --format='commit %h, %cd: %s' --date=format:'%Y-
 
 # DriverKit runs the copy of this script built into it, which can be older than the one just downloaded (a DriverKit
 # built before a build fix kept failing with the fix already downloaded): hand over to the downloaded copy when it
-# differs, so build fixes reach older DriverKits. Once only: PSVR2_DK_HANDED_OVER stops a loop.
-if [ -z "${PSVR2_DK_HANDED_OVER:-}" ] && [ -f "$REPO/build-driver.sh" ] && ! cmp -s "$0" "$REPO/build-driver.sh"; then
+# differs, so build fixes reach older DriverKits. Once only: PSVR2_DK_HANDED_OVER stops a loop. Not for a release:
+# its own script is older than this one and doesn't know --ref (v0.1's not even --hand-tracking), so this one builds it.
+if [ -z "$REPO_REF" ] && [ -z "${PSVR2_DK_HANDED_OVER:-}" ] && [ -f "$REPO/build-driver.sh" ] &&
+	! cmp -s "$0" "$REPO/build-driver.sh"; then
 	echo "  this DriverKit's build script is older than the downloaded one: using the downloaded one"
-	PSVR2_DK_HANDED_OVER=1 exec bash "$REPO/build-driver.sh" "${ORIG_ARGS[@]}" --dest "$DEST"
+	# Without --ref (this is nightly anyway): a downloaded script older than --ref would stop at the unknown option.
+	HANDOVER_ARGS=()
+	skip=0
+	for a in "${ORIG_ARGS[@]}"; do
+		if [ "$skip" = 1 ]; then skip=0; continue; fi
+		if [ "$a" = --ref ]; then skip=1; continue; fi
+		HANDOVER_ARGS+=("$a")
+	done
+	PSVR2_DK_HANDED_OVER=1 exec bash "$REPO/build-driver.sh" "${HANDOVER_ARGS[@]}" --dest "$DEST"
 fi
 
 echo "STEP 2/5 configure"
@@ -241,6 +274,7 @@ PSVR2_KIT="$KIT"
 MONADO_SOURCE="$SRC"
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
 SOURCE_DATE="$(git -C "$REPO" log -1 --format=%cI)"
+SOURCE_REF="${REPO_REF:-nightly}"
 HAND_TRACKING_BUILT="$HAND_TRACKING"
 EOF
 echo "  $CONF_DIR/driver.env"
