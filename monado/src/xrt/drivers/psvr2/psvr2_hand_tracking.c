@@ -36,13 +36,6 @@
 #include <string.h>
 
 DEBUG_GET_ONCE_LOG_OPTION(psvr2_ht_log, "PSVR2_HT_LOG", U_LOGGING_INFO)
-/*!
- * Field of view of the unwarped pinhole views (deg). 120: on the 2026-11-20 recording (hands over a desk, Sony's
- * shorter LED exposure) the left hand was found 17% of the time and the right 49%, against 3% and 30% at 80 (best of
- * 60-120 on the 2026-11-16 recordings) and 5% / 49% at 100: hands take less of the picture, which Mercury's
- * detector copes with better here.
- */
-DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_fov, "PSVR2_HT_FOV", 120.0f)
 /*
  * Experiment (off by default): give Mercury the cameras' own fisheye images with their lens calibration instead of
  * the unwarped pinhole views, as Monado's Valve Index setup (target_builder_lighthouse.c) and psvr2ht do: Mercury then
@@ -52,38 +45,168 @@ DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_fov, "PSVR2_HT_FOV", 120.0f)
  */
 DEBUG_GET_ONCE_BOOL_OPTION(psvr2_ht_raw, "PSVR2_HT_RAW", false)
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_raw_radius, "PSVR2_HT_RAW_RADIUS", 0.55f)
-//! Brightening, out = 255 * (in/255)^gamma. 0.5 was best of 0.35-1 on the recordings (frames average ~25/255).
-DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_gamma, "PSVR2_HT_GAMMA", 0.5f)
-/*!
- * Auto levels per camera before the brightening: each view's tones between its LEVELS_LO and LEVELS_HI percentiles
- * (smoothed over ~0.3 s) are stretched to the full range, so a bright monitor or lamp in view no longer squeezes the
- * hands into a narrow band of grey. A dark room lit by a monitor (2026-11-23 recording, the user's second headset):
- * hands were faint grey on grey, the left camera's darker than the right's. PSVR2_HT_LEVELS=0: the fixed curve only.
+/*
+ *
+ * Profiles: every setting that was tuned for the model that builds the 3D hand, per model, so each can be calibrated
+ * on its own (2026-11-25). Until then both hold the values tuned before MediaPipe (all on Mercury's model, 2026-11-20
+ * to 11-24), as both modes used them. PSVR2_HT_PROFILE=mediapipe|mercury picks one (development); without
+ * MediaPipe's model installed it's always Mercury. Each setting's environment variable (PSVR2_HT_*, MERCURY_*)
+ * still overrides the profile's value, for development.
+ *
  */
-DEBUG_GET_ONCE_BOOL_OPTION(psvr2_ht_levels, "PSVR2_HT_LEVELS", true)
-/*!
- * Hold a hand's last pose this long (ms) when Mercury loses it, so brief dropouts don't flash the hand away. A
- * smoothing step, not better detection: on the 2026-11-23 recordings the right hand's losses were mostly 0.1-0.25 s
- * gaps (10 in 32 s); a 0.3 s hold took it 82% -> 89% and the left 63% -> 71% (its losses are mostly longer than 1 s,
- * which the hold doesn't hide). 0: off.
- */
-DEBUG_GET_ONCE_NUM_OPTION(psvr2_ht_hold_ms, "PSVR2_HT_HOLD_MS", 300)
-/*!
- * Smoothing of the tracked hands (One Euro filter, Casiez et al. 2012): Mercury's joints come out a little different
- * every frame. Measured on the 2026-11-23 recordings (driver_ht_replay + psvr2-test/hands analysis): on still hands
- * the palm's orientation wobbled 1-2 deg RMS and the index fingertip 2.2-3.0 mm (median), 6-10 mm (p95), 90 times a
- * second: the shaky hands. The filter smooths strongly when the hand is slow and less when it moves fast. Simulated on
- * the same data with these defaults: fingertip wobble 0.8-1.2 mm (median), 2.6-3.4 mm (p95), ~18 ms behind while
- * moving. It runs on the palm's pose in the room (head turns are not hand motion) and on every joint relative to the
- * palm. PSVR2_HT_FILTER=0: off. MIN_CUTOFF: Hz when still; BETA: how fast the cutoff rises with speed (per m/s for
- * positions, per rad/s for rotations); the fingers use twice MIN_CUTOFF.
- */
-DEBUG_GET_ONCE_BOOL_OPTION(psvr2_ht_filter, "PSVR2_HT_FILTER", true)
-DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_filter_min_cutoff, "PSVR2_HT_FILTER_MIN_CUTOFF", 1.5f)
-DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_filter_beta_pos, "PSVR2_HT_FILTER_BETA_POS", 2.0f)
-DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_filter_beta_rot, "PSVR2_HT_FILTER_BETA_ROT", 1.0f)
-DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_levels_lo, "PSVR2_HT_LEVELS_LO", 0.01f)
-DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_levels_hi, "PSVR2_HT_LEVELS_HI", 0.95f)
+
+struct ht_profile
+{
+	const char *name;
+	//! Whether MediaPipe's landmarks build the 3D hand (MERCURY_MEDIAPIPE_FIT); else Mercury's own keypoint model.
+	bool mediapipe_fit;
+
+	// The images both models get.
+	/*!
+	 * Field of view of the unwarped pinhole views (deg, PSVR2_HT_FOV). 120: on the 2026-11-20 recording (hands over a
+	 * desk, Sony's shorter LED exposure) the left hand was found 17% of the time and the right 49%, against 3% and 30%
+	 * at 80 (best of 60-120 on the 2026-11-16 recordings) and 5% / 49% at 100: hands take less of the picture, which
+	 * Mercury's detector copes with better here.
+	 */
+	float fov;
+	//! Brightening, out = 255 * (in/255)^gamma (PSVR2_HT_GAMMA). 0.5 was best of 0.35-1 (frames average ~25/255).
+	float gamma;
+	/*!
+	 * Auto levels per camera before the brightening (PSVR2_HT_LEVELS, _LO, _HI): each view's tones between the LO and
+	 * HI percentiles (smoothed over ~0.3 s) are stretched to the full range, so a bright monitor or lamp in view no
+	 * longer squeezes the hands into a narrow band of grey. A dark room lit by a monitor (2026-11-23 recording, the
+	 * user's second headset): hands were faint grey on grey, the left camera's darker than the right's.
+	 */
+	bool levels;
+	float levels_lo, levels_hi;
+
+	// Mercury's detector and keypoint model (MERCURY_*; the detector finds new hands in both modes).
+	/*!
+	 * MERCURY_DETECTION_ANY_VIEW: start hands from one confident camera. With the mean of both views (Mercury's
+	 * default), the left camera's near-zero scores cancelled the right camera's 0.99 detections and the right hand was
+	 * found in 2-10% of its frames on the recordings, 81% with this.
+	 */
+	const char *detection_any_view;
+	/*!
+	 * MERCURY_DETECTION_MIRROR_LEFT: Mercury's detector finds right hands far more readily, so also detect on the
+	 * mirrored image (its right hand is our left). On the recordings: left hand found 62% -> 73% of the hands-in-view
+	 * time (live run) and 0% -> 9% (earlier run), right hand 85% -> 97%; no detections away from hands. Costs one more
+	 * detector run per view (Mercury ~4.9 -> 6.7 ms per frame).
+	 */
+	const char *detection_mirror_left;
+	/*!
+	 * MERCURY_ACQUIRE_CONFIDENCE, 0.55 since 2026-11-23 (with the auto levels): small hands far out in front, side by
+	 * side near a bright monitor were seen but scored below 0.7, so the left hand was rarely picked up. Replays: left
+	 * 57% -> 85% and 19% -> 78% on the two new recordings, right unchanged (70-87%); no false hands in any empty
+	 * stretch. 0.4 started a phantom left hand (6%) on the old desk recording.
+	 */
+	const char *acquire_confidence;
+	/*!
+	 * MERCURY_KEYPOINT_HAND_CONFIDENCE: keep a view only while Mercury's keypoint model is 98% sure it's a hand
+	 * (Mercury: 97%). A right hand raised quickly out of the top of the view left its joints on dark furniture for half
+	 * a second at 0.93-0.98 (real hands: median 0.9992, 95% above 0.986); 0.98 dropped it at once. (2026-11-20, scored
+	 * against hand-labelled frames: 0.92 tracked exactly the same.)
+	 */
+	const char *keypoint_hand_confidence;
+	/*!
+	 * MERCURY_DETECTION_TILES, _PER_FRAME: while a hand isn't found, the detector also looks at a 3x3 grid of
+	 * overlapping crops, all nine every frame, in parallel. On the 2026-11-20 recording (driver_ht_replay): off left
+	 * 22% right 63%, one tile a frame 52% / 65%, all nine in parallel 77% / 68%, no false hands; 3.7 ms per searching
+	 * frame, CPU 0.55 -> 1.0 cores.
+	 */
+	const char *detection_tiles, *detection_tiles_per_frame;
+
+	// MediaPipe's crops (MERCURY_MEDIAPIPE_*), used whenever MediaPipe runs: for the 3D hand and for the gestures.
+	const char *mediapipe_box, *mediapipe_presence, *mediapipe_xy_conf, *mediapipe_depth_conf;
+
+	// After the 3D hand.
+	/*!
+	 * Hold a hand's last pose this long (ms, PSVR2_HT_HOLD_MS) when it's lost, so brief dropouts don't flash the hand
+	 * away. On the 2026-11-23 recordings the right hand's losses were mostly 0.1-0.25 s gaps (10 in 32 s); a 0.3 s
+	 * hold took it 82% -> 89% and the left 63% -> 71%. 0: off.
+	 */
+	int hold_ms;
+	/*!
+	 * Smoothing (One Euro filter, Casiez et al. 2012; PSVR2_HT_FILTER, _MIN_CUTOFF, _BETA_POS, _BETA_ROT). Measured
+	 * on the 2026-11-23 recordings (Mercury's model): on still hands the palm's orientation wobbled 1-2 deg RMS and the
+	 * index fingertip 2.2-3.0 mm (median), 6-10 mm (p95). Simulated with these values: fingertip 0.8-1.2 mm (median),
+	 * 2.6-3.4 mm (p95), ~18 ms behind while moving. It runs on the palm's pose in the room and on every joint relative
+	 * to the palm. MIN_CUTOFF: Hz when still; BETA: how fast the cutoff rises with speed (per m/s for positions, per
+	 * rad/s for rotations); the fingers use twice MIN_CUTOFF.
+	 */
+	bool filter;
+	float filter_min_cutoff, filter_beta_pos, filter_beta_rot;
+};
+
+//! Mercury's own keypoint model builds the 3D hand (MediaPipe, when installed, only for the gestures).
+static const struct ht_profile k_profile_mercury = {
+    .name = "mercury",
+    .mediapipe_fit = false,
+    .fov = 120.0f,
+    .gamma = 0.5f,
+    .levels = true,
+    .levels_lo = 0.01f,
+    .levels_hi = 0.95f,
+    .detection_any_view = "1",
+    .detection_mirror_left = "1",
+    .acquire_confidence = "0.55",
+    .keypoint_hand_confidence = "0.98",
+    .detection_tiles = "3",
+    .detection_tiles_per_frame = "9",
+    .mediapipe_box = "2.0",
+    .mediapipe_presence = "0.5",
+    .mediapipe_xy_conf = "1.0",
+    .mediapipe_depth_conf = "0.0",
+    .hold_ms = 300,
+    .filter = true,
+    .filter_min_cutoff = 1.5f,
+    .filter_beta_pos = 2.0f,
+    .filter_beta_rot = 1.0f,
+};
+
+//! MediaPipe's landmarks build the 3D hand (Mercury's model only for hands just found or that MediaPipe doubts).
+static const struct ht_profile k_profile_mediapipe = {
+    .name = "mediapipe",
+    .mediapipe_fit = true,
+    .fov = 120.0f,
+    .gamma = 0.5f,
+    .levels = true,
+    .levels_lo = 0.01f,
+    .levels_hi = 0.95f,
+    .detection_any_view = "1",
+    .detection_mirror_left = "1",
+    .acquire_confidence = "0.55",
+    .keypoint_hand_confidence = "0.98",
+    .detection_tiles = "3",
+    .detection_tiles_per_frame = "9",
+    .mediapipe_box = "2.0",
+    .mediapipe_presence = "0.5",
+    .mediapipe_xy_conf = "1.0",
+    .mediapipe_depth_conf = "0.0",
+    .hold_ms = 300,
+    .filter = true,
+    .filter_min_cutoff = 1.5f,
+    .filter_beta_pos = 2.0f,
+    .filter_beta_rot = 1.0f,
+};
+
+static float
+env_float(const char *name, float profile_value)
+{
+	const char *v = getenv(name);
+	return v != NULL && v[0] != '\0' ? (float)atof(v) : profile_value;
+}
+
+static bool
+env_bool(const char *name, bool profile_value)
+{
+	const char *v = getenv(name);
+	if (v == NULL || v[0] == '\0') {
+		return profile_value;
+	}
+	return v[0] == '1' || v[0] == 'y' || v[0] == 'Y' || v[0] == 't' || v[0] == 'T' || v[0] == 'o' || v[0] == 'O';
+}
+
 //! Unwarped image size (square).
 DEBUG_GET_ONCE_NUM_OPTION(psvr2_ht_size, "PSVR2_HT_SIZE", 640)
 //! Offline diagnosis: a folder to save every 30th pair of images Mercury gets (raw and unwarped, PGM). Off when unset.
@@ -222,6 +345,8 @@ struct psvr2_hand_tracking
 	struct t_hand_tracking_async *async; // NULL until Mercury is running
 	int out_size;
 	float *map_x[2], *map_y[2]; // per unwarped pixel, the source position, -1 outside
+	//! The active profile with any environment overrides applied (set by select_profile before Mercury starts).
+	struct ht_profile prof;
 	uint8_t lut[256];           // the fixed brightening curve (also the first frame's, before auto levels)
 	uint8_t view_lut[2][256];   // each view's curve: auto levels then the brightening
 	uint32_t view_hist[2][256]; // each view's tones in the current frame (every 4th pixel), for the next frame's levels
@@ -302,12 +427,82 @@ build_unwarp(struct psvr2_hand_tracking *h, int view, const struct t_camera_cali
 	}
 }
 
+/*!
+ * Picks the profile for the model that builds the 3D hand, applies environment overrides, and hands Mercury its
+ * settings (setenv without overwriting: an explicit MERCURY_* setting wins). MediaPipe runs (its gestures, and its
+ * landmarks in the MediaPipe profile) when hand_landmarks_detector.onnx is installed next to Mercury's models and
+ * MERCURY_MEDIAPIPE isn't 0: on the 2026-11-24 headset sessions pinch went from almost never registering to 3-4 of 6
+ * prompts per hand, fist to 2 of 2. Default profile: Mercury's model for the 3D hand with MediaPipe's gestures (the
+ * user's pick, 2026-11-25).
+ */
+static void
+select_profile(struct psvr2_hand_tracking *h, const char *models)
+{
+	char mp[1100];
+	snprintf(mp, sizeof(mp), "%s/hand_landmarks_detector.onnx", models);
+	FILE *probe = fopen(mp, "rb");
+	const bool have_mp = probe != NULL;
+	if (probe != NULL) {
+		fclose(probe);
+	}
+	const char *want_mp = getenv("MERCURY_MEDIAPIPE");
+	const bool mediapipe = have_mp && (want_mp == NULL || atoi(want_mp) != 0);
+	const char *pick = getenv("PSVR2_HT_PROFILE");
+	const bool mp_profile = mediapipe && pick != NULL && strcmp(pick, "mediapipe") == 0;
+	struct ht_profile p = mp_profile ? k_profile_mediapipe : k_profile_mercury;
+
+	p.fov = env_float("PSVR2_HT_FOV", p.fov);
+	p.gamma = env_float("PSVR2_HT_GAMMA", p.gamma);
+	p.levels = env_bool("PSVR2_HT_LEVELS", p.levels);
+	p.levels_lo = env_float("PSVR2_HT_LEVELS_LO", p.levels_lo);
+	p.levels_hi = env_float("PSVR2_HT_LEVELS_HI", p.levels_hi);
+	p.hold_ms = (int)env_float("PSVR2_HT_HOLD_MS", (float)p.hold_ms);
+	p.filter = env_bool("PSVR2_HT_FILTER", p.filter);
+	p.filter_min_cutoff = env_float("PSVR2_HT_FILTER_MIN_CUTOFF", p.filter_min_cutoff);
+	p.filter_beta_pos = env_float("PSVR2_HT_FILTER_BETA_POS", p.filter_beta_pos);
+	p.filter_beta_rot = env_float("PSVR2_HT_FILTER_BETA_ROT", p.filter_beta_rot);
+
+	setenv("MERCURY_DETECTION_ANY_VIEW", p.detection_any_view, 0);
+	setenv("MERCURY_DETECTION_MIRROR_LEFT", p.detection_mirror_left, 0);
+	setenv("MERCURY_ACQUIRE_CONFIDENCE", p.acquire_confidence, 0);
+	setenv("MERCURY_KEYPOINT_HAND_CONFIDENCE", p.keypoint_hand_confidence, 0);
+	setenv("MERCURY_DETECTION_TILES", p.detection_tiles, 0);
+	setenv("MERCURY_DETECTION_TILES_PER_FRAME", p.detection_tiles_per_frame, 0);
+	if (mediapipe) {
+		setenv("MERCURY_MEDIAPIPE", "1", 0);
+		setenv("MERCURY_MEDIAPIPE_GESTURES", "1", 0);
+		setenv("MERCURY_MEDIAPIPE_FIT", p.mediapipe_fit ? "1" : "0", 1);
+		setenv("MERCURY_MEDIAPIPE_BOX", p.mediapipe_box, 0);
+		setenv("MERCURY_MEDIAPIPE_PRESENCE", p.mediapipe_presence, 0);
+		setenv("MERCURY_MEDIAPIPE_XY_CONF", p.mediapipe_xy_conf, 0);
+		setenv("MERCURY_MEDIAPIPE_DEPTH_CONF", p.mediapipe_depth_conf, 0);
+	} else if (!have_mp) {
+		HT_INFO(h, "MediaPipe's hand landmark model isn't installed (%s): Mercury's own model, no MediaPipe gestures",
+		        mp);
+	}
+	h->prof = p;
+	HT_INFO(h,
+	        "Hand tracking profile '%s': 3D hand from %s%s; view %.0f deg, gamma %.2f, levels %s %.2f-%.2f; acquire "
+	        "%s, keypoint hand %s; hold %d ms; filter %s %.2f/%.2f/%.2f",
+	        p.name, p.mediapipe_fit ? "MediaPipe's landmarks" : "Mercury's keypoint model",
+	        mediapipe ? (p.mediapipe_fit ? ", gestures from MediaPipe" : ", gestures from MediaPipe's landmarks")
+	                  : ", no MediaPipe",
+	        p.fov, p.gamma, p.levels ? "on" : "off", p.levels_lo, p.levels_hi, getenv("MERCURY_ACQUIRE_CONFIDENCE"),
+	        getenv("MERCURY_KEYPOINT_HAND_CONFIDENCE"), p.hold_ms, p.filter ? "on" : "off", p.filter_min_cutoff,
+	        p.filter_beta_pos, p.filter_beta_rot);
+}
+
 //! Start Mercury for the given cameras (worker thread: loading the models takes a while).
 static void
 start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration cams[2], const struct xrt_pose poses[2])
 {
-	float fov = debug_get_float_option_psvr2_ht_fov();
-	float gamma = debug_get_float_option_psvr2_ht_gamma();
+	{
+		char models_dir[1024] = {0};
+		u_file_get_hand_tracking_models_dir(models_dir, sizeof(models_dir));
+		select_profile(h, models_dir);
+	}
+	float fov = h->prof.fov;
+	float gamma = h->prof.gamma;
 	const bool raw = debug_get_bool_option_psvr2_ht_raw();
 	int n = raw ? CAM_W : (int)debug_get_num_option_psvr2_ht_size();
 	h->out_size = n;
@@ -334,6 +529,7 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 		}
 		h->decoded[v] = U_TYPED_ARRAY_CALLOC(uint8_t, (size_t)CAM_W * CAM_H);
 	}
+
 
 	// Mercury sees two distortion-free pinhole cameras (RT8 with zero coefficients) with the physical cameras' axes,
 	// so the stereo extrinsics are the physical ones: x_cam1 = R x_cam0 + T in OpenCV camera axes.
@@ -400,63 +596,6 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 	if (raw) {
 		HT_INFO(h, "Hand tracking: the cameras' own fisheye images (PSVR2_HT_RAW), boundary radius %.2f",
 		        debug_get_float_option_psvr2_ht_raw_radius());
-	}
-	/*
-	 * Start hands from one confident camera: with the mean of both views (Mercury's default), the left camera's
-	 * near-zero scores cancelled the right camera's 0.99 detections and the right hand was found in 2-10% of its
-	 * frames on the recordings, 81% with this. Mercury reads the option once at creation; an explicit setting wins.
-	 */
-	setenv("MERCURY_DETECTION_ANY_VIEW", "1", 0);
-	/*
-	 * Left hand: Mercury's detector finds right hands far more readily, so also detect on the mirrored image (its
-	 * right hand is our left), and start hands at 0.7 confidence instead of 0.92. On the recordings: left hand found
-	 * 62% -> 73% of the hands-in-view time (live run) and 0% -> 9% (earlier run, where it was never found), right
-	 * hand 85% -> 97% (earlier run); no detections away from hands, no two hands on one. Overlays put the new left
-	 * hand pickups on the left hand. Costs one more detector run per view (Mercury ~4.9 -> 6.7 ms per frame).
-	 */
-	setenv("MERCURY_DETECTION_MIRROR_LEFT", "1", 0);
-	/*
-	 * 0.55 since 2026-11-23 (with the auto levels): small hands far out in front, side by side near a bright monitor
-	 * (the user's second headset, dark room) were seen but scored below 0.7, so the left hand was rarely picked up.
-	 * Replays: left 57% -> 85% and 19% -> 78% on the two new recordings, right unchanged (70-87%); old desk recording
-	 * left 68-79%, right 81%; no false hands in any empty stretch. 0.4 started a phantom left hand (6%) there.
-	 */
-	setenv("MERCURY_ACQUIRE_CONFIDENCE", "0.55", 0);
-	/*
-	 * Keep a view only while the keypoint model is 98% sure it's a hand (Mercury: 97%). A right hand raised quickly
-	 * out of the top of the view left its joints on dark furniture for half a second at 0.93-0.98 (real hands: median
-	 * 0.9992, 95% above 0.986); 0.98 dropped it at once and cost 0-7 points of tracked time on the recordings.
-	 * (2026-11-20, scored against frames labelled by hand: 0.92 tracked exactly the same, so it stays.)
-	 */
-	setenv("MERCURY_KEYPOINT_HAND_CONFIDENCE", "0.98", 0);
-	/*
-	 * Mercury's zoomed-in detection tiles: while a hand isn't found, the detector also looks at a 3x3 grid of
-	 * overlapping crops, all nine every frame, run in parallel (hg_model.cpp run_detection_tile). On the 2026-11-20
-	 * recording, replayed through this module (psvr2-test/hands/driver_ht_replay: share of SteamVR queries a hand is
-	 * active, hands over the desk 2-35 s / none 37-43 s): off left 22% right 63%, one tile a frame 52% / 65%, all nine
-	 * in parallel 77% / 68%, no false hands in any; the tiles took 3.7 ms per searching frame (one after another
-	 * ~17 ms, too slow for the 60 Hz stream), CPU 0.55 -> 1.0 cores. MERCURY_DETECTION_TILES=0 turns them off.
-	 */
-	setenv("MERCURY_DETECTION_TILES", "3", 0);
-	setenv("MERCURY_DETECTION_TILES_PER_FRAME", "9", 0);
-	/*
-	 * MediaPipe's hand landmark model reads the fingers (and its Gesture Recognizer the gestures) when its model is
-	 * installed next to Mercury's: on the 2026-11-24 headset sessions pinch went from almost never registering to
-	 * 3-4 of 6 prompts per hand, fist to 2 of 2, and with the cameras well lit both hands tracked 90%+. Without
-	 * hand_landmarks_detector.onnx Mercury's own model as before (MediaPipe on without it would stop Mercury from
-	 * starting). MERCURY_MEDIAPIPE=0 / MERCURY_MEDIAPIPE_GESTURES=0 turn them off.
-	 */
-	{
-		char mp[1100];
-		snprintf(mp, sizeof(mp), "%s/hand_landmarks_detector.onnx", models);
-		FILE *probe = fopen(mp, "rb");
-		if (probe != NULL) {
-			fclose(probe);
-			setenv("MERCURY_MEDIAPIPE", "1", 0);
-			setenv("MERCURY_MEDIAPIPE_GESTURES", "1", 0);
-		} else if (getenv("MERCURY_MEDIAPIPE") == NULL) {
-			HT_INFO(h, "MediaPipe's hand landmark model isn't installed (%s): Mercury's own finger model", mp);
-		}
 	}
 	struct t_hand_tracking_sync *sync = t_hand_tracking_sync_mercury_create(stereo, info, models);
 	t_stereo_camera_calibration_reference(&stereo, NULL);
@@ -542,12 +681,12 @@ update_levels(struct psvr2_hand_tracking *h, int v)
 	for (int i = 0; i < 256; i++) {
 		total += hist[i];
 	}
-	if (total < 1000 || !debug_get_bool_option_psvr2_ht_levels()) {
+	if (total < 1000 || !h->prof.levels) {
 		memset(hist, 0, sizeof(h->view_hist[v]));
 		return;
 	}
-	const double want_lo = debug_get_float_option_psvr2_ht_levels_lo() * (double)total;
-	const double want_hi = debug_get_float_option_psvr2_ht_levels_hi() * (double)total;
+	const double want_lo = h->prof.levels_lo * (double)total;
+	const double want_hi = h->prof.levels_hi * (double)total;
 	int lo = 0, hi = 255;
 	uint64_t run = 0;
 	bool have_lo = false;
@@ -831,7 +970,7 @@ static void
 smooth_hand(struct psvr2_hand_tracking *h, int hand, struct xrt_hand_joint_set *set, int64_t ts)
 {
 	struct ht_hand_filter *f = &h->filter[hand];
-	const int64_t hold_ns = (int64_t)debug_get_num_option_psvr2_ht_hold_ms() * U_TIME_1MS_IN_NS;
+	const int64_t hold_ns = (int64_t)h->prof.hold_ms * U_TIME_1MS_IN_NS;
 	/*
 	 * One step per display refresh at most. The SteamVR plugin asks for each hand every 1 ms (its pose thread) while
 	 * Mercury delivers ~60 results a second: stepped on every query, each new result arrived as a jump within 1 ms,
@@ -850,9 +989,9 @@ smooth_hand(struct psvr2_hand_tracking *h, int hand, struct xrt_hand_joint_set *
 	dt = fminf(fmaxf(dt, 0.001f), 1.0f / 30.0f);
 	f->last_ns = ts;
 
-	const float min_cutoff = debug_get_float_option_psvr2_ht_filter_min_cutoff();
-	const float beta_pos = debug_get_float_option_psvr2_ht_filter_beta_pos();
-	const float beta_rot = debug_get_float_option_psvr2_ht_filter_beta_rot();
+	const float min_cutoff = h->prof.filter_min_cutoff;
+	const float beta_pos = h->prof.filter_beta_pos;
+	const float beta_rot = h->prof.filter_beta_rot;
 
 	// Every joint in the room, then relative to the raw palm.
 	struct xrt_pose world[XRT_HAND_JOINT_COUNT];
@@ -902,6 +1041,26 @@ psvr2_ht_get_hand_tracking(struct xrt_device *xdev,
 			        h->stats_wrist_head[1].z, h->stats_wrist_world[1].x, h->stats_wrist_world[1].y,
 			        h->stats_wrist_world[1].z, h->stats_wrist_head[0].x, h->stats_wrist_head[0].y,
 			        h->stats_wrist_head[0].z);
+			/*
+			 * Why each hand was or wasn't tracked over the same 5 s, per camera frame (Mercury's own reasons): a hand
+			 * seen and rejected (keypoint, with the keypoint model's best score) vs never found (not detected).
+			 */
+			for (int hd = 0; hd < 2 && h->sync != NULL; hd++) {
+				struct t_hand_loss_stats ls;
+				if (!t_hand_tracking_sync_mercury_take_loss_stats(h->sync, hd, &ls) || ls.frames == 0) {
+					continue;
+				}
+				const double k = 100.0 / ls.frames;
+				HT_INFO(h,
+				        "%s hand (5 s, %u frames): tracked %.0f%%; not tracked: not detected %.0f%%, rejected by "
+				        "the keypoint model %.0f%% (its best score <0.90: %u, 0.90-0.96: %u, 0.96-0.98: %u, "
+				        ">=0.98: %u frames), left the views %.0f%%, outside the views %.0f%%, reprojection %.0f%%, "
+				        "too far %.0f%%, hands overlapping %.0f%%, other %.0f%%; MediaPipe rejected %u views",
+				        hd ? "Right" : "Left", ls.frames, ls.tracked * k, ls.not_detected * k, ls.keypoint * k,
+				        ls.keypoint_score[0], ls.keypoint_score[1], ls.keypoint_score[2], ls.keypoint_score[3],
+				        ls.no_region * k, ls.outside_view * k, ls.reprojection * k, ls.too_far * k, ls.overlap * k,
+				        ls.other * k, ls.mediapipe_rejected_views);
+			}
 			memset(h->stats_queries, 0, sizeof(h->stats_queries));
 			memset(h->stats_active, 0, sizeof(h->stats_active));
 			memset(h->stats_held, 0, sizeof(h->stats_held));
@@ -925,7 +1084,7 @@ psvr2_ht_get_hand_tracking(struct xrt_device *xdev,
 	h->found_now[hand] = out_value->is_active;
 	os_mutex_unlock(&h->pose_lock);
 	if (!out_value->is_active) {
-		const int64_t hold_ns = (int64_t)debug_get_num_option_psvr2_ht_hold_ms() * U_TIME_1MS_IN_NS;
+		const int64_t hold_ns = (int64_t)h->prof.hold_ms * U_TIME_1MS_IN_NS;
 		os_mutex_lock(&h->pose_lock);
 		h->stats_queries[hand]++;
 		const bool hold = hold_ns > 0 && h->last_found_ns[hand] != 0 &&
@@ -981,13 +1140,26 @@ psvr2_ht_get_hand_tracking(struct xrt_device *xdev,
 	                                     XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
 	                                     XRT_SPACE_RELATION_POSITION_TRACKED_BIT));
 	os_mutex_lock(&h->pose_lock);
-	if (debug_get_bool_option_psvr2_ht_filter()) {
+	if (h->prof.filter) {
 		smooth_hand(h, hand, out_value, *out_timestamp_ns);
 	}
 	h->last_found[hand] = *out_value;
 	h->last_found_ns[hand] = *out_timestamp_ns;
 	os_mutex_unlock(&h->pose_lock);
 	return XRT_SUCCESS;
+}
+
+const char *
+psvr2_hand_tracking_get_profile(struct xrt_device *ht)
+{
+	if (ht == NULL) {
+		return NULL;
+	}
+	struct psvr2_hand_tracking *h = psvr2_ht(ht);
+	os_mutex_lock(&h->pose_lock);
+	const bool running = h->sync != NULL;
+	os_mutex_unlock(&h->pose_lock);
+	return running ? h->prof.name : NULL;
 }
 
 bool
