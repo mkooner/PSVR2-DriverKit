@@ -18,6 +18,8 @@
 #include "util/u_time.h"
 #include "tracking/t_tracking.h"
 #include "psvr2_hand_tracking.h"
+#include "psvr2_interface.h"
+#include "tracking/t_hand_tracking.h"
 #include "psvr2.h"
 #include "psvr2_constellation_tracking.h"
 
@@ -114,6 +116,18 @@ main(int argc, char **argv)
 	struct rusage ru0;
 	getrusage(RUSAGE_SELF, &ru0);
 	double sx = 0, sy = 0, sz = 0;
+	// HT_REPLAY_JOINTS=<file.csv>: every hand query: t_s,hand,active, then per joint (OpenXR order 0-25)
+	// px,py,pz,qx,qy,qz,qw,radius in the head frame (the stand-in head is at identity).
+	FILE *joints_csv = getenv("HT_REPLAY_JOINTS") ? fopen(getenv("HT_REPLAY_JOINTS"), "w") : NULL;
+	// HT_REPLAY_GESTURES=<file.csv>: every hand query, the driver's gesture measurements
+	// (psvr2_hand_tracking_get_gestures; needs MERCURY_MEDIAPIPE=1 MERCURY_MEDIAPIPE_GESTURES=1):
+	// t_s,hand,have,valid,frame_ns,confidence,pinch_norm,extended_mask,category,category_score
+	FILE *gestures_csv = getenv("HT_REPLAY_GESTURES") ? fopen(getenv("HT_REPLAY_GESTURES"), "w") : NULL;
+	if (gestures_csv != NULL)
+		fprintf(gestures_csv, "t,hand,have,valid,frame_ns,confidence,pinch_norm,extended_mask,category,score\n");
+	// HT_REPLAY_QUERY_MS=<ms>: how often the hands are asked for (default 11, SteamVR's frame; the SteamVR plugin's
+	// pose thread asks every 1 ms).
+	const int64_t query_ns = (int64_t)((getenv("HT_REPLAY_QUERY_MS") ? atof(getenv("HT_REPLAY_QUERY_MS")) : 11.0) * 1e6);
 	for (;;) {
 		uint64_t ns;
 		uint32_t len, dropped;
@@ -132,6 +146,9 @@ main(int argc, char **argv)
 			}
 			start = os_monotonic_get_ns();
 			next_query = start;
+			// Frames are offered with this replay's clock: recording time = replay time + this offset.
+			printf("REPLAY_CLOCK_OFFSET_NS %lld\n", (long long)(first_rec - start));
+			fflush(stdout);
 		}
 		int64_t due = start + ((int64_t)ns - first_rec);
 		// Query hands every 11 ms (90 Hz) until this frame is due, then offer it.
@@ -146,6 +163,30 @@ main(int argc, char **argv)
 					                               : XRT_INPUT_HT_UNOBSTRUCTED_LEFT,
 					                             now, &s, &t);
 					const double ts = (now - start) / 1e9;
+					if (gestures_csv != NULL) {
+						struct t_hand_gestures g;
+						const bool have = psvr2_hand_tracking_get_gestures(ht, h, &g);
+						fprintf(gestures_csv, "%.4f,%d,%d,%d,%lld,%.3f,%.4f,%u,%d,%.3f\n", ts, h, have ? 1 : 0,
+						        g.valid ? 1 : 0, (long long)g.timestamp_ns, g.confidence,
+						        g.pinch_distance_normalized, (unsigned)g.extended_mask, (int)g.category,
+						        g.category_score);
+					}
+					if (joints_csv != NULL) {
+						fprintf(joints_csv, "%.4f,%d,%d", ts, h, s.is_active ? 1 : 0);
+						for (int jn = 0; jn < XRT_HAND_JOINT_COUNT; jn++) {
+							struct xrt_pose p = {XRT_QUAT_IDENTITY, XRT_VEC3_ZERO};
+							float r = 0.0f;
+							if (s.is_active) {
+								math_pose_transform(&s.hand_pose.pose,
+								                    &s.values.hand_joint_set_default[jn].relation.pose, &p);
+								r = s.values.hand_joint_set_default[jn].radius;
+							}
+							fprintf(joints_csv, ",%.5f,%.5f,%.5f,%.6f,%.6f,%.6f,%.6f,%.4f", p.position.x,
+							        p.position.y, p.position.z, p.orientation.x, p.orientation.y, p.orientation.z,
+							        p.orientation.w, r);
+						}
+						fputc('\n', joints_csv);
+					}
 					if (s.is_active && ts >= h_lo && ts <= h_hi)
 						act_hands[h]++;
 					// Gaps while hands are in view: how much lost time comes from short dropouts, and what holding
@@ -194,7 +235,7 @@ main(int argc, char **argv)
 					q_hands += ts >= h_lo && ts <= h_hi;
 					q_empty += ts >= e_lo && ts <= e_hi;
 				}
-				next_query += 11 * U_TIME_1MS_IN_NS;
+				next_query += query_ns;
 			}
 			if (now >= due)
 				break;
@@ -228,5 +269,9 @@ main(int argc, char **argv)
 	       e_hi, q_empty ? 100.0 * act_empty[0] / q_empty : 0, q_empty ? 100.0 * act_empty[1] / q_empty : 0,
 	       cpu / ((os_monotonic_get_ns() - start) / 1e9));
 	xrt_device_destroy(&ht);
+	if (joints_csv != NULL)
+		fclose(joints_csv);
+	if (gestures_csv != NULL)
+		fclose(gestures_csv);
 	return 0;
 }

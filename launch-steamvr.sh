@@ -389,6 +389,16 @@ if [ "${HAND_TRACKING:-0}" = 1 ]; then
 	export PSVR2_HAND_TRACKING=1
 	echo "  HAND_TRACKING=1: bottom camera hand tracking on (Sense controllers off to use hands)"
 fi
+# MediaPipe hands (default when hand_landmarks_detector.onnx, gesture_embedder.onnx and canned_gesture_classifier.onnx
+# are in ~/.local/share/monado/hand-tracking-models): Mercury reads the fingers with Google's MediaPipe hand landmark
+# model and the gestures come from MediaPipe's measurements (pinch = trigger, Closed_Fist = grip; dashboard: palm
+# toward the face at eye level, pinch held). MEDIAPIPE_HANDS=0: Mercury's own model and joint gestures, as before.
+# GESTURE_DEBUG=1 logs every gesture change with its reason.
+if [ "${MEDIAPIPE_HANDS:-1}" = 0 ]; then
+	export MERCURY_MEDIAPIPE=0 MERCURY_MEDIAPIPE_GESTURES=0
+	echo "  MEDIAPIPE_HANDS=0: Mercury's own finger model and joint gestures"
+fi
+[ "${GESTURE_DEBUG:-0}" = 1 ] && export OVRN_GESTURE_DEBUG=1
 # RECORD_CAMERA=1: record the bottom camera pair continuously (30/s, ~30 MB/s) for the offline hand tracking prototype
 # (hands/hand_replay). RECORD_CAMERA_HZ changes the rate.
 if [ "${RECORD_CAMERA:-0}" = 1 ]; then
@@ -593,6 +603,22 @@ else
 		POSELOG_PID=$!
 		echo "  POSELOG=1: SteamVR's head pose per refresh to $LOGDIR/vrposelog-$STAMP.csv"
 	fi
+	# GESTURE_PROMPTS=1: spoken gesture prompts (tools/gesture_prompts.py, espeak-ng through the default audio output) with
+	# their times, to label a hand tracking recording (RECORD_CAMERA=1) for the offline gesture analysis.
+	PROMPTS_PID=""
+	if [ "${GESTURE_PROMPTS:-0}" = 1 ] && [ -f "$HERE/tools/gesture_prompts.py" ]; then
+		( sleep 20; python3 -I "$HERE/tools/gesture_prompts.py" "$LOGDIR/gesture-labels-$STAMP.csv" ) &
+		PROMPTS_PID=$!
+		echo "  GESTURE_PROMPTS=1: spoken prompts start 20 s after SteamVR; labels to $LOGDIR/gesture-labels-$STAMP.csv"
+	fi
+	# HANDLOG=1: what SteamVR hands an app for the headset and the tracked bare hands, once per refresh (tools/vrhandlog),
+	# to measure hand jumps in the room against head motion.
+	HANDLOG_PID=""
+	if [ "${HANDLOG:-0}" = 1 ] && [ -x "$HERE/tools/vrhandlog" ]; then
+		( sleep 10; "$HERE/tools/vrhandlog" 36000 "$LOGDIR/vrhandlog-$STAMP.csv" 2>"$LOGDIR/vrhandlog-$STAMP.txt" ) &
+		HANDLOG_PID=$!
+		echo "  HANDLOG=1: headset and hand poses per refresh to $LOGDIR/vrhandlog-$STAMP.csv"
+	fi
 	PROBE_PID=""
 	if [ "${JITTER_CHECK:-0}" = 1 ] && [ -x "$HERE/tools/vrposeprobe" ]; then
 		# SteamVR's own pose prediction at fixed times, independent of any app (analysis/steamvr_probe.py).
@@ -654,7 +680,9 @@ else
 		sed -n '/^[0-9]* frames over/,$p' "$LOGDIR/steamvr-$STAMP-game.txt"
 	fi
 	[ -n "${POSELOG_PID:-}" ] && pkill -x vrposelog 2>/dev/null
-	for pid in $FT_PID $CPU_PID $PROBE_PID ${POSELOG_PID:-}; do
+	[ -n "${HANDLOG_PID:-}" ] && pkill -x vrhandlog 2>/dev/null
+	[ -n "${PROMPTS_PID:-}" ] && pkill -f gesture_prompts.py 2>/dev/null
+	for pid in $FT_PID $CPU_PID $PROBE_PID ${POSELOG_PID:-} ${HANDLOG_PID:-}; do
 		kill -INT "$pid" 2>/dev/null
 		wait "$pid" 2>/dev/null
 	done

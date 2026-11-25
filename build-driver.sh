@@ -216,11 +216,12 @@ for f in steamvr_frame_shift.py steamvr_probe.py steamvr_timeline.py; do
 	[ -f "$HERE/analysis/$f" ] && cp -f "$HERE/analysis/$f" "$KIT/analysis/"
 done
 [ -f "$HERE/tools/cpusample.py" ] && cp -f "$HERE/tools/cpusample.py" "$KIT/tools/"
+[ -f "$HERE/tools/gesture_prompts.py" ] && cp -f "$HERE/tools/gesture_prompts.py" "$KIT/tools/"
 [ -d "$HERE/tools/xr_frame_log" ] && cp -rf "$HERE/tools/xr_frame_log" "$KIT/tools/"
 # The OpenVR tools (background clients: room setup, probes, timing): built against SteamVR's own libopenvr_api.
 STEAMVR_DIR="${STEAMVR_DIR:-$HOME/.local/share/Steam/steamapps/common/SteamVR}"
 HDR="$SRC/src/external/openvr_includes"
-for t in vrlaunch vrprobe vrframetiming vrposelog vrposeprobe vrdisplaydump; do
+for t in vrlaunch vrprobe vrframetiming vrposelog vrhandlog vrposeprobe vrdisplaydump; do
 	[ -f "$HERE/tools/$t.cpp" ] || continue
 	cp -f "$HERE/tools/$t.cpp" "$KIT/tools/"
 	if [ -f "$STEAMVR_DIR/bin/linux64/libopenvr_api.so" ] &&
