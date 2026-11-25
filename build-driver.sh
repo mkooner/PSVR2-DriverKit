@@ -261,6 +261,8 @@ if [ "$HAND_TRACKING" = 1 ]; then
 		mv -f "$MODELS/$f.part" "$MODELS/$f"
 		echo "  hand tracking model $f downloaded into $MODELS"
 	done
+	# MediaPipe's hand models (in our repository, models/mediapipe; see its NOTICE): the driver uses them when present.
+	cp -f "$REPO"/models/mediapipe/*.onnx "$MODELS/" 2>/dev/null && echo "  MediaPipe hand models copied into $MODELS"
 fi
 
 echo "STEP 5/5 record the install location"

@@ -1,0 +1,12 @@
+These three models are Google's MediaPipe hand models, converted to ONNX for the PS VR2 driver's hand tracking:
+
+  hand_landmarks_detector.onnx    from hand_landmarker.task (MediaPipe Hand Landmarker)
+  gesture_embedder.onnx           from gesture_recognizer.task (MediaPipe Gesture Recognizer)
+  canned_gesture_classifier.onnx  from gesture_recognizer.task (MediaPipe Gesture Recognizer)
+
+Original models: https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+and https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/latest/gesture_recognizer.task
+Copyright Google LLC, licensed under the Apache License, Version 2.0: https://www.apache.org/licenses/LICENSE-2.0
+
+Changes: converted from TensorFlow Lite to ONNX (weights as 32-bit floats); outputs match the originals on recorded
+PS VR2 camera images (landmarks within 0.001 px, gesture scores within 1e-6).
