@@ -161,6 +161,7 @@ head_at_replay(int64_t replay_ns, double out[7])
 
 std::mutex g_mutex;
 std::map<uint32_t, DriverPose_t> g_lastPose; //!< by device id
+double g_frameT = 0; //!< the SteamVR frame being updated (vrhandlog's clock), for the plugin log lines
 
 struct Component
 {
@@ -176,7 +177,7 @@ struct FakeLog : IVRDriverLog
 	Log(const char *m) override
 	{
 		if (getenv("HAND_SIM_QUIET") == nullptr) {
-			printf("[plugin] %s", m);
+			printf("[plugin %.3f] %s", g_frameT, m);
 		}
 	}
 };
@@ -529,6 +530,7 @@ main(int argc, char **argv)
 			       g_t0 + (int64_t)(g_frame_t[next_frame] * 1e9) - g_replayToSession <= now) {
 				const int64_t at = g_t0 + (int64_t)(g_frame_t[next_frame] * 1e9) - g_replayToSession;
 				fprintf(out, "%.6f", g_frame_t[next_frame]);
+				g_frameT = g_frame_t[next_frame];
 				for (int h = 0; h < 2; h++) {
 					hands[h]->updateInputs(at);
 					hands[h]->updatePose(at);
