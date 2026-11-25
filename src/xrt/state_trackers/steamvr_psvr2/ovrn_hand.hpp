@@ -18,8 +18,9 @@
  * It presents itself as SteamVR's own tracked hands do (Valve's vrlink driver, svl_hand_interaction_augmented): hand
  * priority -1 in the profile, the hand tracking status icons (from SteamVR's vrlink resources, referenced in place),
  * /pose/raw, /pose/grip and /pose/tip made by the driver (tip: the dashboard's laser, from the index knuckle along the
- * hand), per-finger pinches, and a system button on each hand: the palm toward the face with an index pinch, which
- * the dashboard binding uses to open and close the dashboard (Valve's has it on the left hand only).
+ * hand), per-finger pinches, and a system button on each hand: an open palm toward the face, then a fist (with
+ * MediaPipe's gestures; without them, the palm toward the face with an index pinch held), which the dashboard binding
+ * uses to open and close the dashboard (Valve's has it on the left hand only).
  * @ingroup st_ovrn
  */
 
@@ -40,8 +41,7 @@ public:
 	HandDevice(Backend *backend, Hand hand)
 	    : TrackedDevice(vr::TrackedDeviceClass_Controller, serialFor(backend, hand)), m_backend(backend), m_hand(hand),
 	      m_joints(skel::detail::reference_rest(hand == Hand::Left, &m_restSource), hand == Hand::Left),
-	      m_mp(gestureConfig()), m_mpDebug(envFlag("OVRN_GESTURE_DEBUG")),
-	      m_systemPinchWindowNs((int64_t)(envFloat("OVRN_SYSTEM_PINCH_WINDOW_MS", 0.0f) * 1e6))
+	      m_mp(gestureConfig()), m_mpDebug(envFlag("OVRN_GESTURE_DEBUG"))
 	{}
 
 	Hand
@@ -100,6 +100,7 @@ public:
 			m_systemPinch = false;
 			m_systemSinceNs = 0;
 			m_systemOn = false;
+			m_systemGesture.reset();
 			sendSystem();
 			return;
 		}
@@ -135,8 +136,8 @@ public:
 			logGestureEvents(m_mp.reset("gesture measurements unavailable"), now_ns);
 		}
 		/*
-		 * The system gesture (either hand), as Meta's: the palm toward the face, raised to about eye level, and an
-		 * index pinch held. "At eye level" (Meta's own instruction) is what keeps everyday hand shapes out: on the
+		 * The system gesture's pose (either hand): the palm toward the face, raised (kSystemMinHeightM). Raised is
+		 * what keeps everyday hand shapes out: on the
 		 * 2026-11-24 20:05 session all 4 dashboard openings, 3 of them unwanted (claw, fist, a tilted pinch), had
 		 * the palm 20-51 cm below the eyes, where the hands are while using them; the cameras still track a hand up to
 		 * about eye level (earlier sessions: half the tracked frames 10-20 cm below).
@@ -155,33 +156,30 @@ public:
 			                          eye);
 		}
 		/*
-		 * A hold, as Meta's system gesture (palm toward you, pinch held until its ring fills): the system button goes
-		 * down only after the palm-toward-head pinch has lasted kSystemHoldNs (now 0.5 s), and up when it ends. Before, it fired on
+		 * Without MediaPipe's gestures, a hold, as Meta's system gesture (palm toward you, pinch held until its ring
+		 * fills): the system button goes down only after the palm-toward-head pinch has lasted kSystemHoldNs (now 0.5 s), and up when it ends. Before, it fired on
 		 * the first frame: on 2026-11-24 (14:35 session) curling a hand into a fist with the palm toward the face read
 		 * as a pinch and toggled the dashboard 4 times unasked (palms really faced the cameras, camera images 15.5 s
 		 * and 23 s); a fist curl lasts a fraction of a second.
 		 */
-		/*
-		 * With MediaPipe's measurements, only a deliberate pinch (other fingers open) counts for the system gesture.
-		 * OVRN_SYSTEM_PINCH_WINDOW_MS (default 0, development): a deliberate pinch that ended up to that long ago still
-		 * counts, for a pinch made just before raising the palm. (Replay of the 2026-11-24 20:50 session: a 0.7-1.0 s
-		 * window added unwanted openings and didn't catch the dashboard attempts, where the fingertips never met.)
-		 */
-		if (mp_on && m_mp.state().deliberatePinch) {
-			m_lastDeliberatePinchNs = now_ns;
-		}
-		const bool recent_pinch = m_systemPinchWindowNs > 0 && m_lastDeliberatePinchNs != 0 &&
-		                          now_ns - m_lastDeliberatePinchNs <= m_systemPinchWindowNs;
-		const float system_pinch =
-		    mp_on ? ((m_mp.state().deliberatePinch || recent_pinch) ? 1.0f : 0.0f) : g.pinch;
-		m_systemPinch = skel::click(system ? system_pinch : 0.0f, m_systemPinch);
-		if (!m_systemPinch) {
+		if (mp_on) {
+			// MediaPipe's gestures: an open palm toward the face, then a fist (gest::SystemGesture).
+			const gest::State &st = m_mp.state();
+			m_systemOn = m_systemGesture.update(now_ns, system, st.openPalm, st.fist);
+			m_systemPinch = false;
 			m_systemSinceNs = 0;
-			m_systemOn = false;
-		} else if (m_systemSinceNs == 0) {
-			m_systemSinceNs = now_ns;
-		} else if (now_ns - m_systemSinceNs >= kSystemHoldNs) {
-			m_systemOn = true;
+		} else {
+			// Without them (Mercury's joints only): the palm-toward-head pinch held kSystemHoldNs.
+			m_systemGesture.reset();
+			m_systemPinch = skel::click(system ? g.pinch : 0.0f, m_systemPinch);
+			if (!m_systemPinch) {
+				m_systemSinceNs = 0;
+				m_systemOn = false;
+			} else if (m_systemSinceNs == 0) {
+				m_systemSinceNs = now_ns;
+			} else if (now_ns - m_systemSinceNs >= kSystemHoldNs) {
+				m_systemOn = true;
+			}
 		}
 		sendSystem();
 		/*
@@ -201,14 +199,19 @@ public:
 			const gest::State &st = m_mp.state();
 			out.pinch = m_mp.pinchValue();
 			out.finger_pinch[0] = out.pinch;
-			out.grab = st.fist ? 1.0f : 0.0f;
-			if (system || m_systemPinch) {
+			/*
+			 * The fist that presses the system button isn't a grip for the app: one fist would otherwise open
+			 * the dashboard and grab in the game at once (as the pinch is held back while the palm faces the head).
+			 */
+			const bool dashboard_fist = m_systemGesture.armed(now_ns) || m_systemGesture.down();
+			out.grab = (st.fist && !dashboard_fist) ? 1.0f : 0.0f;
+			if (system) {
 				out.pinch = 0.0f;
 				for (float &p : out.finger_pinch) {
 					p = 0.0f;
 				}
 			}
-			setOutputs(out, st.pinch && !(system || m_systemPinch), st.fist);
+			setOutputs(out, st.pinch && !system, st.fist && !dashboard_fist);
 			return;
 		}
 		if (system || m_systemPinch) {
@@ -527,8 +530,12 @@ private:
 	 * Meta holds "until the icon fills". Replay of the labelled session: openings outside the pinch prompts 5 at
 	 * 0.3 s, 1 at 0.5 s.
 	 */
-	//! How high the palm must be for the system gesture: no lower than this below the eyes (metres, negative).
-	static constexpr double kSystemMinHeightM = -0.15;
+	/*!
+	 * How high the palm must be for the system gesture: no lower than this below the eyes (metres, negative). -0.25
+	 * since the open-palm-then-fist gesture (was -0.15): a hand raised to the eyes left the cameras' crop on the
+	 * 21:47 session's close attempt; replay openings outside the fist prompts stayed none at -0.25.
+	 */
+	static constexpr double kSystemMinHeightM = -0.25;
 	struct GestureStats
 	{
 		int64_t since_ns = 0;
@@ -541,9 +548,7 @@ private:
 	uint64_t m_updates = 0;
 	gest::Machine m_mp;   //!< RunFrame thread: MediaPipe gesture state
 	const bool m_mpDebug; //!< OVRN_GESTURE_DEBUG
-	//! OVRN_SYSTEM_PINCH_WINDOW_MS: how long after a deliberate pinch it still counts for the system gesture (0: off).
-	const int64_t m_systemPinchWindowNs;
-	int64_t m_lastDeliberatePinchNs = 0; //!< when the deliberate pinch was last on (RunFrame thread)
+	gest::SystemGesture m_systemGesture; //!< RunFrame thread: the dashboard gesture with MediaPipe's gestures
 };
 
 } // namespace ovrn

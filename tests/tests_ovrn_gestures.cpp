@@ -448,3 +448,73 @@ TEST_CASE("pinch value")
 	feed(m, 2000, 1, 1.5f);
 	CHECK(m.pinchValue() == Approx(0.0f));
 }
+
+TEST_CASE("dashboard gesture: open palm toward the face, then a fist")
+{
+	constexpr int64_t ms = 1'000'000;
+	// frames every 16 ms; returns the button after running [from, to)
+	const auto run = [](SystemGesture &g, int64_t from, int64_t to, bool pose, bool palm, bool fist) {
+		bool down = false;
+		for (int64_t t = from; t < to; t += 16) {
+			down = g.update(t * ms, pose, palm, fist);
+		}
+		return down;
+	};
+	SECTION("palm 0.3 s then fist presses; the button stays down while the fist is held, up after")
+	{
+		SystemGesture g;
+		CHECK_FALSE(run(g, 0, 320, true, true, false));
+		CHECK(g.armed(320 * ms));
+		CHECK(run(g, 320, 400, true, false, true));
+		CHECK(run(g, 400, 800, false, false, true)); // the pose may go while the fist is held
+		CHECK_FALSE(run(g, 800, 816, true, false, false));
+		CHECK_FALSE(g.armed(816 * ms)); // a new open palm is needed for the next press
+		CHECK_FALSE(run(g, 816, 900, true, false, true));
+	}
+	SECTION("a fist without the open palm first does nothing")
+	{
+		SystemGesture g;
+		CHECK_FALSE(run(g, 0, 1000, true, false, true));
+	}
+	SECTION("too short an open palm doesn't arm")
+	{
+		SystemGesture g;
+		CHECK_FALSE(run(g, 0, 200, true, true, false));
+		CHECK_FALSE(run(g, 200, 400, true, false, true));
+	}
+	SECTION("open palm not toward the face doesn't arm")
+	{
+		SystemGesture g;
+		CHECK_FALSE(run(g, 0, 1000, false, true, false));
+		CHECK_FALSE(run(g, 1000, 1200, true, false, true));
+	}
+	SECTION("the fist must follow within 1 s")
+	{
+		SystemGesture g;
+		run(g, 0, 320, true, true, false);
+		run(g, 320, 1400, false, false, false);
+		CHECK_FALSE(run(g, 1400, 1500, true, false, true));
+	}
+	SECTION("short gaps (invalid frames) don't restart the open palm; long ones do")
+	{
+		SystemGesture g;
+		run(g, 0, 160, true, true, false);
+		run(g, 160, 260, false, false, false); // 0.1 s gap
+		run(g, 260, 330, true, true, false);
+		CHECK(g.armed(330 * ms));
+		SystemGesture h;
+		run(h, 0, 160, true, true, false);
+		run(h, 160, 400, false, false, false); // 0.24 s gap
+		run(h, 400, 560, true, true, false);
+		CHECK_FALSE(h.armed(560 * ms));
+	}
+	SECTION("reset (hand lost) lets go and forgets the palm")
+	{
+		SystemGesture g;
+		run(g, 0, 320, true, true, false);
+		CHECK(run(g, 320, 400, true, false, true));
+		g.reset();
+		CHECK_FALSE(g.down());
+		CHECK_FALSE(g.armed(400 * ms));
+	}
+}

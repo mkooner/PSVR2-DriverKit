@@ -326,4 +326,88 @@ private:
 	int64_t m_lastTs = 0;
 };
 
+/*!
+ * The dashboard (system button) gesture: an open palm toward the face, then a fist.
+ *
+ * Why not "palm toward the face, pinch and hold" (until 2026-11-24): on both labelled sessions (20:50, 21:47) it
+ * caught 0 of 8 dashboard attempts. With the hand raised toward the face MediaPipe sees a clear open palm (presence
+ * 0.99, Open_Palm) and the thumb-index gap stays about 1.2 palm widths: the pinch isn't seen there. Open palm and fist
+ * are the two shapes it recognises best (fist: every grip prompt in every session).
+ *
+ * Arming: the open palm with the pose (palm toward the face, raised) for palm_ns, with gaps up to gap_ns (invalid
+ * frames while the hand turns). Then a fist within fist_within_ns presses the system button; it stays down while the
+ * fist is held and goes up when the fist ends. A fist on its own (no open palm toward the face first) does nothing.
+ * Replay (open palm 0.3 s, fist within 1 s): no openings on any open, pinch, point or claw prompt; it fires only on the
+ * fist prompts, where the open hand was raised toward the cameras and then closed, which is this gesture.
+ */
+class SystemGesture
+{
+public:
+	struct Config
+	{
+		int64_t palm_ns = 300'000'000;
+		int64_t gap_ns = 150'000'000;
+		int64_t fist_within_ns = 1'000'000'000;
+	};
+
+	SystemGesture() = default;
+	explicit SystemGesture(const Config &cfg) : m_cfg(cfg) {}
+
+	/*!
+	 * One frame. pose_ok: palm toward the face and raised; open_palm, fist: the steady gestures (Machine::state()).
+	 * Returns whether the system button is down.
+	 */
+	bool
+	update(int64_t now_ns, bool pose_ok, bool open_palm, bool fist)
+	{
+		if (m_down) {
+			m_down = fist;
+			return m_down;
+		}
+		if (pose_ok && open_palm) {
+			if (!m_palm || now_ns - m_lastOkNs > m_cfg.gap_ns) {
+				m_sinceNs = now_ns;
+			}
+			m_palm = true;
+			m_lastOkNs = now_ns;
+			if (now_ns - m_sinceNs >= m_cfg.palm_ns) {
+				m_armed = true;
+				m_armedUntilNs = now_ns + m_cfg.fist_within_ns;
+			}
+		}
+		if (fist && armed(now_ns)) {
+			m_down = true;
+			m_armed = m_palm = false;
+		}
+		return m_down;
+	}
+
+	//! Whether a fist now would press the button (the open palm was seen, the time to close it hasn't run out).
+	bool
+	armed(int64_t now_ns) const
+	{
+		return m_armed && now_ns <= m_armedUntilNs;
+	}
+
+	bool
+	down() const
+	{
+		return m_down;
+	}
+
+	//! The hand is lost: let go and forget the open palm.
+	void
+	reset()
+	{
+		m_down = m_armed = m_palm = false;
+	}
+
+private:
+	Config m_cfg;
+	bool m_down = false;
+	bool m_palm = false;  //!< the open palm toward the face seen (since m_sinceNs, last at m_lastOkNs)
+	bool m_armed = false; //!< the open palm lasted palm_ns: a fist until m_armedUntilNs presses
+	int64_t m_sinceNs = 0, m_lastOkNs = 0, m_armedUntilNs = 0;
+};
+
 } // namespace ovrn::gest
