@@ -177,6 +177,18 @@ psvr2_hand_tracking_want(bool want);
 struct xrt_device *
 psvr2_hmd_get_hand_tracker(struct xrt_device *hmd_xdev);
 
+struct t_hand_gestures;
+
+/*!
+ * The latest gesture measurements of @p hand (0 left, 1 right) from the hand tracking device @p ht (any thread).
+ * Returns false when the tracker has none (gestures off, models missing). With true, out->valid is false unless the
+ * hand is tracked now and the measurements belong to its latest joints (same camera frame, not older).
+ *
+ * @ingroup drv_psvr2
+ */
+bool
+psvr2_hand_tracking_get_gestures(struct xrt_device *ht, int hand, struct t_hand_gestures *out);
+
 /*!
  * Probing function for PlayStation VR2 devices.
  *
