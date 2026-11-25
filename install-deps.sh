@@ -8,7 +8,8 @@
 #
 #   ./install-deps.sh [--hand-tracking] [--list] [--dry-run]
 #
-#   --hand-tracking  also what hand tracking needs: OpenCV and onnxruntime (Monado's Mercury hand tracker)
+#   --hand-tracking  also what hand tracking needs: OpenCV and onnxruntime (Monado's Mercury hand tracker and the
+#                    MediaPipe hand models, which come with the repository)
 #   --list           print the distribution found and the command, install nothing
 #   --dry-run        the same, after checking which packages are missing (no root needed)
 #
@@ -80,6 +81,9 @@ FED_BASE=(gcc-c++ git cmake ninja-build python3 pkgconf-pkg-config eigen3-devel 
 	gflags-devel jsoncpp-devel libX11-devel libxcb-devel libXrandr-devel wayland-devel wayland-protocols-devel
 	libdrm-devel zlib-devel patchelf libcap cargo)
 # Hand tracking. onnxruntime's development files: Arch extra, Debian 13 / Ubuntu 25.04 and newer, Fedora 43 and newer.
+# OpenCV comes as one package with its CMake files on each (opencv / libopencv-dev / opencv-devel); the driver links
+# only core, imgproc, imgcodecs, video and calib/features (build-driver.sh: XRT_OPENCV_HIGHGUI=OFF), not its GUI and
+# video I/O libraries.
 ARCH_HT=(opencv onnxruntime-cpu)
 DEB_HT=(libopencv-dev libonnxruntime-dev)
 FED_HT=(opencv-devel onnxruntime-devel)

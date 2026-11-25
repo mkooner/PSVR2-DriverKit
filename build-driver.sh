@@ -140,7 +140,7 @@ echo "STEP 2/5 configure"
 # rs2::device::get_device_time_ms() (Monado's RealSense driver calls it) the build failed.
 # With --hand-tracking, OpenCV and onnxruntime are on for Mercury (their libraries are bundled too, several hundred MB more with
 # Arch's OpenCV); the EuRoC dataset driver OpenCV would also bring in stays off.
-OFF=(-DXRT_HAVE_GST=OFF -DXRT_HAVE_SDL2=OFF
+OFF=(-DXRT_HAVE_GST=OFF -DXRT_HAVE_SDL2=OFF -DXRT_OPENCV_HIGHGUI=OFF
 	-DXRT_FEATURE_DEBUG_GUI=OFF -DXRT_FEATURE_SLAM=OFF -DXRT_FEATURE_RENDERDOC=OFF
 	-DXRT_HAVE_BLUETOOTH=OFF -DXRT_HAVE_HIDAPI=OFF -DXRT_HAVE_REALSENSE=OFF -DXRT_BUILD_DRIVER_EUROC=OFF)
 if [ "$HAND_TRACKING" = 1 ]; then

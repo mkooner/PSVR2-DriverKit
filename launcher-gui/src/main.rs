@@ -1415,10 +1415,12 @@ fn is_psvr2_driver(path: &str) -> bool {
 
 /// Libraries Steam's runtime container never takes from a driver's folder: the C runtime and the host's graphics and
 /// system libraries, which pressure-vessel brings in itself (bundle_libs.py's NEVER list).
-const HOST_LIBS: [&str; 22] = [
+// The same as bundle_libs.py's NEVER list (the plugin's build): what always comes from the system.
+const HOST_LIBS: [&str; 24] = [
     "linux-vdso.so", "ld-linux", "libc.so", "libm.so", "libmvec.so", "libdl.so", "libpthread.so", "librt.so",
     "libresolv.so", "libutil.so", "libstdc++.so", "libgcc_s.so", "libvulkan.so", "libGL", "libEGL.so", "libGLX",
-    "libGLdispatch.so", "libdrm.so", "libgbm.so", "libnvidia", "libudev.so", "libsystemd.so",
+    "libGLdispatch.so", "libOpenGL.so", "libdrm.so", "libgbm.so", "libnvidia", "libudev.so", "libsystemd.so",
+    "libdbus-1.so",
 ];
 
 /// Library names Steam's sniper runtime provides (its files/lib/x86_64-linux-gnu), from the newest sniper platform.
@@ -1470,7 +1472,10 @@ fn container_problems(plugin: &Path) -> Result<Vec<String>, String> {
             [n, "=>", p, ..] => (*n, *p),
             _ => continue,
         };
-        if HOST_LIBS.iter().any(|h| name.starts_with(h)) || runtime.contains(name) || Path::new(path).starts_with(&folder) {
+        // Bundled next to the plugin: found there inside the runtime, even when ldd on this system resolves the
+        // system's copy first (a bundled library's own RPATH can point at /usr/lib; e.g. libtiff, libpulsecommon).
+        let bundled = folder.join(name).exists();
+        if HOST_LIBS.iter().any(|h| name.starts_with(h)) || runtime.contains(name) || bundled || Path::new(path).starts_with(&folder) {
             continue;
         }
         missing.push(name.to_string());
