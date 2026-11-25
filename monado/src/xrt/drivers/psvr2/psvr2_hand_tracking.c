@@ -43,6 +43,15 @@ DEBUG_GET_ONCE_LOG_OPTION(psvr2_ht_log, "PSVR2_HT_LOG", U_LOGGING_INFO)
  * detector copes with better here.
  */
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_fov, "PSVR2_HT_FOV", 120.0f)
+/*
+ * Experiment (off by default): give Mercury the cameras' own fisheye images with their lens calibration instead of
+ * the unwarped pinhole views, as Monado's Valve Index setup (target_builder_lighthouse.c) and psvr2ht do: Mercury then
+ * undistorts each hand around itself (hg_image_distorter), where one 120 deg pinhole view stretches hands away from
+ * the centre (1.7x at 60 deg). PSVR2_HT_RAW_RADIUS: the round image boundary, a fraction of the width (the Index's
+ * 0.55).
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_ht_raw, "PSVR2_HT_RAW", false)
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_raw_radius, "PSVR2_HT_RAW_RADIUS", 0.55f)
 //! Brightening, out = 255 * (in/255)^gamma. 0.5 was best of 0.35-1 on the recordings (frames average ~25/255).
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_gamma, "PSVR2_HT_GAMMA", 0.5f)
 /*!
@@ -59,12 +68,41 @@ DEBUG_GET_ONCE_BOOL_OPTION(psvr2_ht_levels, "PSVR2_HT_LEVELS", true)
  * which the hold doesn't hide). 0: off.
  */
 DEBUG_GET_ONCE_NUM_OPTION(psvr2_ht_hold_ms, "PSVR2_HT_HOLD_MS", 300)
+/*!
+ * Smoothing of the tracked hands (One Euro filter, Casiez et al. 2012): Mercury's joints come out a little different
+ * every frame. Measured on the 2026-11-23 recordings (driver_ht_replay + psvr2-test/hands analysis): on still hands
+ * the palm's orientation wobbled 1-2 deg RMS and the index fingertip 2.2-3.0 mm (median), 6-10 mm (p95), 90 times a
+ * second: the shaky hands. The filter smooths strongly when the hand is slow and less when it moves fast. Simulated on
+ * the same data with these defaults: fingertip wobble 0.8-1.2 mm (median), 2.6-3.4 mm (p95), ~18 ms behind while
+ * moving. It runs on the palm's pose in the room (head turns are not hand motion) and on every joint relative to the
+ * palm. PSVR2_HT_FILTER=0: off. MIN_CUTOFF: Hz when still; BETA: how fast the cutoff rises with speed (per m/s for
+ * positions, per rad/s for rotations); the fingers use twice MIN_CUTOFF.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_ht_filter, "PSVR2_HT_FILTER", true)
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_filter_min_cutoff, "PSVR2_HT_FILTER_MIN_CUTOFF", 1.5f)
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_filter_beta_pos, "PSVR2_HT_FILTER_BETA_POS", 2.0f)
+DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_filter_beta_rot, "PSVR2_HT_FILTER_BETA_ROT", 1.0f)
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_levels_lo, "PSVR2_HT_LEVELS_LO", 0.01f)
 DEBUG_GET_ONCE_FLOAT_OPTION(psvr2_ht_levels_hi, "PSVR2_HT_LEVELS_HI", 0.95f)
 //! Unwarped image size (square).
 DEBUG_GET_ONCE_NUM_OPTION(psvr2_ht_size, "PSVR2_HT_SIZE", 640)
 //! Offline diagnosis: a folder to save every 30th pair of images Mercury gets (raw and unwarped, PGM). Off when unset.
 DEBUG_GET_ONCE_OPTION(psvr2_ht_dump, "PSVR2_HT_DUMP", NULL)
+/*
+ * Training data for the gesture classifier (offline): a folder to write, for every camera frame, a CROP_SIZE x
+ * CROP_SIZE grayscale crop around each tracked hand in each unwarped view (crops.bin; records of CropRecord then the
+ * pixels). The hand is placed from its latest joints (Mercury's, as the SteamVR plugin gets them) projected into the
+ * view. Off when unset.
+ */
+DEBUG_GET_ONCE_OPTION(psvr2_ht_crops, "PSVR2_HT_CROPS", NULL)
+/*
+ * PSVR2_HT_CROPS_UPRIGHT=1: the crop is turned so the wrist-to-middle-finger direction points up and sized from that
+ * length (MediaPipe's hand landmark model expects hands so: its palm-to-hand box, 2.6x the palm), PSVR2_HT_CROP_SIZE
+ * pixels square (default CROP_SIZE); every PSVR2_HT_CROP_EVERY-th frame.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(psvr2_ht_crops_upright, "PSVR2_HT_CROPS_UPRIGHT", false)
+DEBUG_GET_ONCE_NUM_OPTION(psvr2_ht_crop_size, "PSVR2_HT_CROP_SIZE", 48)
+DEBUG_GET_ONCE_NUM_OPTION(psvr2_ht_crop_every, "PSVR2_HT_CROP_EVERY", 1)
 
 
 #define HT_TRACE(h, ...) U_LOG_IFL_T(h->log_level, __VA_ARGS__)
@@ -81,6 +119,86 @@ DEBUG_GET_ONCE_OPTION(psvr2_ht_dump, "PSVR2_HT_DUMP", NULL)
 #define CAM_STRIDE 1024
 #define CAM_IMAGE_BYTES (CAM_STRIDE * CAM_H / 2)
 #define CAM_TRANSFER_BYTES (CAM_HEADER + 2 * CAM_IMAGE_BYTES)
+
+/*
+ *
+ * Smoothing (One Euro filter).
+ *
+ */
+
+//! One value's filter state: the filtered value and its filtered speed.
+struct ht_oe
+{
+	bool init;
+	struct xrt_vec3 pos;
+	struct xrt_quat rot;
+	float speed_pos, speed_rot; //!< filtered speeds, m/s and rad/s
+};
+
+struct ht_hand_filter
+{
+	int64_t last_ns; //!< timestamp of the last filtered result (0: no state)
+	struct ht_oe palm;
+	struct ht_oe joint[XRT_HAND_JOINT_COUNT];
+};
+
+//! The smoothing factor for cutoff @p cutoff (Hz) over @p dt (s).
+static inline float
+ht_oe_alpha(float cutoff, float dt)
+{
+	const float r = 2.0f * (float)M_PI * cutoff * dt;
+	return r / (r + 1.0f);
+}
+
+//! The speed's own filter has a fixed 1 Hz cutoff, as in the paper.
+static void
+ht_oe_step(struct ht_oe *f, const struct xrt_pose *in, float dt, float min_cutoff, float beta_pos, float beta_rot)
+{
+	if (!f->init) {
+		f->init = true;
+		f->pos = in->position;
+		f->rot = in->orientation;
+		f->speed_pos = f->speed_rot = 0.0f;
+		return;
+	}
+	// Position.
+	struct xrt_vec3 d = m_vec3_sub(in->position, f->pos);
+	const float lin_speed = m_vec3_len(d) / dt;
+	// Rotation: the angle between the filtered and the new orientation.
+	struct xrt_quat q = in->orientation;
+	float dot = f->rot.x * q.x + f->rot.y * q.y + f->rot.z * q.z + f->rot.w * q.w;
+	if (dot < 0.0f) {
+		q.x = -q.x, q.y = -q.y, q.z = -q.z, q.w = -q.w;
+		dot = -dot;
+	}
+	const float ang_speed = 2.0f * acosf(fminf(1.0f, dot)) / dt;
+	// Position and rotation are filtered separately, each with its own speed and beta.
+	f->speed_pos += ht_oe_alpha(1.0f, dt) * (lin_speed - f->speed_pos);
+	f->speed_rot += ht_oe_alpha(1.0f, dt) * (ang_speed - f->speed_rot);
+	const float a_pos = ht_oe_alpha(min_cutoff + beta_pos * f->speed_pos, dt);
+	const float a_rot = ht_oe_alpha(min_cutoff + beta_rot * f->speed_rot, dt);
+	f->pos = m_vec3_add(f->pos, m_vec3_mul_scalar(d, a_pos));
+	struct xrt_quat out;
+	math_quat_slerp(&f->rot, &q, a_rot, &out);
+	math_quat_normalize(&out);
+	f->rot = out;
+}
+
+//! Side of a gesture crop (pixels).
+#define CROP_SIZE 48
+
+//! One gesture crop in crops.bin (PSVR2_HT_CROPS), followed by CROP_SIZE * CROP_SIZE bytes.
+struct crop_record
+{
+	int64_t frame_ns;  //!< the camera frame's timestamp
+	int64_t joints_ns; //!< the joints' timestamp the crop was placed with
+	uint8_t hand;      //!< 0 left, 1 right
+	uint8_t view;      //!< 0, 1: the camera
+	uint16_t box;      //!< the square box's side in the unwarped view (pixels), before the resize
+	int16_t x0, y0;    //!< its top left corner (upright crops: its centre)
+	uint16_t size;     //!< the crop's side (pixels)
+	float angle;       //!< upright crops: the turn applied (radians), else 0
+} __attribute__((packed));
 
 struct psvr2_hand_tracking
 {
@@ -124,12 +242,23 @@ struct psvr2_hand_tracking
 	//! Under pose_lock: each hand's last found joints (room space) and when, for the short hold (PSVR2_HT_HOLD_MS).
 	struct xrt_hand_joint_set last_found[2];
 	int64_t last_found_ns[2];
+	//! Gestures (psvr2_hand_tracking_get_gestures): Mercury (NULL until running), whether the latest query found
+	//! each hand (not held), and the newest camera frame's timestamp given to Mercury (all under pose_lock).
+	struct t_hand_tracking_sync *sync;
+	bool found_now[2];
+	int64_t newest_frame_ns;
 	struct xrt_vec3 stats_wrist_head[2], stats_wrist_world[2]; // last seen
+	//! Under pose_lock: each hand's smoothing state (PSVR2_HT_FILTER).
+	struct ht_hand_filter filter[2];
 
 	// Read by get_hand_tracking.
 	struct os_mutex pose_lock;
 	struct xrt_pose cam0_in_head;
+	struct xrt_pose cam1_in_head;
 	volatile bool running;
+	//! Worker thread: PSVR2_HT_CROPS output (NULL: off) and the unwarped views' focal length (pixels).
+	FILE *crops;
+	float view_f;
 	/*!
 	 * Whether hands are wanted now (psvr2_hand_tracking_set_active): only then are the bottom cameras asked for and
 	 * their frames processed. Under the worker's lock.
@@ -179,7 +308,8 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 {
 	float fov = debug_get_float_option_psvr2_ht_fov();
 	float gamma = debug_get_float_option_psvr2_ht_gamma();
-	int n = (int)debug_get_num_option_psvr2_ht_size();
+	const bool raw = debug_get_bool_option_psvr2_ht_raw();
+	int n = raw ? CAM_W : (int)debug_get_num_option_psvr2_ht_size();
 	h->out_size = n;
 	h->gamma = gamma;
 	for (int i = 0; i < 256; i++) {
@@ -188,17 +318,34 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 	memcpy(h->view_lut[0], h->lut, sizeof(h->lut));
 	memcpy(h->view_lut[1], h->lut, sizeof(h->lut));
 	for (int v = 0; v < 2; v++) {
-		build_unwarp(h, v, &cams[v], fov, n);
+		if (raw) {
+			// One to one: the camera's own pixels (the last row and column stay out, the sampling reads x+1, y+1).
+			h->map_x[v] = U_TYPED_ARRAY_CALLOC(float, (size_t)n * n);
+			h->map_y[v] = U_TYPED_ARRAY_CALLOC(float, (size_t)n * n);
+			for (int y = 0; y < n; y++) {
+				for (int x = 0; x < n; x++) {
+					const bool in = x < CAM_W - 1 && y < CAM_H - 1;
+					h->map_x[v][(size_t)y * n + x] = in ? (float)x : -1.0f;
+					h->map_y[v][(size_t)y * n + x] = in ? (float)y : -1.0f;
+				}
+			}
+		} else {
+			build_unwarp(h, v, &cams[v], fov, n);
+		}
 		h->decoded[v] = U_TYPED_ARRAY_CALLOC(uint8_t, (size_t)CAM_W * CAM_H);
 	}
 
 	// Mercury sees two distortion-free pinhole cameras (RT8 with zero coefficients) with the physical cameras' axes,
 	// so the stereo extrinsics are the physical ones: x_cam1 = R x_cam0 + T in OpenCV camera axes.
 	struct t_stereo_camera_calibration *stereo = NULL;
-	t_stereo_camera_calibration_alloc(&stereo, T_DISTORTION_OPENCV_RADTAN_8);
+	t_stereo_camera_calibration_alloc(&stereo, raw ? cams[0].distortion_model : T_DISTORTION_OPENCV_RADTAN_8);
 	float f = (n / 2.0f) / tanf(fov * (float)M_PI / 360.0f);
 	for (int v = 0; v < 2; v++) {
 		struct t_camera_calibration *cc = &stereo->view[v];
+		if (raw) {
+			*cc = cams[v]; // the camera's own intrinsics and lens model, on its own 1016x1016 image
+			continue;
+		}
 		cc->image_size_pixels.w = (uint32_t)n;
 		cc->image_size_pixels.h = (uint32_t)n;
 		cc->distortion_model = T_DISTORTION_OPENCV_RADTAN_8;
@@ -225,6 +372,12 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 	stereo->camera_translation[2] = F[2] * c1_c0.position.z;
 	HT_INFO(h, "Hand tracking cameras: baseline %.1f mm; unwarped %dx%d, %.0f deg, gamma %.2f",
 	        m_vec3_len(c1_c0.position) * 1000.0f, n, n, fov, gamma);
+	HT_INFO(h, "Hand tracking stereo (OpenCV axes, x_cam1 = R x_cam0 + T): R [%.5f %.5f %.5f; %.5f %.5f %.5f; %.5f %.5f %.5f] "
+	        "T [%.4f %.4f %.4f] m",
+	        stereo->camera_rotation[0][0], stereo->camera_rotation[0][1], stereo->camera_rotation[0][2],
+	        stereo->camera_rotation[1][0], stereo->camera_rotation[1][1], stereo->camera_rotation[1][2],
+	        stereo->camera_rotation[2][0], stereo->camera_rotation[2][1], stereo->camera_rotation[2][2],
+	        stereo->camera_translation[0], stereo->camera_translation[1], stereo->camera_translation[2]);
 
 	char models[1024] = {0};
 	if (u_file_get_hand_tracking_models_dir(models, sizeof(models)) < 0) {
@@ -237,6 +390,16 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 	for (int v = 0; v < 2; v++) {
 		info.cams_info.views[v].boundary_type = HT_IMAGE_BOUNDARY_NONE; // unwarped views are filled edge to edge
 		info.cams_info.views[v].camera_orientation = CAMERA_ORIENTATION_0;
+		if (raw) {
+			info.cams_info.views[v].boundary_type = HT_IMAGE_BOUNDARY_CIRCLE;
+			info.cams_info.views[v].boundary.circle.normalized_center.x = 0.5f;
+			info.cams_info.views[v].boundary.circle.normalized_center.y = 0.5f;
+			info.cams_info.views[v].boundary.circle.normalized_radius = debug_get_float_option_psvr2_ht_raw_radius();
+		}
+	}
+	if (raw) {
+		HT_INFO(h, "Hand tracking: the cameras' own fisheye images (PSVR2_HT_RAW), boundary radius %.2f",
+		        debug_get_float_option_psvr2_ht_raw_radius());
 	}
 	/*
 	 * Start hands from one confident camera: with the mean of both views (Mercury's default), the left camera's
@@ -276,6 +439,25 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 	 */
 	setenv("MERCURY_DETECTION_TILES", "3", 0);
 	setenv("MERCURY_DETECTION_TILES_PER_FRAME", "9", 0);
+	/*
+	 * MediaPipe's hand landmark model reads the fingers (and its Gesture Recognizer the gestures) when its model is
+	 * installed next to Mercury's: on the 2026-11-24 headset sessions pinch went from almost never registering to
+	 * 3-4 of 6 prompts per hand, fist to 2 of 2, and with the cameras well lit both hands tracked 90%+. Without
+	 * hand_landmarks_detector.onnx Mercury's own model as before (MediaPipe on without it would stop Mercury from
+	 * starting). MERCURY_MEDIAPIPE=0 / MERCURY_MEDIAPIPE_GESTURES=0 turn them off.
+	 */
+	{
+		char mp[1100];
+		snprintf(mp, sizeof(mp), "%s/hand_landmarks_detector.onnx", models);
+		FILE *probe = fopen(mp, "rb");
+		if (probe != NULL) {
+			fclose(probe);
+			setenv("MERCURY_MEDIAPIPE", "1", 0);
+			setenv("MERCURY_MEDIAPIPE_GESTURES", "1", 0);
+		} else if (getenv("MERCURY_MEDIAPIPE") == NULL) {
+			HT_INFO(h, "MediaPipe's hand landmark model isn't installed (%s): Mercury's own finger model", mp);
+		}
+	}
 	struct t_hand_tracking_sync *sync = t_hand_tracking_sync_mercury_create(stereo, info, models);
 	t_stereo_camera_calibration_reference(&stereo, NULL);
 	if (sync == NULL) {
@@ -283,10 +465,23 @@ start_mercury(struct psvr2_hand_tracking *h, const struct t_camera_calibration c
 		return;
 	}
 	h->async = t_hand_tracking_async_default_create(&h->xfctx, sync);
+	os_mutex_lock(&h->pose_lock);
+	h->sync = sync;
+	os_mutex_unlock(&h->pose_lock);
 
 	os_mutex_lock(&h->pose_lock);
 	h->cam0_in_head = poses[0];
+	h->cam1_in_head = poses[1];
 	os_mutex_unlock(&h->pose_lock);
+	h->view_f = f;
+	const char *crops = debug_get_option_psvr2_ht_crops();
+	if (crops != NULL && !raw) {
+		char path[1024];
+		snprintf(path, sizeof(path), "%s/crops.bin", crops);
+		h->crops = fopen(path, "wb");
+		HT_INFO(h, "Gesture crops (%dx%d per hand and view) to %s%s", CROP_SIZE, CROP_SIZE, path,
+		        h->crops != NULL ? "" : ": can't write");
+	}
 	h->running = true;
 	HT_INFO(h, "Hand tracking running");
 }
@@ -389,6 +584,107 @@ update_levels(struct psvr2_hand_tracking *h, int v)
 	}
 }
 
+/*!
+ * PSVR2_HT_CROPS: a crop around each tracked hand in each unwarped view (worker thread). The hand is placed from its
+ * latest joints (room space, as get_hand_tracking hands them out), brought into each camera with the head pose at
+ * their time and projected with the views' pinhole model; the square box around the joints grows by a third and is
+ * resized to CROP_SIZE.
+ */
+static void
+write_crops(struct psvr2_hand_tracking *h, struct xrt_frame *const views[2], int64_t frame_ns)
+{
+	if (h->crops == NULL || (h->processed % (uint64_t)debug_get_num_option_psvr2_ht_crop_every()) != 0) {
+		return;
+	}
+	for (int hand = 0; hand < 2; hand++) {
+		struct xrt_hand_joint_set set;
+		int64_t joints_ns;
+		struct xrt_pose cam_in_head[2];
+		os_mutex_lock(&h->pose_lock);
+		set = h->last_found[hand];
+		joints_ns = h->last_found_ns[hand];
+		cam_in_head[0] = h->cam0_in_head;
+		cam_in_head[1] = h->cam1_in_head;
+		os_mutex_unlock(&h->pose_lock);
+		// Only joints from within ~2 frames of this one (a found hand, not a stale or held one).
+		if (joints_ns == 0 || !set.is_active || llabs(frame_ns - joints_ns) > 40 * U_TIME_1MS_IN_NS) {
+			continue;
+		}
+		struct xrt_space_relation head = XRT_SPACE_RELATION_ZERO;
+		if (xrt_device_get_tracked_pose(h->head, XRT_INPUT_GENERIC_HEAD_POSE, joints_ns, &head) != XRT_SUCCESS) {
+			continue;
+		}
+		struct xrt_pose head_inv;
+		math_pose_invert(&head.pose, &head_inv);
+		for (int v = 0; v < 2; v++) {
+			struct xrt_frame *img = views[v];
+			const int n = (int)img->width;
+			struct xrt_pose cam_inv;
+			math_pose_invert(&cam_in_head[v], &cam_inv);
+			float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+			float proj[XRT_HAND_JOINT_COUNT][2] = {{0}};
+			int behind = 0;
+			for (int j = 0; j < XRT_HAND_JOINT_COUNT; j++) {
+				struct xrt_pose room, in_head, in_cam;
+				math_pose_transform(&set.hand_pose.pose, &set.values.hand_joint_set_default[j].relation.pose, &room);
+				math_pose_transform(&head_inv, &room, &in_head);
+				math_pose_transform(&cam_inv, &in_head, &in_cam);
+				const struct xrt_vec3 p = in_cam.position; // OpenXR camera axes: x right, y up, -z forward
+				if (p.z > -0.05f) {
+					behind++;
+					continue;
+				}
+				const float u = n / 2.0f + h->view_f * p.x / -p.z;
+				const float w = n / 2.0f + h->view_f * p.y / p.z;
+				minx = fminf(minx, u), maxx = fmaxf(maxx, u), miny = fminf(miny, w), maxy = fmaxf(maxy, w);
+				proj[j][0] = u, proj[j][1] = w;
+			}
+			if (behind > 0) {
+				continue;
+			}
+			const int size = (int)debug_get_num_option_psvr2_ht_crop_size();
+			const bool upright = debug_get_bool_option_psvr2_ht_crops_upright();
+			float cx = (minx + maxx) / 2.0f, cy = (miny + maxy) / 2.0f;
+			float side = fmaxf(maxx - minx, maxy - miny) * 1.33f;
+			float angle = 0.0f;
+			if (upright) {
+				// wrist (1) to the middle finger's proximal joint (12): up in the crop; box 2.6x that length (MediaPipe).
+				const float dx = proj[12][0] - proj[1][0], dy = proj[12][1] - proj[1][1];
+				const float len = sqrtf(dx * dx + dy * dy);
+				angle = atan2f(dx, -dy); // 0 when the hand points up in the view
+				side = len * 2.6f;
+				cx = (proj[1][0] + proj[12][0]) / 2.0f - 0.25f * dx; // MediaPipe shifts the box toward the fingers
+				cy = (proj[1][1] + proj[12][1]) / 2.0f - 0.25f * dy;
+				cx += 0.5f * dx, cy += 0.5f * dy;
+			}
+			const int box = (int)lroundf(side);
+			if (box < 16 || cx - side / 2 < 0 || cy - side / 2 < 0 || cx + side / 2 >= n - 1 || cy + side / 2 >= n - 1) {
+				continue; // too small or partly out of the view
+			}
+			uint8_t *pix = (uint8_t *)malloc((size_t)size * size);
+			const float ca = cosf(angle), sa = sinf(angle);
+			for (int y = 0; y < size; y++) {
+				for (int x = 0; x < size; x++) {
+					const float u = ((x + 0.5f) / size - 0.5f) * side, w = ((y + 0.5f) / size - 0.5f) * side;
+					const float sx = cx + ca * u - sa * w, sy = cy + sa * u + ca * w;
+					const int ix = (int)sx, iy = (int)sy;
+					const float fx = sx - ix, fy = sy - iy;
+					const uint8_t *r0 = img->data + (size_t)iy * img->stride + ix;
+					const uint8_t *r1 = r0 + img->stride;
+					const float top = r0[0] + (r0[1] - r0[0]) * fx, bot = r1[0] + (r1[1] - r1[0]) * fx;
+					pix[y * size + x] = (uint8_t)(top + (bot - top) * fy + 0.5f);
+				}
+			}
+			struct crop_record rec = {frame_ns, joints_ns, (uint8_t)hand, (uint8_t)v, (uint16_t)box,
+			                          (int16_t)lroundf(upright ? cx : cx - side / 2), (int16_t)lroundf(upright ? cy : cy - side / 2),
+			                          (uint16_t)size, angle};
+			fwrite(&rec, sizeof(rec), 1, h->crops);
+			fwrite(pix, 1, (size_t)size * size, h->crops);
+			free(pix);
+		}
+	}
+}
+
 static void
 decode_and_push(struct psvr2_hand_tracking *h, const uint8_t *transfer, int64_t ts)
 {
@@ -457,6 +753,10 @@ decode_and_push(struct psvr2_hand_tracking *h, const uint8_t *transfer, int64_t 
 			}
 		}
 	}
+	write_crops(h, out, ts);
+	os_mutex_lock(&h->pose_lock);
+	h->newest_frame_ns = ts;
+	os_mutex_unlock(&h->pose_lock);
 	// The async helper runs Mercury on its own thread once it has both views (same timestamp).
 	xrt_sink_push_frame(&h->async->left, out[0]);
 	xrt_sink_push_frame(&h->async->right, out[1]);
@@ -520,6 +820,60 @@ worker_thread(void *ptr)
  *
  */
 
+/*!
+ * Smooths one found hand in place (under pose_lock): the palm's pose in the room, then each joint relative to the
+ * palm; the result has the filtered palm as the hand pose and the joints relative to it. A query within one display
+ * refresh of the last step (or for an older time) gets that result again (several threads ask for each hand, the
+ * SteamVR plugin's pose thread every 1 ms; the filter steps forward once per refresh). After a loss up to the hold time the filter carries on from where it was, with its step capped at one
+ * 30 Hz frame, so the hand slides to its new place instead of snapping there; after a longer loss it starts afresh.
+ */
+static void
+smooth_hand(struct psvr2_hand_tracking *h, int hand, struct xrt_hand_joint_set *set, int64_t ts)
+{
+	struct ht_hand_filter *f = &h->filter[hand];
+	const int64_t hold_ns = (int64_t)debug_get_num_option_psvr2_ht_hold_ms() * U_TIME_1MS_IN_NS;
+	/*
+	 * One step per display refresh at most. The SteamVR plugin asks for each hand every 1 ms (its pose thread) while
+	 * Mercury delivers ~60 results a second: stepped on every query, each new result arrived as a jump within 1 ms,
+	 * the speed estimate saw that as a very fast hand and opened the filter fully. Measured on the same data (replay
+	 * of camera-20261123-204915 queried every 1 ms): palm orientation wobble 0.82 deg raw, 0.78 stepped per query,
+	 * 0.48 stepped per refresh; index tip 2.9 / 1.7 / 1.0 mm (medians). Queries in between get the last result.
+	 */
+	if (f->last_ns != 0 && ts - f->last_ns < 11 * U_TIME_1MS_IN_NS) {
+		*set = h->last_found[hand];
+		return;
+	}
+	if (f->last_ns != 0 && ts - f->last_ns > hold_ns + 100 * U_TIME_1MS_IN_NS) {
+		memset(f, 0, sizeof(*f));
+	}
+	float dt = f->last_ns != 0 ? (float)(ts - f->last_ns) / 1e9f : 1.0f / 90.0f;
+	dt = fminf(fmaxf(dt, 0.001f), 1.0f / 30.0f);
+	f->last_ns = ts;
+
+	const float min_cutoff = debug_get_float_option_psvr2_ht_filter_min_cutoff();
+	const float beta_pos = debug_get_float_option_psvr2_ht_filter_beta_pos();
+	const float beta_rot = debug_get_float_option_psvr2_ht_filter_beta_rot();
+
+	// Every joint in the room, then relative to the raw palm.
+	struct xrt_pose world[XRT_HAND_JOINT_COUNT];
+	for (int j = 0; j < XRT_HAND_JOINT_COUNT; j++) {
+		math_pose_transform(&set->hand_pose.pose, &set->values.hand_joint_set_default[j].relation.pose, &world[j]);
+	}
+	struct xrt_pose palm_inv;
+	math_pose_invert(&world[XRT_HAND_JOINT_PALM], &palm_inv);
+
+	ht_oe_step(&f->palm, &world[XRT_HAND_JOINT_PALM], dt, min_cutoff, beta_pos, beta_rot);
+	const struct xrt_pose palm = {f->palm.rot, f->palm.pos};
+	for (int j = 0; j < XRT_HAND_JOINT_COUNT; j++) {
+		struct xrt_pose rel;
+		math_pose_transform(&palm_inv, &world[j], &rel);
+		ht_oe_step(&f->joint[j], &rel, dt, 2.0f * min_cutoff, beta_pos, beta_rot);
+		set->values.hand_joint_set_default[j].relation.pose.position = f->joint[j].pos;
+		set->values.hand_joint_set_default[j].relation.pose.orientation = f->joint[j].rot;
+	}
+	set->hand_pose.pose = palm;
+}
+
 static xrt_result_t
 psvr2_ht_get_hand_tracking(struct xrt_device *xdev,
                            enum xrt_input_name name,
@@ -567,6 +921,9 @@ psvr2_ht_get_hand_tracking(struct xrt_device *xdev,
 
 	int hand = name == XRT_INPUT_HT_UNOBSTRUCTED_RIGHT ? 1 : 0;
 	h->async->get_hand(h->async, name, at_timestamp_ns, out_value, out_timestamp_ns);
+	os_mutex_lock(&h->pose_lock);
+	h->found_now[hand] = out_value->is_active;
+	os_mutex_unlock(&h->pose_lock);
 	if (!out_value->is_active) {
 		const int64_t hold_ns = (int64_t)debug_get_num_option_psvr2_ht_hold_ms() * U_TIME_1MS_IN_NS;
 		os_mutex_lock(&h->pose_lock);
@@ -624,10 +981,40 @@ psvr2_ht_get_hand_tracking(struct xrt_device *xdev,
 	                                     XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
 	                                     XRT_SPACE_RELATION_POSITION_TRACKED_BIT));
 	os_mutex_lock(&h->pose_lock);
+	if (debug_get_bool_option_psvr2_ht_filter()) {
+		smooth_hand(h, hand, out_value, *out_timestamp_ns);
+	}
 	h->last_found[hand] = *out_value;
 	h->last_found_ns[hand] = *out_timestamp_ns;
 	os_mutex_unlock(&h->pose_lock);
 	return XRT_SUCCESS;
+}
+
+bool
+psvr2_hand_tracking_get_gestures(struct xrt_device *ht, int hand, struct t_hand_gestures *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (ht == NULL || hand < 0 || hand > 1) {
+		return false;
+	}
+	struct psvr2_hand_tracking *h = psvr2_ht(ht);
+	// Mercury is read under pose_lock: destroy clears h->sync under it before Mercury goes away.
+	os_mutex_lock(&h->pose_lock);
+	const bool have = h->sync != NULL && t_hand_tracking_sync_mercury_get_gestures(h->sync, hand, out);
+	const bool found = h->found_now[hand];
+	const int64_t newest = h->newest_frame_ns;
+	os_mutex_unlock(&h->pose_lock);
+	if (!have) {
+		return false;
+	}
+	os_thread_helper_lock(&h->worker);
+	const bool active = h->active && h->running;
+	os_thread_helper_unlock(&h->worker);
+	// Only for a hand found now (not held or lost), measured on a recent frame: Mercury runs a frame or two behind
+	// the newest camera frame; older than 100 ms means it fell behind or the hand's result is old.
+	const bool fresh = newest != 0 && out->timestamp_ns != 0 && newest - out->timestamp_ns <= 100 * U_TIME_1MS_IN_NS;
+	out->valid = out->valid && active && found && fresh;
+	return true;
 }
 
 static void
@@ -637,7 +1024,14 @@ psvr2_ht_destroy(struct xrt_device *xdev)
 
 	os_thread_helper_destroy(&h->worker); // stops and joins
 	h->running = false;
+	os_mutex_lock(&h->pose_lock);
+	h->sync = NULL; // no gesture reads from here on
+	os_mutex_unlock(&h->pose_lock);
 	xrt_frame_context_destroy_nodes(&h->xfctx); // the async helper and Mercury
+	if (h->crops != NULL) {
+		fclose(h->crops);
+		h->crops = NULL;
+	}
 	os_mutex_destroy(&h->pose_lock);
 	HT_INFO(h, "Hand tracking stopped: %llu of %llu offered frames processed", (unsigned long long)h->processed,
 	        (unsigned long long)h->offered);
