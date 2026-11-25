@@ -190,6 +190,15 @@ bool
 psvr2_hand_tracking_get_gestures(struct xrt_device *ht, int hand, struct t_hand_gestures *out);
 
 /*!
+ * The hand tracking profile in use ("mercury": Mercury's model builds the 3D hand; "mediapipe": MediaPipe's
+ * landmarks do), or NULL before the tracker runs. Each profile has its own settings, tuned separately.
+ *
+ * @ingroup drv_psvr2
+ */
+const char *
+psvr2_hand_tracking_get_profile(struct xrt_device *ht);
+
+/*!
  * Probing function for PlayStation VR2 devices.
  *
  * @ingroup drv_psvr2

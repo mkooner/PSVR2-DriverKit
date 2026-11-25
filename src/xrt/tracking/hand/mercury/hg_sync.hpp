@@ -43,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <atomic>
 #include <stdint.h>
 
 #include <opencv2/opencv.hpp>
@@ -343,6 +344,10 @@ public:
 	struct t_hand_gestures gestures_pending[2] = {}; //!< this frame's, before the hand's outcome is known
 	std::mutex gestures_mutex;                       //!< guards gestures_out (read by other threads)
 	struct t_hand_gestures gestures_out[2] = {};
+	//! Why each hand was or wasn't tracked (t_hand_tracking_sync_mercury_take_loss_stats); guarded by gestures_mutex.
+	struct t_hand_loss_stats loss_stats[2] = {};
+	//! Views MediaPipe didn't take as a hand this frame (keypoint workers count, the frame step moves them over).
+	std::atomic<uint32_t> mp_rejected_views[2] = {};
 
 	int detection_counter = 0;
 

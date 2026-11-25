@@ -33,6 +33,14 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 bool
 t_hand_tracking_sync_mercury_get_gestures(struct t_hand_tracking_sync *ht_sync, int hand, struct t_hand_gestures *out);
 
+/*!
+ * Takes @p hand's loss counters (struct t_hand_loss_stats) since the last call, any thread, and clears them.
+ */
+bool
+t_hand_tracking_sync_mercury_take_loss_stats(struct t_hand_tracking_sync *ht_sync,
+                                             int hand,
+                                             struct t_hand_loss_stats *out);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

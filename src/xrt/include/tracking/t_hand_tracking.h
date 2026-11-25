@@ -145,6 +145,28 @@ struct t_hand_gestures
 };
 
 /*!
+ * Why one hand was or wasn't tracked, counted per camera frame since the last read (a hand tracker that keeps them,
+ * e.g. Mercury): to tell a hand that was seen and rejected from one that was never found.
+ */
+struct t_hand_loss_stats
+{
+	uint32_t frames;       //!< camera frames processed
+	uint32_t tracked;      //!< frames the hand was tracked
+	uint32_t not_detected; //!< not tracked: the hand detector found nothing
+	uint32_t no_region;    //!< not tracked: tracked before, its predicted place left both views
+	uint32_t outside_view; //!< not tracked: the predicted hand fell outside the views
+	uint32_t keypoint;     //!< not tracked: found, then rejected by the keypoint model(s) in every view
+	uint32_t reprojection; //!< not tracked: the 3D hand didn't match the keypoints
+	uint32_t too_far;      //!< not tracked: the 3D hand was implausibly far away
+	uint32_t overlap;      //!< not tracked: both hands overlapped
+	uint32_t other;        //!< not tracked: another reason
+	//! Keypoint rejections by the best "is a hand" score of Mercury's model among the views: <0.90, 0.90-0.96,
+	//! 0.96-0.98, >=0.98 (rejected for another reason, e.g. MediaPipe's presence).
+	uint32_t keypoint_score[4];
+	uint32_t mediapipe_rejected_views; //!< views MediaPipe's landmark model didn't take as a hand (Mercury's then ran)
+};
+
+/*!
  * Synchronously processes frames and returns two hands.
  */
 struct t_hand_tracking_sync

@@ -1104,6 +1104,10 @@ run_keypoint_estimation_mediapipe(keypoint_estimation_run_info &info)
 
 	HG_TRACE(hgt, "mediapipe presence view %d hand %d: %f", view_idx, hand_idx, present);
 	this_output.active = present >= hgt->tuneable_values.mediapipe_presence;
+	if (!this_output.active) {
+		hgt->mp_rejected_views[hand_idx]++;
+	}
+	this_output.hand_score = 1.0f; // MediaPipe's presence decides its views (keypoint_hand_confidence is Mercury's)
 
 	// No finger curls from this model: a variance so large the fitting ignores them.
 	for (int i = 0; i < 5; i++) {
@@ -1149,10 +1153,13 @@ run_keypoint_estimation_unsafe(keypoint_estimation_run_info &info)
 	// When MediaPipe doesn't see a hand in a tracked crop, Mercury's model gets the same frame: a hand MediaPipe
 	// doubts in one frame (faint, at a camera's edge) was otherwise lost whole and slow to be found again (offline:
 	// left hand 152 such losses vs 34 with Mercury's model alone).
+	// With mediapipe_fit off, MediaPipe's run only feeds the gestures (mp_outputs) and Mercury's model below always
+	// gives the keypoints for the 3D hand.
 	if (info.view->hgt->tuneable_values.mediapipe_keypoints &&
 	    info.view->regions_of_interest_this_frame[info.hand_idx].provenance != ROIProvenance::HAND_DETECTION) {
 		run_keypoint_estimation_mediapipe(info);
-		if (info.view->hgt->keypoint_outputs[info.hand_idx].views[info.view->view].active) {
+		if (info.view->hgt->tuneable_values.mediapipe_fit &&
+		    info.view->hgt->keypoint_outputs[info.hand_idx].views[info.view->view].active) {
 			return;
 		}
 	}
@@ -1391,6 +1398,7 @@ run_keypoint_estimation_unsafe(keypoint_estimation_run_info &info)
 	// Index was fine with 0.99.
 	// North Star seemed to need 0.97.
 	HG_TRACE(hgt, "is_hand view %d hand %d: %f", view_idx, (int)info.hand_idx, is_hand_explicit);
+	this_output.hand_score = is_hand_explicit;
 	if (is_hand_explicit < hgt->tuneable_values.keypoint_hand_confidence) {
 		HG_DEBUG(hgt, "Not hand! %f", is_hand_explicit);
 		is_hand = false;

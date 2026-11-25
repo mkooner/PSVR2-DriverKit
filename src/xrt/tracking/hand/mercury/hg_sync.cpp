@@ -48,6 +48,11 @@ DEBUG_GET_ONCE_FLOAT_OPTION(mercury_mediapipe_presence, "MERCURY_MEDIAPIPE_PRESE
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_mediapipe_xy_conf, "MERCURY_MEDIAPIPE_XY_CONF", 1.0)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_mediapipe_depth_conf, "MERCURY_MEDIAPIPE_DEPTH_CONF", 0.0)
 DEBUG_GET_ONCE_BOOL_OPTION(mercury_mediapipe_gestures, "MERCURY_MEDIAPIPE_GESTURES", false)
+/*
+ * MediaPipe's landmarks for the 3D hand too (1, default), or for the gestures only (0: Mercury's own keypoint model
+ * builds the hand in both views). The PS VR2 driver sets it from its hand tracking profile.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(mercury_mediapipe_fit, "MERCURY_MEDIAPIPE_FIT", true)
 
 // Flags to tell state tracker that these are indeed valid joints
 static const enum xrt_space_relation_flags valid_flags_ht = (enum xrt_space_relation_flags)(
@@ -860,6 +865,8 @@ callback_process_unsafe(HandTracking *hgt,
 	// Dispatch keypoint estimator neural nets
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
 		hgt->mp_outputs[hand_idx][0].valid = hgt->mp_outputs[hand_idx][1].valid = false;
+		// Only this frame's scores count (a view with no region keeps 0).
+		hgt->keypoint_outputs[hand_idx].views[0].hand_score = hgt->keypoint_outputs[hand_idx].views[1].hand_score = 0;
 	}
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
 		for (int view_idx = 0; view_idx < 2; view_idx++) {
@@ -1124,6 +1131,41 @@ callback_process_unsafe(HandTracking *hgt,
 			         now ? "" : (hgt->frame_note[i] != NULL ? hgt->frame_note[i] : "other"));
 		}
 		HG_TRACE(hgt, "Frame %.3f: left %s, right %s", (double)hgt->current_frame_timestamp / 1e9, st[0], st[1]);
+
+		// The same outcomes, counted for the status report (t_hand_tracking_sync_mercury_take_loss_stats).
+		std::lock_guard<std::mutex> lock(hgt->gestures_mutex);
+		for (int i = 0; i < 2; i++) {
+			struct t_hand_loss_stats &ls = hgt->loss_stats[i];
+			ls.frames++;
+			ls.mediapipe_rejected_views += hgt->mp_rejected_views[i].exchange(0);
+			if (hgt->this_frame_hand_detected[i]) {
+				ls.tracked++;
+				continue;
+			}
+			const char *note = hgt->frame_note[i] != NULL ? hgt->frame_note[i] : "other";
+			if (!strcmp(note, "not-detected")) {
+				ls.not_detected++;
+			} else if (!strcmp(note, "no-region")) {
+				ls.no_region++;
+			} else if (!strcmp(note, "outside-view")) {
+				ls.outside_view++;
+			} else if (!strncmp(note, "keypoint", 8)) {
+				ls.keypoint++;
+				float best = 0.0f;
+				for (int v = 0; v < 2; v++) {
+					best = std::max(best, hgt->keypoint_outputs[i].views[v].hand_score);
+				}
+				ls.keypoint_score[best < 0.90f ? 0 : best < 0.96f ? 1 : best < 0.98f ? 2 : 3]++;
+			} else if (!strcmp(note, "reprojection")) {
+				ls.reprojection++;
+			} else if (!strcmp(note, "too-far")) {
+				ls.too_far++;
+			} else if (!strcmp(note, "hands-overlap")) {
+				ls.overlap++;
+			} else {
+				ls.other++;
+			}
+		}
 	}
 
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
@@ -1241,8 +1283,12 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	hgt->tuneable_values.mediapipe_keypoints = debug_get_bool_option_mercury_mediapipe();
 	hgt->tuneable_values.mediapipe_gestures =
 	    hgt->tuneable_values.mediapipe_keypoints && debug_get_bool_option_mercury_mediapipe_gestures();
-	if (hgt->tuneable_values.mediapipe_keypoints) {
+	hgt->tuneable_values.mediapipe_fit =
+	    hgt->tuneable_values.mediapipe_keypoints && debug_get_bool_option_mercury_mediapipe_fit();
+	if (hgt->tuneable_values.mediapipe_fit) {
 		HG_INFO(hgt, "Finger keypoints: MediaPipe's hand landmark model (hand_landmarks_detector.onnx)");
+	} else if (hgt->tuneable_values.mediapipe_keypoints) {
+		HG_INFO(hgt, "Finger keypoints: Mercury's own model in both views; MediaPipe's landmarks for the gestures only");
 	}
 
 	try {
@@ -1442,6 +1488,22 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	HG_DEBUG(hgt, "Hand Tracker initialized!");
 
 	return &hgt->base;
+}
+
+extern "C" bool
+t_hand_tracking_sync_mercury_take_loss_stats(struct t_hand_tracking_sync *ht_sync,
+                                             int hand,
+                                             struct t_hand_loss_stats *out)
+{
+	*out = {};
+	auto *hgt = reinterpret_cast<xrt::tracking::hand::mercury::HandTracking *>(ht_sync);
+	if (hgt == nullptr || hand < 0 || hand > 1) {
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(hgt->gestures_mutex);
+	*out = hgt->loss_stats[hand];
+	hgt->loss_stats[hand] = {};
+	return true;
 }
 
 extern "C" bool

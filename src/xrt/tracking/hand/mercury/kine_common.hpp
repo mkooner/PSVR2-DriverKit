@@ -43,6 +43,8 @@ struct one_curl
 struct one_frame_one_view
 {
 	bool active = true;
+	//! The keypoint model's "is a hand" score for this view (1 for a view MediaPipe accepted).
+	float hand_score = 1.0f;
 	xrt_quat look_dir;
 	float stereographic_radius;
 	MLOutput2D keypoints_in_scaled_stereographic;
