@@ -115,6 +115,10 @@ struct ht_profile
 	 * frame, CPU 0.55 -> 1.0 cores.
 	 */
 	const char *detection_tiles, *detection_tiles_per_frame;
+	//! MERCURY_DETECTION_TILE_FRACTION: each tile's side as a fraction of the view (smaller: more zoomed in).
+	const char *detection_tile_fraction;
+	//! MERCURY_DETECTION_TILE_MIN: the score a tile's detection needs to count (0: the detector's own minimum).
+	const char *detection_tile_min;
 
 	// MediaPipe's crops (MERCURY_MEDIAPIPE_*), used whenever MediaPipe runs: for the 3D hand and for the gestures.
 	const char *mediapipe_box, *mediapipe_presence, *mediapipe_xy_conf, *mediapipe_depth_conf;
@@ -151,8 +155,17 @@ static const struct ht_profile k_profile_mercury = {
     .detection_mirror_left = "1",
     .acquire_confidence = "0.55",
     .keypoint_hand_confidence = "0.98",
+    /*
+     * 3x3 tiles of 0.6 of the view, all 9 every frame while a hand is lost. 4x4 tiles of 0.4 were tried in the
+     * headset on 2026-11-25 (left hand tracked 70% / 59% of the time in use) and found more feet, shoes and floor
+     * objects as hands (benchmark replay: 40 of 59 tile pickups dropped within a second; a 0.70 tile score minimum
+     * removed 33 of them but kept only 7 of the 11 real pickups). Back on 3x3: left 88%, right 96% (16:01 session).
+     * MERCURY_DETECTION_TILE_MIN stays available (0: the detector's own minimum).
+     */
     .detection_tiles = "3",
     .detection_tiles_per_frame = "9",
+    .detection_tile_fraction = "0.6",
+    .detection_tile_min = "0",
     .mediapipe_box = "2.0",
     .mediapipe_presence = "0.5",
     .mediapipe_xy_conf = "1.0",
@@ -179,6 +192,8 @@ static const struct ht_profile k_profile_mediapipe = {
     .keypoint_hand_confidence = "0.98",
     .detection_tiles = "3",
     .detection_tiles_per_frame = "9",
+    .detection_tile_fraction = "0.6",
+    .detection_tile_min = "0",
     .mediapipe_box = "2.0",
     .mediapipe_presence = "0.5",
     .mediapipe_xy_conf = "1.0",
@@ -468,6 +483,8 @@ select_profile(struct psvr2_hand_tracking *h, const char *models)
 	setenv("MERCURY_KEYPOINT_HAND_CONFIDENCE", p.keypoint_hand_confidence, 0);
 	setenv("MERCURY_DETECTION_TILES", p.detection_tiles, 0);
 	setenv("MERCURY_DETECTION_TILES_PER_FRAME", p.detection_tiles_per_frame, 0);
+	setenv("MERCURY_DETECTION_TILE_FRACTION", p.detection_tile_fraction, 0);
+	setenv("MERCURY_DETECTION_TILE_MIN", p.detection_tile_min, 0);
 	if (mediapipe) {
 		setenv("MERCURY_MEDIAPIPE", "1", 0);
 		setenv("MERCURY_MEDIAPIPE_GESTURES", "1", 0);
@@ -483,12 +500,13 @@ select_profile(struct psvr2_hand_tracking *h, const char *models)
 	h->prof = p;
 	HT_INFO(h,
 	        "Hand tracking profile '%s': 3D hand from %s%s; view %.0f deg, gamma %.2f, levels %s %.2f-%.2f; acquire "
-	        "%s, keypoint hand %s; hold %d ms; filter %s %.2f/%.2f/%.2f",
+	        "%s, keypoint hand %s; detection tiles %sx%s of %s of the view (score >= %s); hold %d ms; filter %s %.2f/%.2f/%.2f",
 	        p.name, p.mediapipe_fit ? "MediaPipe's landmarks" : "Mercury's keypoint model",
 	        mediapipe ? (p.mediapipe_fit ? ", gestures from MediaPipe" : ", gestures from MediaPipe's landmarks")
 	                  : ", no MediaPipe",
 	        p.fov, p.gamma, p.levels ? "on" : "off", p.levels_lo, p.levels_hi, getenv("MERCURY_ACQUIRE_CONFIDENCE"),
-	        getenv("MERCURY_KEYPOINT_HAND_CONFIDENCE"), p.hold_ms, p.filter ? "on" : "off", p.filter_min_cutoff,
+	        getenv("MERCURY_KEYPOINT_HAND_CONFIDENCE"), getenv("MERCURY_DETECTION_TILES"),
+	        getenv("MERCURY_DETECTION_TILES"), getenv("MERCURY_DETECTION_TILE_FRACTION"), getenv("MERCURY_DETECTION_TILE_MIN"), p.hold_ms, p.filter ? "on" : "off", p.filter_min_cutoff,
 	        p.filter_beta_pos, p.filter_beta_rot);
 }
 

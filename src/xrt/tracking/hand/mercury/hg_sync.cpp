@@ -39,6 +39,7 @@ DEBUG_GET_ONCE_BOOL_OPTION(mercury_detection_mirror_left, "MERCURY_DETECTION_MIR
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_acquire_confidence, "MERCURY_ACQUIRE_CONFIDENCE", 0.92)
 DEBUG_GET_ONCE_NUM_OPTION(mercury_detection_tiles, "MERCURY_DETECTION_TILES", 0)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_detection_tile_fraction, "MERCURY_DETECTION_TILE_FRACTION", 0.6)
+DEBUG_GET_ONCE_FLOAT_OPTION(mercury_detection_tile_min, "MERCURY_DETECTION_TILE_MIN", 0.0)
 DEBUG_GET_ONCE_NUM_OPTION(mercury_detection_tiles_per_frame, "MERCURY_DETECTION_TILES_PER_FRAME", 1)
 DEBUG_GET_ONCE_BOOL_OPTION(mercury_detection_tile_mirror, "MERCURY_DETECTION_TILE_MIRROR", false)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_keypoint_hand_confidence, "MERCURY_KEYPOINT_HAND_CONFIDENCE", 0.97)
@@ -1171,6 +1172,11 @@ callback_process_unsafe(HandTracking *hgt,
 		}
 		HG_TRACE(hgt, "Frame %.3f: left %s, right %s", (double)hgt->current_frame_timestamp / 1e9, st[0], st[1]);
 
+		for (int i = 0; i < 2; i++) {
+			detection_log("F,%lld,%d,%d,%s\n", (long long)hgt->current_frame_timestamp, i,
+			              hgt->this_frame_hand_detected[i] ? 1 : 0,
+			              hgt->frame_note[i] != NULL ? hgt->frame_note[i] : "-");
+		}
 		// The same outcomes, counted for the status report (t_hand_tracking_sync_mercury_take_loss_stats).
 		std::lock_guard<std::mutex> lock(hgt->gestures_mutex);
 		for (int i = 0; i < 2; i++) {
@@ -1473,6 +1479,7 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	hgt->tuneable_values.acquire_confidence = debug_get_float_option_mercury_acquire_confidence();
 	hgt->tuneable_values.detection_tiles = (int)debug_get_num_option_mercury_detection_tiles();
 	hgt->tuneable_values.detection_tile_fraction = debug_get_float_option_mercury_detection_tile_fraction();
+	hgt->tuneable_values.detection_tile_min_confidence = debug_get_float_option_mercury_detection_tile_min();
 	hgt->tuneable_values.detection_tiles_per_frame = (int)debug_get_num_option_mercury_detection_tiles_per_frame();
 	hgt->tuneable_values.detection_tile_mirror = debug_get_bool_option_mercury_detection_tile_mirror();
 	hgt->tuneable_values.keypoint_hand_confidence = debug_get_float_option_mercury_keypoint_hand_confidence();
