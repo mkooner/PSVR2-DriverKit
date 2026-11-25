@@ -1,133 +1,145 @@
 {
-  "action_manifest_version": 0,
-  "alias_info": {},
-  "app_key": "openvr.component.vrcompositor",
-  "category": "steamvr_input",
-  "controller_type": "playstation_vr2_hand",
-  "description": "Tracked hands in SteamVR's dashboard: the hand's tip pose is the laser pointer, an index pinch (thumb on the index fingertip) clicks, a little finger pinch right-clicks, pinching with either hand moves the laser to it; either hand's system gesture (palm toward your face, index pinch) opens and closes the dashboard.",
-  "name": "SteamVR dashboard bindings for PS VR2 tracked hands",
-  "options": {},
-  "simulated_actions": [],
-  "bindings": {
-    "/actions/lasermouse": {
-      "sources": [
-        {
-          "path": "/user/hand/left/input/index_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/lasermouse/in/leftclick"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.85",
-            "click_deactivate_threshold": "0.65"
-          }
-        },
-        {
-          "path": "/user/hand/left/input/pinky_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/lasermouse/in/rightclick"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.85",
-            "click_deactivate_threshold": "0.65"
-          }
-        },
-        {
-          "path": "/user/hand/right/input/index_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/lasermouse/in/leftclick"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.85",
-            "click_deactivate_threshold": "0.65"
-          }
-        },
-        {
-          "path": "/user/hand/right/input/pinky_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/lasermouse/in/rightclick"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.85",
-            "click_deactivate_threshold": "0.65"
-          }
-        }
-      ],
-      "poses": [
-        {
-          "output": "/actions/lasermouse/in/Pointer",
-          "path": "/user/hand/left/pose/tip"
-        },
-        {
-          "output": "/actions/lasermouse/in/Pointer",
-          "path": "/user/hand/right/pose/tip"
-        }
-      ]
-    },
-    "/actions/lasermouse_secondary": {
-      "sources": [
-        {
-          "path": "/user/hand/left/input/index_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/lasermouse_secondary/in/switchlaserhand"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.85",
-            "click_deactivate_threshold": "0.65",
-            "haptic_amplitude": "0"
-          }
-        },
-        {
-          "path": "/user/hand/right/input/index_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/lasermouse_secondary/in/switchlaserhand"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.85",
-            "click_deactivate_threshold": "0.65",
-            "haptic_amplitude": "0"
-          }
-        }
-      ]
-    },
-    "/actions/system": {
-      "sources": [
-        {
-          "path": "/user/hand/left/input/system",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/system/in/ToggleDashboard"
-            }
-          }
-        },
-        {
-          "path": "/user/hand/right/input/system",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/system/in/ToggleDashboard"
-            }
-          }
-        }
-      ]
-    }
-  }
+	"action_manifest_version": 0,
+	"alias_info": {},
+	"app_key": "openvr.component.vrcompositor",
+	"category": "steamvr_input",
+	"controller_type": "playstation_vr2_hand",
+	"description": "Tracked hands in SteamVR's dashboard, laid out as Valve's own tracked-hand binding (vrlink svl_hand_interaction_augmented): the hand's tip pose is the laser pointer; the pinch (the trigger's click: the driver's debounced thumb-and-index pinch, as games get it) clicks and holds the laser still while pinching (LockMousePosition) for selecting and click-drag scrolling, and moves the laser to the pinching hand; a little finger pinch right-clicks; either hand's system gesture opens and closes the dashboard.",
+	"name": "SteamVR dashboard bindings for PS VR2 tracked hands",
+	"options": {},
+	"simulated_actions": [],
+	"bindings": {
+		"/actions/lasermouse": {
+			"sources": [
+				{
+					"path": "/user/hand/left/input/trigger",
+					"mode": "trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/leftclick"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/left/input/trigger",
+					"mode": "trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/LockMousePosition"
+						}
+					},
+					"parameters": {
+						"haptic_amplitude": "0"
+					}
+				},
+				{
+					"path": "/user/hand/right/input/trigger",
+					"mode": "trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/leftclick"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/right/input/trigger",
+					"mode": "trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/LockMousePosition"
+						}
+					},
+					"parameters": {
+						"haptic_amplitude": "0"
+					}
+				},
+				{
+					"path": "/user/hand/left/input/pinky_pinch",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/rightclick"
+						}
+					},
+					"parameters": {
+						"click_activate_threshold": "0.85",
+						"click_deactivate_threshold": "0.65"
+					}
+				},
+				{
+					"path": "/user/hand/right/input/pinky_pinch",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/rightclick"
+						}
+					},
+					"parameters": {
+						"click_activate_threshold": "0.85",
+						"click_deactivate_threshold": "0.65"
+					}
+				}
+			],
+			"poses": [
+				{
+					"output": "/actions/lasermouse/in/Pointer",
+					"path": "/user/hand/left/pose/tip"
+				},
+				{
+					"output": "/actions/lasermouse/in/Pointer",
+					"path": "/user/hand/right/pose/tip"
+				}
+			]
+		},
+		"/actions/lasermouse_secondary": {
+			"sources": [
+				{
+					"path": "/user/hand/left/input/trigger",
+					"mode": "trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse_secondary/in/switchlaserhand"
+						}
+					},
+					"parameters": {
+						"haptic_amplitude": "0"
+					}
+				},
+				{
+					"path": "/user/hand/right/input/trigger",
+					"mode": "trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse_secondary/in/switchlaserhand"
+						}
+					},
+					"parameters": {
+						"haptic_amplitude": "0"
+					}
+				}
+			]
+		},
+		"/actions/system": {
+			"sources": [
+				{
+					"path": "/user/hand/left/input/system",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/system/in/ToggleDashboard"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/right/input/system",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/system/in/ToggleDashboard"
+						}
+					}
+				}
+			]
+		}
+	}
 }
