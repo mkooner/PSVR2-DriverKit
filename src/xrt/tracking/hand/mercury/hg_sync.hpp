@@ -47,6 +47,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <onnxruntime_c_api.h>
+#include <mutex>
 
 #include "kine_common.hpp"
 #include "kine_lm/lm_interface.hpp"
@@ -212,6 +213,8 @@ struct ht_view
 	HandTracking *hgt;
 	onnx_state detection;
 	onnx_state keypoint[2];
+	//! MediaPipe's landmark model per hand (hg_tuneable_values::mediapipe_keypoints), for tracked hands.
+	onnx_state keypoint_mp[2];
 	int view;
 
 	struct t_camera_extra_info_one_view camera_info;
@@ -322,6 +325,25 @@ public:
 	// left hand, right hand
 	Eigen::Array<float, 3, 21> pose_predicted_keypoints[2];
 
+
+	//! MediaPipe's landmark model outputs per [hand][view] this frame (each written by its own keypoint job).
+	struct mp_view_output
+	{
+		bool valid = false;
+		float presence = 0;
+		float handedness = 0; //!< the model's "right hand" score for the crop as seen (the right hand is mirrored)
+		float landmarks[63] = {}; //!< 21 x (x, y, z) in crop pixels (z: relative depth, model units)
+		float world[63] = {};     //!< 21 x (x, y, z), MediaPipe's hand-centred metric landmarks
+	} mp_outputs[2][2];
+
+	//! Gesture measurements (hg_tuneable_values::mediapipe_gestures; false when off or the models didn't load).
+	bool gestures_enabled = false;
+	onnx_state gesture_embedder = {};
+	onnx_state gesture_classifier = {};
+	struct t_hand_gestures gestures_pending[2] = {}; //!< this frame's, before the hand's outcome is known
+	std::mutex gestures_mutex;                       //!< guards gestures_out (read by other threads)
+	struct t_hand_gestures gestures_out[2] = {};
+
 	int detection_counter = 0;
 
 	/// Regularly updated from `hand_size_refinement`.
@@ -373,6 +395,19 @@ init_hand_detection(HandTracking *hgt, onnx_state *wrap);
 void
 init_keypoint_estimation(HandTracking *hgt, onnx_state *wrap);
 
+//! MediaPipe's hand landmark model (hand_landmarks_detector.onnx).
+void
+init_keypoint_estimation_mediapipe(HandTracking *hgt, onnx_state *wrap);
+
+//! MediaPipe's Gesture Recognizer models (gesture_embedder.onnx, canned_gesture_classifier.onnx); throws on failure.
+void
+init_gesture_models(HandTracking *hgt);
+
+//! @p hand's gesture measurements from this frame's MediaPipe outputs (the most confident view); out->valid false
+//! when no view has a hand.
+void
+compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out);
+
 // These are passed into C callbacks, so they have to be extern "C".
 extern "C" {
 //! Runs hand detection, expects `ptr` to be a `hand_detection_run_info *`
@@ -413,6 +448,21 @@ stereographic_project_image(const t_camera_model_params &dist,
                             cv::Mat *debug_image,
                             const cv::Scalar &boundary_color,
                             cv::Mat &out);
+
+//! The rotation looking along @p dir, turned by @p twist about the view axis (hg_image_distorter.cpp).
+Eigen::Quaternionf
+direction(const Eigen::Vector3f &dir, float twist);
+
+/*!
+ * Same projection as stereographic_project_image, @p size pixels square, bilinear, pixel centres at +0.5 (so a point
+ * at continuous pixel u is at stereographic x = -r + 2r u / size, mirrored when instructions.flip).
+ */
+void
+stereographic_project_image_sized(const t_camera_model_params &dist,
+                                  const projection_instructions &instructions,
+                                  const cv::Mat &input_image,
+                                  int size,
+                                  cv::Mat &out);
 
 
 

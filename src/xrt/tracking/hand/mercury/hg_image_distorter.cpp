@@ -602,6 +602,46 @@ make_projection_instructions_angular(xrt_vec3 direction_3d,
 
 
 void
+stereographic_project_image_sized(const t_camera_model_params &dist,
+                                  const projection_instructions &instructions,
+                                  const cv::Mat &input_image,
+                                  int size,
+                                  cv::Mat &out)
+{
+	XRT_TRACE_MARKER();
+	out = cv::Mat(cv::Size(size, size), CV_8U, cv::Scalar(0));
+	const float r = instructions.stereographic_radius;
+	const Eigen::Matrix3f rot = instructions.rot_quat.toRotationMatrix();
+	t_camera_model_params d = dist;
+	const int w = input_image.cols, h = input_image.rows;
+	for (int y = 0; y < size; y++) {
+		const float sg_y = r - 2.0f * r * (y + 0.5f) / size;
+		uint8_t *row = out.ptr<uint8_t>(y);
+		for (int x = 0; x < size; x++) {
+			float sg_x = -r + 2.0f * r * (x + 0.5f) / size;
+			if (instructions.flip) {
+				sg_x = -sg_x;
+			}
+			Eigen::Vector3f dir = rot * stereographic_unprojection(sg_x, sg_y);
+			float px, py;
+			if (!t_camera_models_project(&d, dir.x(), -dir.y(), -dir.z(), &px, &py)) {
+				continue;
+			}
+			px -= 0.5f, py -= 0.5f; // the image's pixel centres
+			const int ix = (int)floorf(px), iy = (int)floorf(py);
+			if (ix < 0 || iy < 0 || ix + 1 >= w || iy + 1 >= h) {
+				continue;
+			}
+			const float fx = px - ix, fy = py - iy;
+			const uint8_t *r0 = input_image.ptr<uint8_t>(iy) + ix;
+			const uint8_t *r1 = input_image.ptr<uint8_t>(iy + 1) + ix;
+			const float top = r0[0] + (r0[1] - r0[0]) * fx, bot = r1[0] + (r1[1] - r1[0]) * fx;
+			row[x] = (uint8_t)(top + (bot - top) * fy + 0.5f);
+		}
+	}
+}
+
+void
 stereographic_project_image(const t_camera_model_params &dist,
                             const projection_instructions &instructions,
                             cv::Mat &input_image,
