@@ -819,6 +819,9 @@ main(int argc, char **argv)
 					click_max = c.max_value;
 				}
 			}
+			if (!(pinch_min < 0.1f && pinch_max > 0.99f && click_max == 1.0f)) {
+				printf("  trigger value min %.3f max %.3f, click max %.3f\n", pinch_min, pinch_max, click_max);
+			}
 			check(pinch_min < 0.1f && pinch_max > 0.99f && click_max == 1.0f,
 			      "hands: a pinch (thumb tip on the index tip) pulls the trigger, open it is released");
 			// As SteamVR's own tracked hands (vrlink): per-finger pinches, a system button, the driver's poses.

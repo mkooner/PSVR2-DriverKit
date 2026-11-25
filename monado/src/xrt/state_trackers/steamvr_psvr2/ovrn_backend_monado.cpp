@@ -38,6 +38,7 @@
 #include "ovrn_camera_fit.hpp"
 #include "psvr2/psvr2_interface.h"
 #include "psvr2/psvr2_hand_tracking.h"
+#include "tracking/t_hand_tracking.h"
 #endif
 
 #if defined(XRT_BUILD_DRIVER_PSVR2) && defined(XRT_BUILD_DRIVER_PSSENSE)
@@ -772,6 +773,33 @@ public:
 	 * joints relative to it), in the backend's tracking space like the device poses (the tracking origin's offset
 	 * applied). The tracker answers from its latest result without waiting for a camera frame.
 	 */
+	bool
+	handGestures(Hand hand, gest::Sample *out) override
+	{
+		*out = gest::Sample{};
+#if defined(XRT_BUILD_DRIVER_PSVR2) && defined(XRT_BUILD_DRIVER_HANDTRACKING)
+		if (m_head == NULL || m_head->name != XRT_DEVICE_PSVR2) {
+			return false;
+		}
+		struct xrt_device *ht = psvr2_hmd_get_hand_tracker(m_head);
+		struct t_hand_gestures g = {};
+		if (ht == NULL || !psvr2_hand_tracking_get_gestures(ht, hand == Hand::Left ? 0 : 1, &g)) {
+			return false;
+		}
+		out->valid = g.valid;
+		out->timestamp_ns = g.timestamp_ns;
+		out->confidence = g.confidence;
+		out->pinch_distance_normalized = g.pinch_distance_normalized;
+		out->extended_mask = g.extended_mask;
+		out->category = (int)g.category;
+		out->category_score = g.category_score;
+		return true;
+#else
+		(void)hand;
+		return false;
+#endif
+	}
+
 	bool
 	handJoints(Hand hand, int64_t at_ns, HandJoints *out) override
 	{
