@@ -54,8 +54,8 @@ and Sense drivers serve both SteamVR games and native OpenXR apps.
 ### Hand tracking (experimental)
 - **Bare-hand tracking** with the headset's cameras, using Monado's Mercury hand tracker, while a Sense controller
   is off. Off by default: turn it on in DriverKit's Settings tab.
-- **Finger tracking** in SteamVR games, a pinch as the trigger, a closed hand as the grip; palm toward your face and
-  pinch for the dashboard.
+- **Finger tracking** in SteamVR games, a pinch as the trigger, a closed hand as the grip; raise an open palm toward
+  your face, then close it into a fist, for the dashboard.
 - Needs a driver compiled with Compile hand tracking ticked (DriverKit's Compile Driver tab).
 
 ### SteamVR integration
