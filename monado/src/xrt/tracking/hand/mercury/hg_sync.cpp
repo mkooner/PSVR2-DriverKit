@@ -881,7 +881,46 @@ callback_process_unsafe(HandTracking *hgt,
 			                    &hgt->views[view_idx].run_info[hand_idx]);
 		}
 	}
+	/*
+	 * MediaPipe for the gestures only (mediapipe_fit off): once per tracked hand, in one view, as its own job alongside
+	 * Mercury's (not before it in the same job: on 2026-11-25 that held the tracker to ~31 results a second live).
+	 */
+	const bool mp_gestures_only = hgt->tuneable_values.mediapipe_keypoints && !hgt->tuneable_values.mediapipe_fit &&
+	                              hgt->gestures_enabled;
+	if (mp_gestures_only) {
+		for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
+			int v = hgt->mp_gesture_view[hand_idx];
+			const auto usable = [&](int view) {
+				const hand_region_of_interest &roi = hgt->views[view].regions_of_interest_this_frame[hand_idx];
+				return roi.found && roi.provenance != ROIProvenance::HAND_DETECTION;
+			};
+			if (!usable(v)) {
+				v = 1 - v;
+			}
+			if (!usable(v)) {
+				continue;
+			}
+			hgt->mp_gesture_view[hand_idx] = v;
+			struct keypoint_estimation_run_info &inf = hgt->mp_gesture_info[hand_idx];
+			inf.view = &hgt->views[v];
+			inf.hand_idx = hand_idx;
+			u_worker_group_push(hgt->group, run_gesture_mediapipe, &inf);
+		}
+	}
 	u_worker_group_wait_all(hgt->group);
+	if (hgt->tuneable_values.mediapipe_keypoints) {
+		mediapipe_remember(hgt);
+	}
+	if (mp_gestures_only) {
+		// Keep the view while MediaPipe sees the hand there; else try the other one next frame.
+		for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
+			const int v = hgt->mp_gesture_view[hand_idx];
+			const HandTracking::mp_view_output &o = hgt->mp_outputs[hand_idx][v];
+			if (!(o.valid && o.presence >= hgt->tuneable_values.mediapipe_presence)) {
+				hgt->mp_gesture_view[hand_idx] = 1 - v;
+			}
+		}
+	}
 
 	// Gesture measurements from MediaPipe's outputs; published at the end of the frame with the hand's outcome.
 	if (hgt->gestures_enabled) {
