@@ -40,7 +40,8 @@ public:
 	HandDevice(Backend *backend, Hand hand)
 	    : TrackedDevice(vr::TrackedDeviceClass_Controller, serialFor(backend, hand)), m_backend(backend), m_hand(hand),
 	      m_joints(skel::detail::reference_rest(hand == Hand::Left, &m_restSource), hand == Hand::Left),
-	      m_mp(gestureConfig()), m_mpDebug(envFlag("OVRN_GESTURE_DEBUG"))
+	      m_mp(gestureConfig()), m_mpDebug(envFlag("OVRN_GESTURE_DEBUG")),
+	      m_systemPinchWindowNs((int64_t)(envFloat("OVRN_SYSTEM_PINCH_WINDOW_MS", 0.0f) * 1e6))
 	{}
 
 	Hand
@@ -160,8 +161,19 @@ public:
 		 * as a pinch and toggled the dashboard 4 times unasked (palms really faced the cameras, camera images 15.5 s
 		 * and 23 s); a fist curl lasts a fraction of a second.
 		 */
-		// With MediaPipe's measurements, only a deliberate pinch (other fingers open) counts for the system gesture.
-		const float system_pinch = mp_on ? (m_mp.state().deliberatePinch ? 1.0f : 0.0f) : g.pinch;
+		/*
+		 * With MediaPipe's measurements, only a deliberate pinch (other fingers open) counts for the system gesture.
+		 * OVRN_SYSTEM_PINCH_WINDOW_MS (default 0, development): a deliberate pinch that ended up to that long ago still
+		 * counts, for a pinch made just before raising the palm. (Replay of the 2026-11-24 20:50 session: a 0.7-1.0 s
+		 * window added unwanted openings and didn't catch the dashboard attempts, where the fingertips never met.)
+		 */
+		if (mp_on && m_mp.state().deliberatePinch) {
+			m_lastDeliberatePinchNs = now_ns;
+		}
+		const bool recent_pinch = m_systemPinchWindowNs > 0 && m_lastDeliberatePinchNs != 0 &&
+		                          now_ns - m_lastDeliberatePinchNs <= m_systemPinchWindowNs;
+		const float system_pinch =
+		    mp_on ? ((m_mp.state().deliberatePinch || recent_pinch) ? 1.0f : 0.0f) : g.pinch;
 		m_systemPinch = skel::click(system ? system_pinch : 0.0f, m_systemPinch);
 		if (!m_systemPinch) {
 			m_systemSinceNs = 0;
@@ -529,6 +541,9 @@ private:
 	uint64_t m_updates = 0;
 	gest::Machine m_mp;   //!< RunFrame thread: MediaPipe gesture state
 	const bool m_mpDebug; //!< OVRN_GESTURE_DEBUG
+	//! OVRN_SYSTEM_PINCH_WINDOW_MS: how long after a deliberate pinch it still counts for the system gesture (0: off).
+	const int64_t m_systemPinchWindowNs;
+	int64_t m_lastDeliberatePinchNs = 0; //!< when the deliberate pinch was last on (RunFrame thread)
 };
 
 } // namespace ovrn

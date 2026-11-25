@@ -61,9 +61,13 @@ struct Config
 	 * on PS VR2 camera images: on the 2026-11-24 labelled recording (Mercury's MediaPipe crops) the right hand's pinch
 	 * frames had median 0.61 (10% below 0.29) and open hands median 1.29 (10% below 0.83). 0.45 / 0.60 caught 6 of 6
 	 * right-hand pinch prompts with 2 of 13 open-hand prompts clicking (0.25 / 0.35: 2 of 6).
+	 * 0.50 / 0.65 since the sweep over the three labelled 2026-11-24 sessions (16:18, 20:50, 21:47; on 0.35-0.60,
+	 * release gap 0.10-0.25, 1-3 confirmation frames, both hands per prompt): pinch prompts 31/35 caught vs 26/35
+	 * at 0.45 / 0.60, false clicks on open/claw/point/fist prompts 31/112 vs 27/112 (one confirmation frame: 30/35
+	 * and 41/112). Chosen on two sessions, it held on the third.
 	 */
-	float pinch_on = 0.45f;
-	float pinch_off = 0.60f;
+	float pinch_on = 0.50f;
+	float pinch_off = 0.65f;
 	float min_confidence = 0.5f; //!< the landmark model's hand presence needed
 	/*!
 	 * How many of the middle, ring and little fingers must be straight for a pinch (pinch_min_other_fingers) or a
