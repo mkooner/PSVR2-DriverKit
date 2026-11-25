@@ -103,13 +103,33 @@ public:
 		if (m_buttonHandle == vr::k_ulInvalidInputComponentHandle) {
 			return;
 		}
-		const bool down = m_backend->headButton();
+		// While bare hands are in use the button belongs to them (the dashboard, see setButtonToHands).
+		const bool down = m_buttonToHands ? false : m_backend->headButton();
 		if (down != m_buttonSent) {
 			m_buttonSent = down;
 			vr::VRDriverInput()->UpdateBooleanComponent(m_buttonHandle, down, 0.0);
 		}
 	}
 
+
+	/*!
+	 * While bare hands are in use (RunFrame thread): the headset's button opens and closes SteamVR's dashboard through
+	 * a hand's system button instead of toggling Room View (the provider passes headButtonDown() on). The hands'
+	 * palm-toward-face pinch is unreliable with Mercury (2026-11-24 sessions: it rarely sees the pinch with the palm
+	 * toward the cameras), and the button doesn't depend on hand tracking at all.
+	 */
+	void
+	setButtonToHands(bool on)
+	{
+		m_buttonToHands = on;
+	}
+
+	//! The headset button now (RunFrame thread).
+	bool
+	headButtonDown()
+	{
+		return m_backend->headButton();
+	}
 
 	explicit Hmd(Backend *backend)
 	    : TrackedDevice(vr::TrackedDeviceClass_HMD, backend->headInfo().serial), m_backend(backend),
@@ -643,6 +663,7 @@ private:
 
 	vr::VRInputComponentHandle_t m_buttonHandle = vr::k_ulInvalidInputComponentHandle;
 	bool m_buttonSent = false;
+	bool m_buttonToHands = false; //!< RunFrame thread: the button goes to the hands' system button (dashboard)
 	vr::VRInputComponentHandle_t m_proximityHandle = vr::k_ulInvalidInputComponentHandle;
 	bool m_wornSent = false;
 	PresenceLog m_presence; //!< wear sensor, head tracking and SteamVR's standby verdicts, logged every 30 s

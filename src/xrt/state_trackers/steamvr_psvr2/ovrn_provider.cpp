@@ -131,10 +131,23 @@ public:
 			c->updateInputs();
 		}
 		addHandsIfTracked();
+		/*
+		 * While a bare hand is in use, the headset button opens the dashboard through that hand's system button (the
+		 * right hand's when both are in use) instead of toggling Room View (Hmd::setButtonToHands).
+		 */
+		HandDevice *button_hand = nullptr;
 		for (auto &h : m_hands) {
+			if (h->active() && h->inUse() && (button_hand == nullptr || h->hand() == Hand::Right)) {
+				button_hand = h.get();
+			}
+		}
+		const bool head_down = m_hmd && button_hand != nullptr && m_hmd->headButtonDown();
+		for (auto &h : m_hands) {
+			h->setHeadButton(h.get() == button_hand && head_down);
 			h->updateInputs(now);
 		}
 		if (m_hmd) {
+			m_hmd->setButtonToHands(button_hand != nullptr);
 			m_hmd->updateInputs(now);
 		}
 		const uint64_t universe = m_backend->universe();

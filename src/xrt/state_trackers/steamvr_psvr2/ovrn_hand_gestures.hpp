@@ -28,6 +28,17 @@ struct Gestures
 
 namespace detail {
 
+//! Distance from @p p to the segment @p a - @p b.
+inline float
+segment_distance(const V &p, const V &a, const V &b)
+{
+	const V ab = b - a;
+	const float l2 = dot(ab, ab);
+	float t = l2 > 1e-12f ? dot(p - a, ab) / l2 : 0.0f;
+	t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+	return len(p - (a + ab * t));
+}
+
 //! How far a finger bends: the turn between successive bones from its metacarpal to its tip (radians).
 inline float
 finger_bend(const Joints &j, int first, int tip)
@@ -47,21 +58,51 @@ finger_bend(const Joints &j, int first, int tip)
 } // namespace detail
 
 /*!
- * @p radius: each joint's radius (metres, the tracker's; 0 if unknown). The values are smooth ramps: pinch is 1 with
- * the fingertips' surfaces within 5 mm and 0 from 4 cm apart; a finger's curl runs from 0.5 to 4 rad of total bend
- * (an open hand bends ~0.3 rad, a fist ~4.5); grab follows the middle, ring and little fingers' mean curl from 0.3
- * to 0.8.
+ * The hand-size reference for the pinch distances: an index finger (proximal + intermediate + distal bone) this long
+ * gets the distances as measured; a longer or shorter one has them scaled to this size first (MRTK3 scales pinch by
+ * index-finger length, Ultraleap by metacarpal length). Mercury's hand size differs between sessions (the 2026-11-23
+ * recordings: 93 mm in one, 72-78 mm in the other for the same hand), which shifted every pinch distance; scaled,
+ * real pinches clicked 72% -> 77% of their duration and an open claw-shaped hand 23% -> 21% (labelled moments,
+ * psvr2-test/hands gesture analysis).
+ */
+constexpr float kPinchRefIndexLength = 0.075f;
+
+/*!
+ * The pinch gap: from each fingertip to the closest point of the other finger's last bone (thumb distal joint to tip,
+ * finger distal joint to tip), the smaller of the two, minus both tips' radii; as Meta's Interaction SDK (fingertip
+ * to the thumb's bone segments) and Ultraleap (closest distance between the last phalanges). Tip to tip needed
+ * Mercury to put both tips in the same place, which it rarely does: on the 2026-11-24 15:12 session only 35 of 155
+ * close approaches got the tips within 10 mm, worst with the palm toward the cameras. The pinch value is 1 at a gap of
+ * kPinchFullGap and 0 at kPinchFullGap + kPinchSpan, so the usual click levels (0.85 on, 0.65 off) are a gap of 8 mm
+ * on, 15 mm off: on the labelled moments real pinches clicked 99-100% of the time (tip to tip at 10/17 mm: 81-84%),
+ * an open claw-shaped hand 35% (28%), a relaxed hand 0% (0%).
+ */
+constexpr float kPinchFullGap = 0.00275f;
+constexpr float kPinchSpan = 0.035f;
+
+/*!
+ * @p radius: each joint's radius (metres, the tracker's; 0 if unknown). The values are smooth ramps: pinch from the
+ * gap between the last bones of thumb and finger (see kPinchFullGap; after the hand-size scaling, kPinchRefIndexLength);
+ * a finger's curl runs from 0.5 to 4 rad of total bend (an open hand bends ~0.3 rad, a fist ~4.5); grab follows the
+ * middle, ring and little fingers' mean curl from 0.3 to 0.8.
  */
 inline Gestures
 gestures(const Joints &j, const float radius[kJointCount])
 {
 	using namespace detail;
 	Gestures g;
+	// Index finger length: proximal, intermediate and distal bones (joints 7-10).
+	const float index_len = len(j.pos[8] - j.pos[7]) + len(j.pos[9] - j.pos[8]) + len(j.pos[10] - j.pos[9]);
+	float scale = index_len > 0.001f ? kPinchRefIndexLength / index_len : 1.0f;
+	scale = scale < 0.6f ? 0.6f : (scale > 1.6f ? 1.6f : scale);
 	for (int f = 1; f < 5; f++) {
 		const int tip = kTip[f];
 		const float r = radius != nullptr ? radius[5] + radius[tip] : 0.0f;
-		const float d = len(j.pos[5] - j.pos[tip]) - r;
-		g.finger_pinch[f - 1] = 1.0f - clamp01((d - 0.005f) / 0.035f);
+		// Joint 4 is the thumb's distal joint, tip - 1 the finger's.
+		const float gap = std::fmin(segment_distance(j.pos[tip], j.pos[4], j.pos[5]),
+		                            segment_distance(j.pos[5], j.pos[tip - 1], j.pos[tip]));
+		const float d = (gap - r) * scale;
+		g.finger_pinch[f - 1] = 1.0f - clamp01((d - kPinchFullGap) / kPinchSpan);
 		if (f == 1) {
 			g.pinch_distance_m = d;
 		}
@@ -92,6 +133,19 @@ inline bool
 click(float value, bool was)
 {
 	return was ? value > 0.65f : value > 0.85f;
+}
+
+/*!
+ * The grip's click from grab (on above 0.78, off below 0.70). On the 2026-11-23 recordings fists read 0.81-1.0 and
+ * relaxed hands 0.54-0.71 (labelled from the camera images): 0.85 sat inside the fists' range (a fist's lowest
+ * readings flickered the grip off), 0.78 is between the two with the release above the relaxed hands' p90.
+ * Both labelled fists clicked 100% of the time, relaxed and claw-shaped hands 0%. (Meta's palm grab: start 0.9,
+ * release 0.85 on its own scale; Ultraleap: 0.8 / 0.6.)
+ */
+inline bool
+click_grab(float value, bool was)
+{
+	return was ? value > 0.70f : value > 0.78f;
 }
 
 } // namespace skel

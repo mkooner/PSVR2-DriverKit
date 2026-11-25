@@ -148,10 +148,17 @@ public:
 		const V at = simHandPosition(hand);
 		out->active = true;
 		out->timestamp_ns = at_ns;
+		/*
+		 * Turned 180 degrees about the forward (z) axis, palm down: the rest pose holds the palm up toward the head,
+		 * which is the system gesture's pose, where the plugin holds the pinch back from the trigger (ovrn_hand.hpp).
+		 */
 		for (int i = 0; i < HandJoints::kCount; i++) {
-			const V p = j.pos[i] + at;
+			const V p = V{-j.pos[i].x, -j.pos[i].y, j.pos[i].z} + at;
+			// q_z180 * q, with q_z180 = (w 0, x 0, y 0, z 1).
+			const Q &q = j.rot[i];
+			const Q r{-q.z, -q.y, q.x, q.w};
 			out->joint[i].position = {p.x, p.y, p.z};
-			out->joint[i].orientation = {j.rot[i].x, j.rot[i].y, j.rot[i].z, j.rot[i].w};
+			out->joint[i].orientation = {r.x, r.y, r.z, r.w};
 			out->joint_valid[i] = true;
 			out->radius[i] = 0.008f;
 		}

@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include "ovrn_gesture_state.hpp"
+
 #include <cstdint>
 #include <ctime>
 #include <memory>
@@ -286,6 +288,19 @@ public:
 	{
 		(void)hand;
 		(void)at_ns;
+		(void)out;
+		return false;
+	}
+
+	/*!
+	 * The hand's latest gesture measurements (MediaPipe's, from the hand tracker), never blocking. False: the tracker
+	 * has none (gestures off or unavailable): the joint-based gestures are used. With true, out->valid tells whether
+	 * they belong to the hand as tracked now.
+	 */
+	virtual bool
+	handGestures(Hand hand, gest::Sample *out)
+	{
+		(void)hand;
 		(void)out;
 		return false;
 	}

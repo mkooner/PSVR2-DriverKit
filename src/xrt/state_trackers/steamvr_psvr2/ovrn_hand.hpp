@@ -27,7 +27,9 @@
 
 #include "ovrn_device.hpp"
 #include "ovrn_hand_gestures.hpp"
+#include "ovrn_gesture_state.hpp"
 
+#include <cstdlib>
 #include <string>
 
 namespace ovrn {
@@ -37,7 +39,8 @@ class HandDevice final : public TrackedDevice
 public:
 	HandDevice(Backend *backend, Hand hand)
 	    : TrackedDevice(vr::TrackedDeviceClass_Controller, serialFor(backend, hand)), m_backend(backend), m_hand(hand),
-	      m_joints(skel::detail::reference_rest(hand == Hand::Left, &m_restSource), hand == Hand::Left)
+	      m_joints(skel::detail::reference_rest(hand == Hand::Left, &m_restSource), hand == Hand::Left),
+	      m_mp(gestureConfig()), m_mpDebug(envFlag("OVRN_GESTURE_DEBUG"))
 	{}
 
 	Hand
@@ -86,11 +89,20 @@ public:
 			return;
 		}
 		HandJoints j;
+		gestureLog(now_ns);
+		m_stat.frames++;
 		if (!inUse() || !m_backend->handJoints(m_hand, now_ns, &j) || !j.active || !j.joint_valid[0]) {
 			m_tracked = false;
+			logGestureEvents(m_mp.reset("hand not tracked"), now_ns);
 			setGestures(skel::Gestures{});
+			// A lost hand lets go of the gesture's system press (the headset button still works: sendSystem).
+			m_systemPinch = false;
+			m_systemSinceNs = 0;
+			m_systemOn = false;
+			sendSystem();
 			return;
 		}
+		m_stat.tracked++;
 		const skel::Joints in_root = inPalm(j);
 		vr::VRBoneTransform_t bones[skel::kBoneCount];
 		if (m_joints.convert(in_root, bones)) {
@@ -105,22 +117,116 @@ public:
 		}
 		m_tracked = true;
 		const skel::Gestures g = skel::gestures(in_root, j.radius);
-		setGestures(g);
 		updateTip(in_root);
-		// The system gesture (either hand): palm toward the face and an index pinch.
+		/*
+		 * MediaPipe's gesture measurements when the hand tracker has them (MERCURY_MEDIAPIPE_GESTURES): pinch and
+		 * fist from them, through the debounced state machine. While they're on but this frame's is invalid (hand
+		 * doubtful, old), the gestures are released rather than switching to the joint rules and back. Without
+		 * them (off, models missing), the joint-based gestures as before.
+		 */
+		gest::Sample sample;
+		const bool mp_on = m_backend->handGestures(m_hand, &sample);
+		if (mp_on) {
+			logGestureEvents(m_mp.update(sample, now_ns), now_ns, &sample);
+			m_stat.mp_frames++;
+			m_stat.mp_valid += m_mp.state().valid ? 1 : 0;
+		} else if (m_mp.state().valid) {
+			logGestureEvents(m_mp.reset("gesture measurements unavailable"), now_ns);
+		}
+		/*
+		 * The system gesture (either hand), as Meta's: the palm toward the face, raised to about eye level, and an
+		 * index pinch held. "At eye level" (Meta's own instruction) is what keeps everyday hand shapes out: on the
+		 * 2026-11-24 20:05 session all 4 dashboard openings, 3 of them unwanted (claw, fist, a tilted pinch), had
+		 * the palm 20-51 cm below the eyes, where the hands are while using them; the cameras still track a hand up to
+		 * about eye level (earlier sessions: half the tracked frames 10-20 cm below).
+		 */
 		bool system = false;
 		TrackedPose head;
 		if (m_backend->headPose(now_ns, &head) && head.position_valid) {
 			using namespace skel::detail;
 			const Pose &palm = j.joint[0];
 			const V eye{(float)head.pose.position.x, (float)head.pose.position.y, (float)head.pose.position.z};
-			system = skel::palm_faces(V{(float)palm.position.x, (float)palm.position.y, (float)palm.position.z},
+			const bool raised = palm.position.y - head.pose.position.y > kSystemMinHeightM;
+			system = raised &&
+			         skel::palm_faces(V{(float)palm.position.x, (float)palm.position.y, (float)palm.position.z},
 			                          Q{(float)palm.orientation.w, (float)palm.orientation.x,
 			                            (float)palm.orientation.y, (float)palm.orientation.z},
 			                          eye);
 		}
-		m_systemOn = skel::click(system ? g.pinch : 0.0f, m_systemOn);
-		vr::VRDriverInput()->UpdateBooleanComponent(m_system, m_systemOn, 0.0);
+		/*
+		 * A hold, as Meta's system gesture (palm toward you, pinch held until its ring fills): the system button goes
+		 * down only after the palm-toward-head pinch has lasted kSystemHoldNs (now 0.5 s), and up when it ends. Before, it fired on
+		 * the first frame: on 2026-11-24 (14:35 session) curling a hand into a fist with the palm toward the face read
+		 * as a pinch and toggled the dashboard 4 times unasked (palms really faced the cameras, camera images 15.5 s
+		 * and 23 s); a fist curl lasts a fraction of a second.
+		 */
+		// With MediaPipe's measurements, only a deliberate pinch (other fingers open) counts for the system gesture.
+		const float system_pinch = mp_on ? (m_mp.state().deliberatePinch ? 1.0f : 0.0f) : g.pinch;
+		m_systemPinch = skel::click(system ? system_pinch : 0.0f, m_systemPinch);
+		if (!m_systemPinch) {
+			m_systemSinceNs = 0;
+			m_systemOn = false;
+		} else if (m_systemSinceNs == 0) {
+			m_systemSinceNs = now_ns;
+		} else if (now_ns - m_systemSinceNs >= kSystemHoldNs) {
+			m_systemOn = true;
+		}
+		sendSystem();
+		/*
+		 * While the palm faces the head (the system gesture's pose), this hand's pinches don't reach the app: one
+		 * pinch would otherwise toggle the dashboard and click in the game at once. Meta does the same with its
+		 * system gesture (apps get no pinch while it's in progress; required by its store's VRC.Quest.Input.8).
+		 */
+		m_stat.palm_facing += system ? 1 : 0;
+		m_stat.max_pinch = std::max(m_stat.max_pinch, g.pinch);
+		m_stat.max_grab = std::max(m_stat.max_grab, g.grab);
+		if (m_systemOn && !m_stat.system_was) {
+			m_stat.system_clicks++;
+		}
+		m_stat.system_was = m_systemOn;
+		skel::Gestures out = g;
+		if (mp_on) {
+			const gest::State &st = m_mp.state();
+			out.pinch = m_mp.pinchValue();
+			out.finger_pinch[0] = out.pinch;
+			out.grab = st.fist ? 1.0f : 0.0f;
+			if (system || m_systemPinch) {
+				out.pinch = 0.0f;
+				for (float &p : out.finger_pinch) {
+					p = 0.0f;
+				}
+			}
+			setOutputs(out, st.pinch && !(system || m_systemPinch), st.fist);
+			return;
+		}
+		if (system || m_systemPinch) {
+			out.pinch = 0.0f;
+			for (float &p : out.finger_pinch) {
+				p = 0.0f;
+			}
+		}
+		setGestures(out);
+	}
+
+	/*!
+	 * The headset button while bare hands are in use (RunFrame thread, from the provider): pressed, it presses this
+	 * hand's system button, which SteamVR's dashboard binding for the hands turns into "toggle dashboard".
+	 */
+	void
+	setHeadButton(bool down)
+	{
+		m_headButton = down;
+	}
+
+	//! The system button: the gesture's hold or the headset button (sent when it changes).
+	void
+	sendSystem()
+	{
+		const bool down = m_systemOn || m_headButton;
+		if (down != m_systemSent) {
+			m_systemSent = down;
+			vr::VRDriverInput()->UpdateBooleanComponent(m_system, down, 0.0);
+		}
 	}
 
 	//! How many skeletons SteamVR got (for the tests and the log).
@@ -260,11 +366,64 @@ private:
 		vr::VRDriverInput()->UpdatePoseComponent(m_poseTip, &m, 0.0);
 	}
 
+	/*!
+	 * Every 10 s while the hand was tracked: what the gestures sent SteamVR (RunFrame thread), to tell "the gesture
+	 * never fired" from "it fired but nothing reacted": tracked share, trigger (pinch) / grip (grab) / system clicks
+	 * and time held, peak pinch and grab values, how often the palm faced the head (pinches are held back then).
+	 */
+	void
+	gestureLog(int64_t now_ns)
+	{
+		if (m_stat.since_ns == 0) {
+			m_stat.since_ns = now_ns;
+			return;
+		}
+		if (now_ns - m_stat.since_ns < 10'000'000'000LL) {
+			return;
+		}
+		const gest::Stats s = m_mp.takeStats(); // this period's, logged or not
+		if (m_stat.tracked > 0) {
+			const double n = (double)m_stat.frames;
+			log("ovrn: %s hand gestures (10 s): tracked %.0f%%; trigger %u clicks, on %.0f%%; grip %u clicks, on "
+			    "%.0f%%; system %u; peak pinch %.2f, grab %.2f; palm toward the head %.0f%%\n",
+			    m_hand == Hand::Left ? "left" : "right", 100.0 * m_stat.tracked / n, m_stat.trigger_clicks,
+			    100.0 * m_stat.trigger_on / n, m_stat.grip_clicks, 100.0 * m_stat.grip_on / n, m_stat.system_clicks,
+			    m_stat.max_pinch, m_stat.max_grab, 100.0 * m_stat.palm_facing / n);
+			if (m_stat.mp_frames > 0) {
+				log("ovrn: %s hand MediaPipe gestures (10 s): valid %.0f%% of tracked; %u frames, rejected: "
+				    "%u invalid, %u old, %u low confidence, %u re-found; closest pinch %.2f (on < %.2f, off > "
+				    "%.2f); categories: fist %u, open palm %u, pointing up %u, victory %u, I-love-you %u, none %u\n",
+				    m_hand == Hand::Left ? "left" : "right", 100.0 * m_stat.mp_valid / m_stat.mp_frames,
+				    s.frames, s.rejected_invalid, s.rejected_stale, s.rejected_low_confidence, s.reassociated,
+				    s.frames > 0 ? s.min_pinch : 0.0f, m_mp.config().pinch_on, m_mp.config().pinch_off,
+				    s.category[gest::ClosedFist], s.category[gest::OpenPalm], s.category[gest::PointingUp],
+				    s.category[gest::Victory], s.category[gest::ILoveYou], s.category[gest::None]);
+			}
+		}
+		const bool system_was = m_stat.system_was;
+		m_stat = GestureStats{};
+		m_stat.since_ns = now_ns;
+		m_stat.system_was = system_was;
+	}
+
+	//! The joint-based gestures: clicks from the values with their hysteresis.
 	void
 	setGestures(const skel::Gestures &g)
 	{
-		m_triggerOn = skel::click(g.pinch, m_triggerOn);
-		m_gripOn = skel::click(g.grab, m_gripOn);
+		setOutputs(g, skel::click(g.pinch, m_triggerOn), skel::click_grab(g.grab, m_gripOn));
+	}
+
+	//! The trigger, grip and finger pinch inputs (values from @p g, clicks given).
+	void
+	setOutputs(const skel::Gestures &g, bool trigger_click, bool grip_click)
+	{
+		const bool trigger_was = m_triggerOn, grip_was = m_gripOn;
+		m_triggerOn = trigger_click;
+		m_gripOn = grip_click;
+		m_stat.trigger_clicks += m_triggerOn && !trigger_was ? 1 : 0;
+		m_stat.grip_clicks += m_gripOn && !grip_was ? 1 : 0;
+		m_stat.trigger_on += m_triggerOn ? 1 : 0;
+		m_stat.grip_on += m_gripOn ? 1 : 0;
 		vr::IVRDriverInput *in = vr::VRDriverInput();
 		in->UpdateScalarComponent(m_trigger, g.pinch, 0.0);
 		in->UpdateBooleanComponent(m_triggerClick, m_triggerOn, 0.0);
@@ -272,6 +431,54 @@ private:
 		in->UpdateBooleanComponent(m_gripClick, m_gripOn, 0.0);
 		for (int f = 0; f < 4; f++) {
 			in->UpdateScalarComponent(m_pinch[f], g.finger_pinch[f], 0.0);
+		}
+	}
+
+	static bool
+	envFlag(const char *name)
+	{
+		const char *v = std::getenv(name);
+		return v != nullptr && (v[0] == '1' || v[0] == 'y' || v[0] == 't');
+	}
+
+	static float
+	envFloat(const char *name, float fallback)
+	{
+		const char *v = std::getenv(name);
+		return v != nullptr && v[0] != '\0' ? (float)std::atof(v) : fallback;
+	}
+
+	//! The gesture state machine's tuning; OVRN_MP_* override the defaults (development).
+	static gest::Config
+	gestureConfig()
+	{
+		gest::Config c;
+		c.pinch_on = envFloat("OVRN_MP_PINCH_ON", c.pinch_on);
+		c.pinch_off = envFloat("OVRN_MP_PINCH_OFF", c.pinch_off);
+		c.min_confidence = envFloat("OVRN_MP_MIN_CONFIDENCE", c.min_confidence);
+		c.min_category_score = envFloat("OVRN_MP_CATEGORY_SCORE", c.min_category_score);
+		c.confirm_frames = (int)envFloat("OVRN_MP_CONFIRM_FRAMES", (float)c.confirm_frames);
+		return c;
+	}
+
+	//! OVRN_GESTURE_DEBUG=1: each gesture change with its reason and the measurement behind it.
+	void
+	logGestureEvents(const gest::Events &e, int64_t now_ns, const gest::Sample *s = nullptr)
+	{
+		if (!m_mpDebug || e.reason == nullptr) {
+			return;
+		}
+		const char *side = m_hand == Hand::Left ? "left" : "right";
+		if (s != nullptr) {
+			log("ovrn: %s gesture: %s%s%s%s (%s); pinch %.3f, confidence %.2f, category %d score %.2f, age %.0f ms\n",
+			    side, e.pinch_pressed ? "pinch pressed " : "", e.pinch_released ? "pinch released " : "",
+			    e.fist_pressed ? "fist pressed " : "", e.fist_released ? "fist released " : "", e.reason,
+			    s->pinch_distance_normalized, s->confidence, s->category, s->category_score,
+			    (now_ns - s->timestamp_ns) / 1e6);
+		} else {
+			log("ovrn: %s gesture: %s%s%s%s (%s)\n", side, e.pinch_pressed ? "pinch pressed " : "",
+			    e.pinch_released ? "pinch released " : "", e.fist_pressed ? "fist pressed " : "",
+			    e.fist_released ? "fist released " : "", e.reason);
 		}
 	}
 
@@ -292,7 +499,36 @@ private:
 	vr::VRInputComponentHandle_t m_poseTip = vr::k_ulInvalidInputComponentHandle;
 	skel::detail::V m_tipPos{0.0f, 0.0f, -0.08f};
 	bool m_triggerOn = false, m_gripOn = false, m_tracked = false, m_systemOn = false;
+	//! The system gesture: the palm-toward-head pinch's click state and since when it's held (0: not held).
+	bool m_systemPinch = false;
+	bool m_headButton = false, m_systemSent = false; //!< the headset button's share of the system button, last sent
+	int64_t m_systemSinceNs = 0;
+	/*!
+	 * How long the palm-toward-head pinch must be held to press the system button (Meta: until a ring fills, about 1 s
+	 * by third-party accounts, not published). 0.6 s first (2026-11-24 15:03 session): the dashboard never opened;
+	 * with the palm toward the head Mercury barely sees the pinch (replay: pinch median 0 while the palm faced the
+	 * head, the longest clicked pinch 0.37 s). 0.3 s: still longer than an accidental flick, within what it sees.
+	 */
+	static constexpr int64_t kSystemHoldNs = 500'000'000;
+	/*!
+	 * 0.5 s since 2026-11-24 evening (MediaPipe's pinch is seen at palm-toward-face angles, where Mercury's wasn't);
+	 * Meta holds "until the icon fills". Replay of the labelled session: openings outside the pinch prompts 5 at
+	 * 0.3 s, 1 at 0.5 s.
+	 */
+	//! How high the palm must be for the system gesture: no lower than this below the eyes (metres, negative).
+	static constexpr double kSystemMinHeightM = -0.15;
+	struct GestureStats
+	{
+		int64_t since_ns = 0;
+		uint32_t frames = 0, tracked = 0, palm_facing = 0;
+		uint32_t trigger_clicks = 0, grip_clicks = 0, system_clicks = 0, trigger_on = 0, grip_on = 0;
+		uint32_t mp_frames = 0, mp_valid = 0; //!< frames with MediaPipe measurements, and how many valid
+		float max_pinch = 0.0f, max_grab = 0.0f;
+		bool system_was = false;
+	} m_stat; //!< RunFrame thread: the 10 s gesture summary (gestureLog)
 	uint64_t m_updates = 0;
+	gest::Machine m_mp;   //!< RunFrame thread: MediaPipe gesture state
+	const bool m_mpDebug; //!< OVRN_GESTURE_DEBUG
 };
 
 } // namespace ovrn
