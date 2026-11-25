@@ -34,9 +34,43 @@ def say(text):
     return subprocess.Popen(["espeak-ng", "-s", "150", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def schedule(rounds):
-    """(hand, gesture, orientation, hold seconds, spoken text), right hand first, each step followed by open."""
+POSITION_S = 4.0  # a hand position (tracking section)
+
+
+def tracking_steps():
+    """Hand positions for left/right tracking parity: the same moves for each hand, one hand right after the other
+    (a lowered hand was found for the right hand but lost for the left in free use). gesture "position", orientation
+    names the position; "both" steps move both hands."""
     steps = []
+    for hand in ("left", "right"):
+        for where, text in (
+            ("front", f"{hand} hand open in front of you, the other hand down"),
+            ("low_front", f"lower your {hand} hand to belly height, still open"),
+            ("side", f"drop your {hand} hand down by your side, relaxed"),
+            ("raise_slow", f"slowly raise your {hand} hand up in front of you"),
+            ("lower_slow", f"slowly lower your {hand} hand to your side"),
+            ("thigh", f"rest your {hand} hand on your thigh"),
+            ("raise_fast", f"quickly raise your {hand} hand in front of you"),
+            ("out_wide", f"move your {hand} hand out to the {hand}, at shoulder height"),
+            ("high", f"raise your {hand} hand above your head height"),
+        ):
+            steps.append((hand, "position", where, POSITION_S, text))
+    for where, text in (
+        ("both_front", "both hands open in front of you"),
+        ("both_side", "both hands down by your sides"),
+        ("both_raise", "raise both hands in front of you"),
+        ("both_low", "both hands at belly height"),
+        ("both_raise", "raise both hands in front of you"),
+        ("both_wave", "move both hands around slowly, like reaching for things"),
+    ):
+        steps.append(("both", "position", where, POSITION_S + (4.0 if where == "both_wave" else 0.0), text))
+    return steps
+
+
+def schedule(rounds):
+    """(hand, gesture, orientation, hold seconds, spoken text): the hand position section, then the gestures, right
+    hand first, each gesture followed by open."""
+    steps = tracking_steps()
     for hand in ("right", "left"):
         steps.append((hand, "open", "any", REST_S + 1, f"{hand} hand. Hold it open in front of you"))
         for r in range(rounds):
