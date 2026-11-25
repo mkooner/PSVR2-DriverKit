@@ -335,7 +335,27 @@ public:
 		float handedness = 0; //!< the model's "right hand" score for the crop as seen (the right hand is mirrored)
 		float landmarks[63] = {}; //!< 21 x (x, y, z) in crop pixels (z: relative depth, model units)
 		float world[63] = {};     //!< 21 x (x, y, z), MediaPipe's hand-centred metric landmarks
+		//! The crop they're in (never mirrored): crop pixel -> camera direction (mediapipe_crop_direction).
+		Eigen::Quaternionf rot = Eigen::Quaternionf::Identity();
+		float radius = 0;
 	} mp_outputs[2][2];
+	/*!
+	 * MediaPipe's own landmarks of the last frame per [hand][view], as camera directions: the next frame's crop is
+	 * placed from them, as MediaPipe's tracking does (HAND_RECT_NEXT_FRAME from the landmarks), not from Mercury's hand.
+	 */
+	struct mp_previous
+	{
+		bool valid = false;
+		uint64_t timestamp = 0;
+		Eigen::Array<float, 3, 21> dirs;
+	} mp_prev[2][2];
+	/*!
+	 * With mediapipe_fit off (MediaPipe for the gestures only): the view MediaPipe runs in for each hand (one run per
+	 * hand, the gestures use one view) and its job's arguments. Kept while MediaPipe sees the hand there, else the other
+	 * view next frame. Starts with each hand's own side's camera.
+	 */
+	int mp_gesture_view[2] = {0, 1};
+	struct keypoint_estimation_run_info mp_gesture_info[2] = {};
 
 	//! Gesture measurements (hg_tuneable_values::mediapipe_gestures; false when off or the models didn't load).
 	bool gestures_enabled = false;
@@ -422,7 +442,15 @@ run_hand_detection(void *ptr);
 //! Runs keypoint estimation, excpets `ptr` to be a `keypoint_estimation_run_info *`
 void
 run_keypoint_estimation(void *ptr);
+
+//! Runs MediaPipe's landmark model for the gestures only (mp_outputs), `ptr` a `keypoint_estimation_run_info *`.
+void
+run_gesture_mediapipe(void *ptr);
 };
+
+//! After the keypoint jobs: keeps MediaPipe's landmarks (mp_prev) to place the next frame's crops from.
+void
+mediapipe_remember(HandTracking *hgt);
 
 void
 release_onnx_state(onnx_state *wrap);

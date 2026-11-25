@@ -673,6 +673,14 @@ mediapipe_object_normalize(const float in[63], float out[63])
 	}
 }
 
+//! The camera direction (Mercury's view frame) of a MediaPipe crop pixel (u, v), the crop never mirrored.
+static Eigen::Vector3f
+mediapipe_crop_direction(const Eigen::Quaternionf &rot, float radius, float u, float v)
+{
+	const float s = (float)MP_SIZE;
+	return rot * stereographic_unprojection(-radius + 2.0f * radius * u / s, radius - 2.0f * radius * v / s);
+}
+
 void
 compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out)
 {
@@ -701,16 +709,51 @@ compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out)
 		return;
 	}
 
-	// Gesture Recognizer: image landmarks normalised to the crop (x, y / 224; z / 224 / 0.4 as MediaPipe's landmark
-	// graph does, kLandmarksNormalizeZ), then object-normalised; the same for the world landmarks.
-	float img[63], norm[63], world_norm[63];
+	/*
+	 * Gesture Recognizer inputs as MediaPipe's gesture graph gets them: the landmarks projected back onto the camera
+	 * image (LandmarkProjectionCalculator), normalised to the image; z as the landmark graph's (/ 224 / 0.4,
+	 * kLandmarksNormalizeZ) times the crop's size in the image; the world landmarks turned back to the image's
+	 * orientation (WorldLandmarkProjectionCalculator). The gesture graph turns them only by the caller's image
+	 * rotation (the whole image, none here), not the hand's tracking rect, so the hand is as the camera sees it, not
+	 * upright. Then object-normalised (LandmarksToMatrixCalculator).
+	 */
+	const ht_view &view = hgt->views[best];
+	t_camera_model_params dist = view.hgdist;
+	const float W = (float)view.run_model_on_this.cols, H = (float)view.run_model_on_this.rows;
+	const auto to_image = [&](float u, float v, float *x, float *y) {
+		const Eigen::Vector3f d = mediapipe_crop_direction(o.rot, o.radius, u, v);
+		return t_camera_models_project(&dist, d.x(), -d.y(), -d.z(), x, y);
+	};
+	float img[63], world_img[63], norm[63], world_norm[63];
 	for (int i = 0; i < 21; i++) {
-		img[i * 3] = o.landmarks[i * 3] / MP_SIZE;
-		img[i * 3 + 1] = o.landmarks[i * 3 + 1] / MP_SIZE;
-		img[i * 3 + 2] = o.landmarks[i * 3 + 2] / MP_SIZE / 0.4f;
+		float x, y;
+		if (!to_image(o.landmarks[i * 3], o.landmarks[i * 3 + 1], &x, &y)) {
+			return;
+		}
+		img[i * 3] = x / W;
+		img[i * 3 + 1] = y / H;
+	}
+	{
+		// The crop's scale and turn in the image, from its centre: one crop pixel along x and along y.
+		const float c = MP_SIZE / 2.0f;
+		float x0, y0, x1, y1, x2, y2;
+		if (!to_image(c, c, &x0, &y0) || !to_image(c + 1, c, &x1, &y1) || !to_image(c, c + 1, &x2, &y2)) {
+			return;
+		}
+		const float ex_x = x1 - x0, ex_y = y1 - y0, ey_x = x2 - x0, ey_y = y2 - y0;
+		const float scale = sqrtf(ex_x * ex_x + ex_y * ex_y); // image pixels per crop pixel
+		const float ex_n = scale > 1e-6f ? 1.0f / scale : 0.0f;
+		const float ey_l = sqrtf(ey_x * ey_x + ey_y * ey_y), ey_n = ey_l > 1e-6f ? 1.0f / ey_l : 0.0f;
+		for (int i = 0; i < 21; i++) {
+			img[i * 3 + 2] = o.landmarks[i * 3 + 2] * scale / (0.4f * W);
+			const float wx = o.world[i * 3], wy = o.world[i * 3 + 1];
+			world_img[i * 3] = wx * ex_x * ex_n + wy * ey_x * ey_n;
+			world_img[i * 3 + 1] = wx * ex_y * ex_n + wy * ey_y * ey_n;
+			world_img[i * 3 + 2] = o.world[i * 3 + 2];
+		}
 	}
 	mediapipe_object_normalize(img, norm);
-	mediapipe_object_normalize(o.world, world_norm);
+	mediapipe_object_normalize(world_img, world_norm);
 	onnx_state &e = hgt->gesture_embedder;
 	memcpy(e.wraps[0].data, norm, sizeof(norm));
 	e.wraps[1].data[0] = o.handedness;
@@ -1017,6 +1060,8 @@ mediapipe_run(keypoint_estimation_run_info &info, const projection_instructions 
 	{
 		// Kept for the gesture measurements (compute_hand_gestures); this job owns this [hand][view] slot.
 		HandTracking::mp_view_output &o = hgt->mp_outputs[info.hand_idx][view_idx];
+		o.rot = instr.rot_quat;
+		o.radius = instr.stereographic_radius;
 		o.presence = present;
 		o.handedness = handedness[0];
 		memcpy(o.landmarks, pts, sizeof(o.landmarks));
@@ -1043,14 +1088,36 @@ mediapipe_run(keypoint_estimation_run_info &info, const projection_instructions 
 	return present;
 }
 
+void
+mediapipe_remember(HandTracking *hgt)
+{
+	for (int hand = 0; hand < 2; hand++) {
+		for (int view = 0; view < 2; view++) {
+			const HandTracking::mp_view_output &o = hgt->mp_outputs[hand][view];
+			HandTracking::mp_previous &p = hgt->mp_prev[hand][view];
+			p.valid = o.valid && o.presence >= hgt->tuneable_values.mediapipe_presence;
+			if (!p.valid) {
+				continue;
+			}
+			p.timestamp = hgt->current_frame_timestamp;
+			for (int i = 0; i < 21; i++) {
+				p.dirs.col(i) = mediapipe_crop_direction(o.rot, o.radius, o.landmarks[i * 3], o.landmarks[i * 3 + 1]);
+			}
+		}
+	}
+}
+
 //! Mercury's keypoint step with MediaPipe's landmark model (hg_tuneable_values::mediapipe_keypoints).
 static void
-run_keypoint_estimation_mediapipe(keypoint_estimation_run_info &info)
+run_keypoint_estimation_mediapipe(keypoint_estimation_run_info &info, bool for_fit = true)
 {
 	struct HandTracking *hgt = info.view->hgt;
 	const int view_idx = info.view->view;
 	const int hand_idx = info.hand_idx;
-	one_frame_one_view &this_output = hgt->keypoint_outputs[hand_idx].views[view_idx];
+	// For the gestures only (for_fit false), the 3D hand's keypoints stay Mercury's: write the view's outputs to a
+	// scratch copy (Mercury's job for this view runs at the same time); mp_outputs is this job's alone.
+	one_frame_one_view scratch;
+	one_frame_one_view &this_output = for_fit ? hgt->keypoint_outputs[hand_idx].views[view_idx] : scratch;
 	MLOutput2D &px_coord = this_output.keypoints_in_scaled_stereographic;
 	t_camera_model_params dist = info.view->hgdist;
 	projection_instructions instr(info.view->hgdist);
@@ -1058,8 +1125,15 @@ run_keypoint_estimation_mediapipe(keypoint_estimation_run_info &info)
 	float present = 0.0f;
 
 	// Only for tracked hands (pose-predicted regions); detection boxes go to Mercury's model.
+	/*
+	 * As MediaPipe's own tracking (hand_landmarker_graph: the next frame's rect from this frame's landmarks): from
+	 * MediaPipe's landmarks of the last frame in this view when it saw the hand there; else from the tracked hand.
+	 */
 	Eigen::Array<float, 3, 21> keypoints_in_camera;
-	if (view_idx == 0) {
+	const HandTracking::mp_previous &prev = hgt->mp_prev[hand_idx][view_idx];
+	if (prev.valid && hgt->current_frame_timestamp - prev.timestamp <= 50 * U_TIME_1MS_IN_NS) {
+		keypoints_in_camera = prev.dirs;
+	} else if (view_idx == 0) {
 		keypoints_in_camera = hgt->pose_predicted_keypoints[hand_idx];
 	} else {
 		for (int i = 0; i < 21; i++) {
@@ -1070,13 +1144,17 @@ run_keypoint_estimation_mediapipe(keypoint_estimation_run_info &info)
 			keypoints_in_camera.col(i) = tmp;
 		}
 	}
-	// The predicted hand with the camera's up, then turned so its wrist-to-knuckle direction points up.
-	// (make_projection_instructions gives x mirrored when flipped and y negated: undone here.)
+	/*
+	 * The hand with the camera's up, then turned as MediaPipe's HandLandmarksToRectCalculator does: the wrist to the
+	 * mean of the index, middle and ring knuckles (middle weighted 1/2, the others 1/4) straight up. Never mirrored:
+	 * MediaPipe's model takes left and right hands as they are (no flip in its graph); Mercury's own model is the one
+	 * that wants one handedness. (make_projection_instructions gives y negated: undone here.)
+	 */
 	hand21_2d pred;
-	make_projection_instructions(dist, hand_idx, 1.0f, 0.0f, keypoints_in_camera, instr, pred);
-	const float flip = instr.flip ? -1.0f : 1.0f;
-	const float twist = upright_twist(0.0f, {pred[0].pos_2d.x * flip, -pred[0].pos_2d.y},
-	                                  {pred[9].pos_2d.x * flip, -pred[9].pos_2d.y});
+	make_projection_instructions(dist, false, 1.0f, 0.0f, keypoints_in_camera, instr, pred);
+	const xrt_vec2 knuckles = {0.25f * pred[5].pos_2d.x + 0.5f * pred[9].pos_2d.x + 0.25f * pred[13].pos_2d.x,
+	                           -(0.25f * pred[5].pos_2d.y + 0.5f * pred[9].pos_2d.y + 0.25f * pred[13].pos_2d.y)};
+	const float twist = upright_twist(0.0f, {pred[0].pos_2d.x, -pred[0].pos_2d.y}, knuckles);
 	/*
 	 * MediaPipe's own tracking crop (hand_landmarks_detector_graph: HandLandmarksToRect on the palm and the base
 	 * finger joints, then RectTransformation scale 2.0, shift_y -0.1): the box around landmarks 0, 1, 2, 3, 5, 6,
@@ -1089,8 +1167,7 @@ run_keypoint_estimation_mediapipe(keypoint_estimation_run_info &info)
 	for (int i : {4, 7, 8, 11, 12, 15, 16, 19, 20}) {
 		partial.col(i) = keypoints_in_camera.col(0);
 	}
-	make_projection_instructions(dist, hand_idx, hgt->tuneable_values.mediapipe_box_fac, twist, partial, instr,
-	                             pred);
+	make_projection_instructions(dist, false, hgt->tuneable_values.mediapipe_box_fac, twist, partial, instr, pred);
 	{
 		// The tenth-of-the-side shift toward the fingers: up in the turned crop (+y, stereographic).
 		const Eigen::Vector3f moved =
@@ -1153,13 +1230,12 @@ run_keypoint_estimation_unsafe(keypoint_estimation_run_info &info)
 	// When MediaPipe doesn't see a hand in a tracked crop, Mercury's model gets the same frame: a hand MediaPipe
 	// doubts in one frame (faint, at a camera's edge) was otherwise lost whole and slow to be found again (offline:
 	// left hand 152 such losses vs 34 with Mercury's model alone).
-	// With mediapipe_fit off, MediaPipe's run only feeds the gestures (mp_outputs) and Mercury's model below always
-	// gives the keypoints for the 3D hand.
-	if (info.view->hgt->tuneable_values.mediapipe_keypoints &&
+	// With mediapipe_fit off, Mercury's model alone gives the keypoints for the 3D hand; MediaPipe runs for the
+	// gestures as its own job (run_gesture_mediapipe), at the same time.
+	if (info.view->hgt->tuneable_values.mediapipe_keypoints && info.view->hgt->tuneable_values.mediapipe_fit &&
 	    info.view->regions_of_interest_this_frame[info.hand_idx].provenance != ROIProvenance::HAND_DETECTION) {
 		run_keypoint_estimation_mediapipe(info);
-		if (info.view->hgt->tuneable_values.mediapipe_fit &&
-		    info.view->hgt->keypoint_outputs[info.hand_idx].views[info.view->view].active) {
+		if (info.view->hgt->keypoint_outputs[info.hand_idx].views[info.view->view].active) {
 			return;
 		}
 	}
@@ -1497,6 +1573,19 @@ run_keypoint_estimation_unsafe(keypoint_estimation_run_info &info)
 
 	for (size_t i = 0; i < ARRAY_SIZE(output_tensors); i++) {
 		wrap.api->ReleaseValue(output_tensors[i]);
+	}
+}
+
+void
+run_gesture_mediapipe(void *ptr)
+{
+	XRT_TRACE_MARKER();
+	keypoint_estimation_run_info info = *(keypoint_estimation_run_info *)ptr;
+	try {
+		run_keypoint_estimation_mediapipe(info, false);
+	} catch (const std::exception &e) {
+		HG_ERROR(info.view->hgt, "Exception in MediaPipe's gesture run: %s", e.what());
+		info.view->hgt->mp_outputs[info.hand_idx][info.view->view].valid = false;
 	}
 }
 
