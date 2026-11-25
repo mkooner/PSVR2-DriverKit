@@ -36,9 +36,6 @@ if(XRT_HAVE_OPENCV)
 			t_calibration_opencv.hpp
 			t_calibration.cpp
 			t_convert.cpp
-			t_debug_hsv_filter.cpp
-			t_debug_hsv_picker.cpp
-			t_debug_hsv_viewer.cpp
 			t_file.cpp
 			t_frame_cv_mat_wrapper.cpp
 			t_frame_cv_mat_wrapper.hpp
@@ -47,6 +44,12 @@ if(XRT_HAVE_OPENCV)
 			t_hsv_filter.c
 			t_kalman.cpp
 		)
+	if(XRT_OPENCV_HIGHGUI)
+		target_sources(
+			aux_tracking PRIVATE t_debug_hsv_filter.cpp t_debug_hsv_picker.cpp t_debug_hsv_viewer.cpp
+			)
+		target_compile_definitions(aux_tracking PRIVATE XRT_OPENCV_HIGHGUI)
+	endif()
 	if(XRT_BUILD_DRIVER_PSMV)
 		target_sources(aux_tracking PRIVATE t_tracker_psmv_fusion.hpp t_tracker_psmv.cpp)
 	endif()

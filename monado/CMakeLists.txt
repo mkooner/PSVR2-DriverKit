@@ -109,13 +109,20 @@ find_package(HIDAPI MODULE)
 find_package(bluetooth MODULE)
 find_package(OpenHMD MODULE)
 
+# OpenCV's GUI (highgui) is only for the colour-tuning debug windows (t_debug_hsv_*). Off, OpenCV's GUI and video
+# libraries aren't linked, nor what they bring (Qt, OpenGL, ffmpeg, PulseAudio, libass): the SteamVR plugin's
+# minimal build (psvr2-test/build-driver.sh) then loads inside Steam's runtime with hand tracking, where the bundled
+# libass didn't (undefined symbol FcConfigSetDefaultSubstitute, 2026-11-24).
+option(XRT_OPENCV_HIGHGUI "Use OpenCV's highgui (tracking debug windows)" ON)
 set(OPENCV_COMMON_COMPONENTS
     core
-    highgui
     imgproc
     imgcodecs
     video
 	)
+if(XRT_OPENCV_HIGHGUI)
+	list(APPEND OPENCV_COMMON_COMPONENTS highgui)
+endif()
 
 find_package(OpenCV QUIET COMPONENTS ${OPENCV_COMMON_COMPONENTS} calib3d features2d CONFIG)
 if(NOT OpenCV_FOUND)
