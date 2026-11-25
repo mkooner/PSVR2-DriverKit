@@ -7,7 +7,8 @@
  * The hand tracker measures each camera frame (backend: HandGestures; Mercury with MediaPipe's models): the thumb to
  * index tip distance over the palm width, which fingers are extended, and the Gesture Recognizer's category. This
  * turns those per-frame measurements into steady gestures:
- *  - pinch (the trigger): hysteresis (on below pinch_on, off above pinch_off) and a few frames' confirmation each way;
+ *  - pinch (the trigger): hysteresis (on below pinch_on, off above pinch_off), each change held a minimum time
+ *    (pinch_press_ns, pinch_release_ns);
  *  - fist (the grip): the Gesture Recognizer's Closed_Fist with enough score, confirmed; while a fist is held, no
  *    pinch (a fist brings the thumb to the index finger);
  *  - open palm (the dashboard gesture's first half, SystemGesture): its Open_Palm, confirmed;
@@ -78,6 +79,16 @@ struct Config
 	 */
 	float min_category_score = 0.5f;
 	int confirm_frames = 2;          //!< consecutive camera frames needed to switch a gesture on or off
+	/*!
+	 * The pinch (trigger) switches on only after the distance has stayed below pinch_on this long, and off after it has
+	 * stayed above pinch_off this long (camera frame times), instead of confirm_frames. 2026-11-25: with two frames
+	 * (~33 ms) a third to half of the trigger presses lasted under 0.15 s, in the 13:35 headset session (25-27%) and in
+	 * hand_sim on the benchmark (33-48%): MediaPipe's thumb-index distance jumping for a frame or two, and the thumb
+	 * passing the index finger while closing into a fist. On the benchmark's readings 60 ms took those from 12 to 3 and
+	 * re-presses from 3 to 0, presses in non-pinch prompts 16 -> 10, pinch prompts 10 -> 9 of 12; longer lost pinches.
+	 */
+	int64_t pinch_press_ns = 60'000'000;
+	int64_t pinch_release_ns = 60'000'000;
 	int64_t max_age_ns = 200'000'000; //!< a measurement older than this (vs now) counts as lost
 };
 
@@ -114,6 +125,39 @@ struct Stats
 namespace detail {
 
 //! A boolean that changes only after @p n consecutive frames asking for the change.
+//! A boolean that changes only after the asked-for state has lasted a given time (camera frame times).
+struct TimedDebounced
+{
+	bool on = false;
+	int64_t since = 0; //!< when the asked-for change began (0: not asked)
+
+	//! @p want_on / @p want_off as Debounced::step; @p on_ns / @p off_ns: how long each change must be asked for.
+	bool
+	step(bool want_on, bool want_off, int64_t t, int64_t on_ns, int64_t off_ns)
+	{
+		const bool asking = on ? want_off : want_on;
+		if (!asking) {
+			since = 0;
+			return false;
+		}
+		if (since == 0) {
+			since = t;
+		}
+		if (t - since >= (on ? off_ns : on_ns)) {
+			on = !on;
+			since = 0;
+			return true;
+		}
+		return false;
+	}
+	void
+	reset()
+	{
+		on = false;
+		since = 0;
+	}
+};
+
 struct Debounced
 {
 	bool on = false;
@@ -244,7 +288,8 @@ public:
 				e.reason = "fist: no pinch";
 			}
 			m_pinch.reset();
-		} else if (m_pinch.step(d < m_cfg.pinch_on, d > m_cfg.pinch_off, n)) {
+		} else if (m_pinch.step(d < m_cfg.pinch_on, d > m_cfg.pinch_off, s.timestamp_ns, m_cfg.pinch_press_ns,
+		                        m_cfg.pinch_release_ns)) {
 			(m_pinch.on ? e.pinch_pressed : e.pinch_released) = true;
 			e.reason = m_pinch.on ? "pinch distance below pinch_on" : "pinch distance above pinch_off";
 		}
@@ -286,7 +331,8 @@ private:
 	Config m_cfg;
 	State m_state;
 	Stats m_stats;
-	detail::Debounced m_pinch, m_fist, m_open;
+	detail::TimedDebounced m_pinch;
+	detail::Debounced m_fist, m_open;
 	int64_t m_lastTs = 0;
 };
 

@@ -171,7 +171,7 @@ TEST_CASE("normalized pinch distance and finger extension on synthetic hands")
 	CHECK((gf.extended_mask & 0x1e) == 0); // none of the four fingers
 }
 
-TEST_CASE("pinch hysteresis and confirmation")
+TEST_CASE("pinch hysteresis and confirmation (each change held 60 ms)")
 {
 	Config c;
 	c.pinch_on = 0.45f;
@@ -181,12 +181,12 @@ TEST_CASE("pinch hysteresis and confirmation")
 	int presses = 0, releases = 0;
 	int64_t t = feed(m, 1000, 5, 1.0f, None, &presses, &releases);
 	CHECK_FALSE(m.state().pinch);
-	// one frame below pinch_on is not enough
-	t = feed(m, t, 1, 0.3f, None, &presses, &releases);
+	// a brief dip below pinch_on (two frames, 16 ms apart) is not enough
+	t = feed(m, t, 2, 0.3f, None, &presses, &releases);
 	CHECK_FALSE(m.state().pinch);
 	t = feed(m, t, 1, 1.0f, None, &presses, &releases);
-	// two in a row are
-	t = feed(m, t, 2, 0.3f, None, &presses, &releases);
+	// below for 60 ms is (frames at 0, 16 ... 64 ms)
+	t = feed(m, t, 5, 0.3f, None, &presses, &releases);
 	CHECK(m.state().pinch);
 	CHECK(presses == 1);
 	// between the thresholds: stays on
@@ -195,8 +195,12 @@ TEST_CASE("pinch hysteresis and confirmation")
 	// held: no further presses
 	t = feed(m, t, 20, 0.3f, None, &presses, &releases);
 	CHECK(presses == 1);
-	// above pinch_off for two frames: off
+	// above pinch_off for two frames: still on (a jump in the measurement)
 	t = feed(m, t, 2, 0.7f, None, &presses, &releases);
+	CHECK(m.state().pinch);
+	t = feed(m, t, 1, 0.3f, None, &presses, &releases);
+	// above pinch_off for 60 ms: off
+	t = feed(m, t, 5, 0.7f, None, &presses, &releases);
 	CHECK_FALSE(m.state().pinch);
 	CHECK(releases == 1);
 	// between the thresholds again: stays off
@@ -213,14 +217,16 @@ TEST_CASE("the same camera frame again doesn't advance the confirmation")
 		m.update(s, s.timestamp_ns);
 	}
 	CHECK_FALSE(m.state().pinch); // one frame, polled 20 times
-	m.update(sample(1016, 0.1f), 1016'000'000LL);
+	for (int64_t t = 1016; t <= 1064; t += 16) {
+		m.update(sample(t, 0.1f), t * 1'000'000LL);
+	}
 	CHECK(m.state().pinch);
 }
 
 TEST_CASE("low confidence, invalid and old measurements let go at once")
 {
 	Machine m;
-	int64_t t = feed(m, 1000, 3, 0.1f);
+	int64_t t = feed(m, 1000, 6, 0.1f);
 	REQUIRE(m.state().pinch);
 
 	SECTION("low confidence")
@@ -263,7 +269,7 @@ TEST_CASE("low confidence, invalid and old measurements let go at once")
 TEST_CASE("a pinch needs confirming again after a loss")
 {
 	Machine m;
-	int64_t t = feed(m, 1000, 3, 0.1f);
+	int64_t t = feed(m, 1000, 6, 0.1f);
 	REQUIRE(m.state().pinch);
 	Sample lost = sample(t, 0.1f);
 	lost.valid = false;
@@ -271,15 +277,17 @@ TEST_CASE("a pinch needs confirming again after a loss")
 	t += 16;
 	m.update(sample(t, 0.1f), t * 1'000'000LL);
 	CHECK_FALSE(m.state().pinch); // one frame after coming back
-	t += 16;
-	m.update(sample(t, 0.1f), t * 1'000'000LL);
-	CHECK(m.state().pinch);
+	for (int i = 0; i < 4; i++) {
+		t += 16;
+		m.update(sample(t, 0.1f), t * 1'000'000LL);
+	}
+	CHECK(m.state().pinch); // 64 ms after coming back
 }
 
 TEST_CASE("re-association: time going backwards or a gap starts fresh")
 {
 	Machine m;
-	int64_t t = feed(m, 1000, 3, 0.1f);
+	int64_t t = feed(m, 1000, 6, 0.1f);
 	REQUIRE(m.state().pinch);
 	SECTION("backwards")
 	{
@@ -303,8 +311,8 @@ TEST_CASE("left and right hands are independent")
 	// Mercury keeps each hand in its own slot (0 left, 1 right) and measures each hand on its own crop, so the
 	// plugin keeps one machine per hand: one hand's loss or pinch doesn't touch the other.
 	Machine left, right;
-	feed(left, 1000, 3, 0.1f);
-	feed(right, 1000, 3, 1.0f);
+	feed(left, 1000, 6, 0.1f);
+	feed(right, 1000, 6, 1.0f);
 	CHECK(left.state().pinch);
 	CHECK_FALSE(right.state().pinch);
 	left.reset("left hand lost");
@@ -348,7 +356,7 @@ TEST_CASE("a pinch doesn't depend on the other fingers")
 {
 	Machine m;
 	int64_t t = 1000;
-	for (int i = 0; i < 2; i++, t += 16) {
+	for (int i = 0; i < 6; i++, t += 16) {
 		Sample s = sample(t, 0.1f);
 		s.extended_mask = 0x00; // all curled but thumb and index close
 		m.update(s, t * 1'000'000LL);
