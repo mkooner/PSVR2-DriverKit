@@ -49,6 +49,7 @@
 #include <opencv2/opencv.hpp>
 #include <onnxruntime_c_api.h>
 #include <mutex>
+#include <cstdarg>
 
 #include "kine_common.hpp"
 #include "kine_lm/lm_interface.hpp"
@@ -454,6 +455,28 @@ mediapipe_remember(HandTracking *hgt);
 
 void
 release_onnx_state(onnx_state *wrap);
+
+/*!
+ * Development: MERCURY_DETECTION_LOG=<file> gets one line per detector result ("D", frame time ns, view, source -1
+ * whole view / tile index, hand, score, centre x, y, size in view pixels) and per hand outcome ("F", frame time ns,
+ * hand, tracked 0/1, Mercury's note), for offline study of the detections (e.g. stereo distance). Any thread.
+ */
+inline void
+detection_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+inline void
+detection_log(const char *fmt, ...)
+{
+	static FILE *f = getenv("MERCURY_DETECTION_LOG") ? fopen(getenv("MERCURY_DETECTION_LOG"), "w") : nullptr;
+	static std::mutex m;
+	if (f == nullptr) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(m);
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(f, fmt, args);
+	va_end(args);
+}
 
 
 void

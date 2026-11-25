@@ -58,6 +58,8 @@ struct hg_tuneable_values
 	//! Zoomed-in detection: crops per side when a hand isn't found in the whole view (0: off), each this share of it.
 	int detection_tiles = 0;
 	float detection_tile_fraction = 0.6f;
+	//! A tile's detection counts only at this score or more (the zoomed tiles score feet, shoes, objects; 0: any).
+	float detection_tile_min_confidence = 0.0f;
 	int detection_tiles_per_frame = 1; //!< crops looked at per frame, cycling (0: all of them every frame)
 	bool detection_tile_mirror = false; //!< also the mirrored left-hand pass on each crop
 	//! The keypoint model's "is a hand" score needed to keep a view (Mercury's fixed value was 0.97).

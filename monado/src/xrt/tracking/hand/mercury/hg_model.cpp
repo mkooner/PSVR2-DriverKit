@@ -457,6 +457,10 @@ run_hand_detection_unsafe(hand_detection_run_info *info)
 	float size[2];
 	cv::Mat binned_uint8;
 	detect_in(hgt, state, 0, orig_data, rot, conf, center, size, &binned_uint8, true);
+	for (int h = 0; h < 2; h++) {
+		detection_log("D,%lld,%d,-1,%d,%.4f,%.1f,%.1f,%.1f\n", (long long)hgt->current_frame_timestamp, view->view, h,
+		              conf[h], center[h].x, center[h].y, size[h]);
+	}
 
 	// Offline diagnosis: MERCURY_DUMP_DIR saves every 30th detector input per view (PGM, as the model gets it).
 	{
@@ -538,14 +542,67 @@ run_hand_detection_unsafe(hand_detection_run_info *info)
 			view->tile_stats = {};
 			view->tile_stats.since_ns = tiles_start_ns;
 		}
+		/*
+		 * Development: MERCURY_TILE_DUMP=<dir> saves the view with every tile (thin grey) and each tile's detection
+		 * box per hand above min_detection_confidence (left white, right black; thicker for the one kept), to check the
+		 * tiles' detections sit on the hands. At most 400 images.
+		 */
+		static const char *tile_dump = getenv("MERCURY_TILE_DUMP");
+		static std::atomic<int> tile_dumped{0};
+		bool tile_hit = false;
+		for (int k = 0; k < n && tile_dump != nullptr; k++) {
+			tile_hit = tile_hit || jobs[k].conf[0] > hgt->tuneable_values.min_detection_confidence.val ||
+			           jobs[k].conf[1] > hgt->tuneable_values.min_detection_confidence.val;
+		}
+		const float conf_before[2] = {conf[0], conf[1]};
+		int kept[2] = {-1, -1};
 		for (int k = 0; k < n; k++) {
 			for (int h = 0; h < 2; h++) {
-				if (jobs[k].conf[h] > conf[h]) {
+				if (jobs[k].conf[h] > 0.1f) {
+					detection_log("D,%lld,%d,%d,%d,%.4f,%.1f,%.1f,%.1f\n", (long long)hgt->current_frame_timestamp,
+					              view->view, k, h, jobs[k].conf[h],
+					              jobs[k].center[h].x + jobs[k].x0, jobs[k].center[h].y + jobs[k].y0, jobs[k].size[h]);
+				}
+			}
+		}
+		for (int k = 0; k < n; k++) {
+			for (int h = 0; h < 2; h++) {
+				if (jobs[k].conf[h] > conf[h] &&
+				    jobs[k].conf[h] >= hgt->tuneable_values.detection_tile_min_confidence) {
 					conf[h] = jobs[k].conf[h];
 					center[h] = {jobs[k].center[h].x + jobs[k].x0, jobs[k].center[h].y + jobs[k].y0};
 					size[h] = jobs[k].size[h];
+					kept[h] = k;
 				}
 			}
+		}
+		if (tile_hit && tile_dumped < 400) {
+			const int idx = tile_dumped++;
+			cv::Mat img;
+			cv::cvtColor(orig_data, img, cv::COLOR_GRAY2BGR);
+			for (int k = 0; k < n; k++) {
+				cv::rectangle(img, cv::Rect(jobs[k].x0, jobs[k].y0, jobs[k].tw, jobs[k].th), cv::Scalar(90, 90, 90), 1);
+			}
+			for (int k = 0; k < n; k++) {
+				for (int h = 0; h < 2; h++) {
+					if (jobs[k].conf[h] <= hgt->tuneable_values.min_detection_confidence.val) {
+						continue;
+					}
+					const float cx = jobs[k].center[h].x + jobs[k].x0, cy = jobs[k].center[h].y + jobs[k].y0;
+					const float half = jobs[k].size[h] / 2.0f;
+					const cv::Scalar col = h == 0 ? cv::Scalar(255, 255, 255) : cv::Scalar(0, 0, 0);
+					cv::rectangle(img, cv::Rect((int)(cx - half), (int)(cy - half), (int)(2 * half), (int)(2 * half)), col,
+					              kept[h] == k ? 3 : 1);
+					char txt[32];
+					snprintf(txt, sizeof(txt), "%s %.2f", h == 0 ? "L" : "R", jobs[k].conf[h]);
+					cv::putText(img, txt, cv::Point((int)(cx - half), (int)(cy - half) - 3), cv::FONT_HERSHEY_SIMPLEX, 0.45,
+					            col, 1);
+				}
+			}
+			char path[1024];
+			snprintf(path, sizeof(path), "%s/tile_%04d_v%d_%lld_whole_L%.2f_R%.2f.png", tile_dump, idx, view->view,
+			         (long long)hgt->current_frame_timestamp, conf_before[0], conf_before[1]);
+			cv::imwrite(path, img);
 		}
 	}
 
