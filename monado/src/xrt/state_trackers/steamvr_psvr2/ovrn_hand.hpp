@@ -18,7 +18,7 @@
  * It presents itself as SteamVR's own tracked hands do (Valve's vrlink driver, svl_hand_interaction_augmented): hand
  * priority -1 in the profile, the hand tracking status icons (from SteamVR's vrlink resources, referenced in place),
  * /pose/raw, /pose/grip and /pose/tip made by the driver (tip: the dashboard's laser, from the index knuckle along the
- * hand), per-finger pinches, and a system button on each hand: an open palm toward the face, then a fist (with
+ * hand), per-finger pinches, and a system button on each hand: an open palm toward the face, raised, held about 1 s (with
  * MediaPipe's gestures; without them, the palm toward the face with an index pinch held), which the dashboard binding
  * uses to open and close the dashboard (Valve's has it on the left hand only).
  * @ingroup st_ovrn
@@ -136,6 +136,18 @@ public:
 		gest::Sample sample;
 		const bool mp_on = m_backend->handGestures(m_hand, &sample);
 		if (mp_on) {
+			// The tracker's profile decides the gesture tuning; a change (start, switch) starts the gestures afresh.
+			const std::string profile = m_backend->handTrackingProfile();
+			if (profile != m_gestureProfile) {
+				m_gestureProfile = profile;
+				logGestureEvents(m_mp.reset("hand tracking profile changed"), now_ns);
+				m_mp = gest::Machine(gestureConfig(profile));
+				m_systemGesture = gest::SystemGesture(systemGestureConfig(profile));
+				log("ovrn: %s hand gestures: tuning for the '%s' hand tracking profile\n",
+				    m_hand == Hand::Left ? "left" : "right", profile.empty() ? "default" : profile.c_str());
+			}
+		}
+		if (mp_on) {
 			logGestureEvents(m_mp.update(sample, now_ns), now_ns, &sample);
 			m_stat.mp_frames++;
 			m_stat.mp_valid += m_mp.state().valid ? 1 : 0;
@@ -146,29 +158,42 @@ public:
 		 * The dashboard gesture's pose: the palm toward the face, raised (kSystemMinHeightM below the eyes or
 		 * higher). Height is what tells it from everyday use (see kSystemMinHeightM).
 		 */
-		bool system = false;
+		bool system = false, system_mp = false;
 		TrackedPose head;
 		if (m_backend->headPose(now_ns, &head) && head.position_valid) {
 			using namespace skel::detail;
 			const Pose &palm = j.joint[0];
 			const V eye{(float)head.pose.position.x, (float)head.pose.position.y, (float)head.pose.position.z};
-			const bool raised = palm.position.y - head.pose.position.y > kSystemMinHeightM;
-			system = raised &&
-			         skel::palm_faces(V{(float)palm.position.x, (float)palm.position.y, (float)palm.position.z},
-			                          Q{(float)palm.orientation.w, (float)palm.orientation.x,
-			                            (float)palm.orientation.y, (float)palm.orientation.z},
-			                          eye);
+			const double height = palm.position.y - head.pose.position.y;
+			const bool facing =
+			    skel::palm_faces(V{(float)palm.position.x, (float)palm.position.y, (float)palm.position.z},
+			                     Q{(float)palm.orientation.w, (float)palm.orientation.x, (float)palm.orientation.y,
+			                       (float)palm.orientation.z},
+			                     eye);
+			system = facing && height > kSystemMinHeightM;
+			system_mp = facing && height > kSystemMinHeightMpM;
 		}
 		/*
 		 * The system button (SteamVR's dashboard toggle):
-		 *  - with MediaPipe's gestures: an open palm toward the face, then a fist (gest::SystemGesture);
+		 *  - with MediaPipe's gestures: an open palm toward the face, raised, held about 1 s (gest::SystemGesture);
 		 *  - without them (Mercury's joints only): the palm-toward-face pinch held kSystemHoldNs.
 		 * Either way one press for both hands (systemPress).
 		 */
 		bool gesture_down = false;
 		if (mp_on) {
 			const gest::State &st = m_mp.state();
-			gesture_down = m_systemGesture.update(now_ns, system, st.openPalm, st.fist);
+			// MediaPipe's raw reading this frame (the window judges its flicker; see gest::SystemGesture).
+			const gest::Config &mc = m_mp.config();
+			const bool cat_ok = sample.valid && sample.category_score >= mc.min_category_score;
+			const bool open_raw = cat_ok && sample.category == gest::OpenPalm;
+			const bool bad_raw = (cat_ok && sample.category == gest::ClosedFist) ||
+			                     (sample.valid && sample.pinch_distance_normalized < mc.pinch_on);
+			const bool was_down = m_systemGesture.down();
+			gesture_down = m_systemGesture.update(now_ns, system_mp, sample.valid, open_raw, bad_raw);
+			if (m_mpDebug && was_down != gesture_down) {
+				log("ovrn: %s dashboard gesture: %s\n", m_hand == Hand::Left ? "left" : "right",
+				    gesture_down ? "PRESSED (open palm toward the face, raised, held)" : "released (pose ended)");
+			}
 			m_systemPinch = false;
 			m_systemSinceNs = 0;
 		} else {
@@ -194,13 +219,12 @@ public:
 
 		skel::Gestures out = g;
 		if (mp_on) {
-			// Trigger = pinch, grip = fist. The fist that presses the dashboard isn't also a grip in the game.
+			// Trigger = pinch, grip = fist (the dashboard gesture is an open palm: neither).
 			const gest::State &st = m_mp.state();
-			const bool dashboard_fist = m_systemGesture.armed(now_ns) || m_systemGesture.down();
 			out.pinch = m_mp.pinchValue();
 			out.finger_pinch[0] = out.pinch;
-			out.grab = (st.fist && !dashboard_fist) ? 1.0f : 0.0f;
-			setOutputs(out, st.pinch, st.fist && !dashboard_fist);
+			out.grab = st.fist ? 1.0f : 0.0f;
+			setOutputs(out, st.pinch, st.fist);
 			return;
 		}
 		/*
@@ -483,16 +507,34 @@ private:
 		return v != nullptr && v[0] != '\0' ? (float)std::atof(v) : fallback;
 	}
 
-	//! The gesture state machine's tuning; OVRN_MP_* override the defaults (development).
+	/*!
+	 * The gesture state machine's tuning for the hand tracker's profile (MediaPipe's gesture crop sits on the 3D hand,
+	 * which comes from a different model per profile, so each profile gets its own values; 2026-11-25: both still the
+	 * values tuned with MediaPipe building the hand). OVRN_MP_* override them (development).
+	 */
 	static gest::Config
-	gestureConfig()
+	gestureConfig(const std::string &profile = {})
 	{
 		gest::Config c;
+		if (profile == "mercury") {
+			// Mercury's model builds the 3D hand, MediaPipe reads the gestures: to be tuned (see psvr2-test/hands).
+		} else {
+			// MediaPipe builds the 3D hand (and the default before the tracker reports its profile): gest::Config.
+		}
 		c.pinch_on = envFloat("OVRN_MP_PINCH_ON", c.pinch_on);
 		c.pinch_off = envFloat("OVRN_MP_PINCH_OFF", c.pinch_off);
 		c.min_confidence = envFloat("OVRN_MP_MIN_CONFIDENCE", c.min_confidence);
 		c.min_category_score = envFloat("OVRN_MP_CATEGORY_SCORE", c.min_category_score);
 		c.confirm_frames = (int)envFloat("OVRN_MP_CONFIRM_FRAMES", (float)c.confirm_frames);
+		return c;
+	}
+
+	//! The dashboard gesture's timing for the hand tracker's profile (as gestureConfig).
+	static gest::SystemGesture::Config
+	systemGestureConfig(const std::string &profile)
+	{
+		gest::SystemGesture::Config c;
+		(void)profile; // both profiles: gest::SystemGesture::Config's values for now
 		return c;
 	}
 
@@ -548,6 +590,14 @@ private:
 	 * 0.6 s / 0.5 s).
 	 */
 	static constexpr double kSystemMinHeightM = -0.15;
+	/*!
+	 * With MediaPipe's gestures: the open palm no lower than 20 cm below the head (room frame, as measured here).
+	 * Holding an open hand up toward the headset is common (the benchmark's "open hand" prompts). Scored on the
+	 * 2026-11-25 benchmark through hand_sim (this code, the session's head poses) with a 1 s hold: 15 cm caught 2 of
+	 * the 4 dashboard prompts, 20 cm 4 of 4 with no press in the 54 other prompts or free use, 25 cm 4 of 4 but 5
+	 * presses in open-hand and pinch prompts.
+	 */
+	static constexpr double kSystemMinHeightMpM = -0.20;
 	struct GestureStats
 	{
 		int64_t since_ns = 0;
@@ -561,6 +611,7 @@ private:
 	gest::Machine m_mp;   //!< RunFrame thread: MediaPipe gesture state
 	const bool m_mpDebug; //!< OVRN_GESTURE_DEBUG
 	gest::SystemGesture m_systemGesture; //!< RunFrame thread: the dashboard gesture with MediaPipe's gestures
+	std::string m_gestureProfile;        //!< RunFrame thread: the profile the gesture tuning is for
 	bool m_systemIgnored = false;         //!< this hand's gesture press started while the other hand held it
 	//! The hand whose gesture holds the dashboard press now (RunFrame thread; both hands run there).
 	static inline HandDevice *s_systemHolder = nullptr;
