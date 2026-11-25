@@ -114,6 +114,37 @@ struct t_hand_tracking_create_info
 };
 
 /*!
+ * Hand gesture categories of MediaPipe's Gesture Recognizer ("canned" classifier; this order is its output order).
+ */
+enum t_hand_gesture_category
+{
+	T_HAND_GESTURE_NONE = 0,
+	T_HAND_GESTURE_CLOSED_FIST = 1,
+	T_HAND_GESTURE_OPEN_PALM = 2,
+	T_HAND_GESTURE_POINTING_UP = 3,
+	T_HAND_GESTURE_THUMB_DOWN = 4,
+	T_HAND_GESTURE_THUMB_UP = 5,
+	T_HAND_GESTURE_VICTORY = 6,
+	T_HAND_GESTURE_I_LOVE_YOU = 7,
+	T_HAND_GESTURE_COUNT = 8,
+};
+
+/*!
+ * One hand's gesture measurements for one camera frame (a hand tracker that has them, e.g. Mercury with MediaPipe's
+ * models). Measured on the hand alone: distances are in MediaPipe's hand-centred frame, not camera or room space.
+ */
+struct t_hand_gestures
+{
+	bool valid;                      //!< false: nothing below is meaningful
+	int64_t timestamp_ns;            //!< the camera frame's timestamp (same as the hand joints')
+	float confidence;                //!< the landmark model's hand presence, 0..1
+	float pinch_distance_normalized; //!< thumb tip to index tip / palm width (index to little finger knuckle)
+	uint8_t extended_mask;           //!< bit f: finger f extended (0 thumb ... 4 little finger)
+	enum t_hand_gesture_category category; //!< the gesture classifier's top category
+	float category_score;                  //!< its score, 0..1
+};
+
+/*!
  * Synchronously processes frames and returns two hands.
  */
 struct t_hand_tracking_sync

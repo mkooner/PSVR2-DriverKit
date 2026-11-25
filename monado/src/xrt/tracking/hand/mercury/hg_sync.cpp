@@ -42,6 +42,12 @@ DEBUG_GET_ONCE_FLOAT_OPTION(mercury_detection_tile_fraction, "MERCURY_DETECTION_
 DEBUG_GET_ONCE_NUM_OPTION(mercury_detection_tiles_per_frame, "MERCURY_DETECTION_TILES_PER_FRAME", 1)
 DEBUG_GET_ONCE_BOOL_OPTION(mercury_detection_tile_mirror, "MERCURY_DETECTION_TILE_MIRROR", false)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_keypoint_hand_confidence, "MERCURY_KEYPOINT_HAND_CONFIDENCE", 0.97)
+DEBUG_GET_ONCE_BOOL_OPTION(mercury_mediapipe, "MERCURY_MEDIAPIPE", false)
+DEBUG_GET_ONCE_FLOAT_OPTION(mercury_mediapipe_box, "MERCURY_MEDIAPIPE_BOX", 2.0)
+DEBUG_GET_ONCE_FLOAT_OPTION(mercury_mediapipe_presence, "MERCURY_MEDIAPIPE_PRESENCE", 0.5)
+DEBUG_GET_ONCE_FLOAT_OPTION(mercury_mediapipe_xy_conf, "MERCURY_MEDIAPIPE_XY_CONF", 1.0)
+DEBUG_GET_ONCE_FLOAT_OPTION(mercury_mediapipe_depth_conf, "MERCURY_MEDIAPIPE_DEPTH_CONF", 0.0)
+DEBUG_GET_ONCE_BOOL_OPTION(mercury_mediapipe_gestures, "MERCURY_MEDIAPIPE_GESTURES", false)
 
 // Flags to tell state tracker that these are indeed valid joints
 static const enum xrt_space_relation_flags valid_flags_ht = (enum xrt_space_relation_flags)(
@@ -714,6 +720,13 @@ HandTracking::~HandTracking()
 	release_onnx_state(&this->views[1].keypoint[0]);
 	release_onnx_state(&this->views[1].keypoint[1]);
 	release_onnx_state(&this->views[1].detection);
+	for (int v = 0; v < 2; v++) {
+		for (int h = 0; h < 2; h++) {
+			release_onnx_state(&this->views[v].keypoint_mp[h]);
+		}
+	}
+	release_onnx_state(&this->gesture_embedder);
+	release_onnx_state(&this->gesture_classifier);
 
 	t_stereo_camera_calibration_reference(&this->calib, NULL);
 
@@ -846,6 +859,9 @@ callback_process_unsafe(HandTracking *hgt,
 
 	// Dispatch keypoint estimator neural nets
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
+		hgt->mp_outputs[hand_idx][0].valid = hgt->mp_outputs[hand_idx][1].valid = false;
+	}
+	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
 		for (int view_idx = 0; view_idx < 2; view_idx++) {
 			if (!hgt->views[view_idx].regions_of_interest_this_frame[hand_idx].found) {
 				continue;
@@ -859,6 +875,19 @@ callback_process_unsafe(HandTracking *hgt,
 		}
 	}
 	u_worker_group_wait_all(hgt->group);
+
+	// Gesture measurements from MediaPipe's outputs; published at the end of the frame with the hand's outcome.
+	if (hgt->gestures_enabled) {
+		for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
+			try {
+				compute_hand_gestures(hgt, hand_idx, &hgt->gestures_pending[hand_idx]);
+			} catch (const std::exception &e) {
+				HG_WARN(hgt, "Gesture models failed, gestures off: %s", e.what());
+				hgt->gestures_enabled = false;
+				hgt->gestures_pending[hand_idx] = {};
+			}
+		}
+	}
 
 	// Hand size refinement/optimization state
 	bool optimize_hand_size;
@@ -1041,6 +1070,18 @@ callback_process_unsafe(HandTracking *hgt,
 
 	hgt->hand_size_refinement.framePost();
 
+	// Gestures: valid only for a hand tracked this frame (same camera frame as its joints).
+	{
+		std::lock_guard<std::mutex> lock(hgt->gestures_mutex);
+		for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
+			struct t_hand_gestures g = hgt->gestures_enabled ? hgt->gestures_pending[hand_idx] : t_hand_gestures{};
+			g.valid = g.valid && hgt->this_frame_hand_detected[hand_idx];
+			g.timestamp_ns = (int64_t)hgt->current_frame_timestamp;
+			hgt->gestures_out[hand_idx] = g;
+			hgt->gestures_pending[hand_idx] = {};
+		}
+	}
+
 	// State tracker tweaks
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
 		out_xrt_hands[hand_idx]->is_active = hgt->this_frame_hand_detected[hand_idx];
@@ -1196,6 +1237,14 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	hgt->views[0].camera_info = extra_camera_info.views[0];
 	hgt->views[1].camera_info = extra_camera_info.views[1];
 
+	// Chosen before the models are loaded (it decides which keypoint model file).
+	hgt->tuneable_values.mediapipe_keypoints = debug_get_bool_option_mercury_mediapipe();
+	hgt->tuneable_values.mediapipe_gestures =
+	    hgt->tuneable_values.mediapipe_keypoints && debug_get_bool_option_mercury_mediapipe_gestures();
+	if (hgt->tuneable_values.mediapipe_keypoints) {
+		HG_INFO(hgt, "Finger keypoints: MediaPipe's hand landmark model (hand_landmarks_detector.onnx)");
+	}
+
 	try {
 		init_hand_detection(hgt, &hgt->views[0].detection);
 		init_hand_detection(hgt, &hgt->views[1].detection);
@@ -1205,6 +1254,24 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 
 		init_keypoint_estimation(hgt, &hgt->views[1].keypoint[0]);
 		init_keypoint_estimation(hgt, &hgt->views[1].keypoint[1]);
+
+		if (hgt->tuneable_values.mediapipe_keypoints) {
+			for (int v = 0; v < 2; v++) {
+				for (int h = 0; h < 2; h++) {
+					init_keypoint_estimation_mediapipe(hgt, &hgt->views[v].keypoint_mp[h]);
+				}
+			}
+		}
+		// Gestures are optional: without their models, tracking runs as before.
+		if (hgt->tuneable_values.mediapipe_gestures) {
+			try {
+				init_gesture_models(hgt);
+				hgt->gestures_enabled = true;
+				HG_INFO(hgt, "Hand gestures: MediaPipe's Gesture Recognizer models loaded");
+			} catch (const std::exception &e) {
+				HG_WARN(hgt, "Hand gestures off: MediaPipe's gesture models didn't load (%s)", e.what());
+			}
+		}
 	} catch (const std::exception &e) {
 		HG_ERROR(hgt, "Failed to initialize ONNX runtime: %s", e.what());
 		delete hgt;
@@ -1324,6 +1391,10 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	hgt->tuneable_values.detection_tiles_per_frame = (int)debug_get_num_option_mercury_detection_tiles_per_frame();
 	hgt->tuneable_values.detection_tile_mirror = debug_get_bool_option_mercury_detection_tile_mirror();
 	hgt->tuneable_values.keypoint_hand_confidence = debug_get_float_option_mercury_keypoint_hand_confidence();
+	hgt->tuneable_values.mediapipe_box_fac = debug_get_float_option_mercury_mediapipe_box();
+	hgt->tuneable_values.mediapipe_presence = debug_get_float_option_mercury_mediapipe_presence();
+	hgt->tuneable_values.mediapipe_xy_conf = debug_get_float_option_mercury_mediapipe_xy_conf();
+	hgt->tuneable_values.mediapipe_depth_conf = debug_get_float_option_mercury_mediapipe_depth_conf();
 	hgt->tuneable_values.min_detection_confidence.val = debug_get_float_option_mercury_min_detection_confidence();
 
 	u_var_add_draggable_f32(hgt, &hgt->tuneable_values.amt_use_depth, "Amount to use depth prediction");
@@ -1371,4 +1442,17 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	HG_DEBUG(hgt, "Hand Tracker initialized!");
 
 	return &hgt->base;
+}
+
+extern "C" bool
+t_hand_tracking_sync_mercury_get_gestures(struct t_hand_tracking_sync *ht_sync, int hand, struct t_hand_gestures *out)
+{
+	*out = {};
+	auto *hgt = reinterpret_cast<xrt::tracking::hand::mercury::HandTracking *>(ht_sync);
+	if (hgt == nullptr || hand < 0 || hand > 1 || !hgt->gestures_enabled) {
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(hgt->gestures_mutex);
+	*out = hgt->gestures_out[hand];
+	return true;
 }

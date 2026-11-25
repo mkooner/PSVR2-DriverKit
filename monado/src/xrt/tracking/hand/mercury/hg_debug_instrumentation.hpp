@@ -62,6 +62,22 @@ struct hg_tuneable_values
 	bool detection_tile_mirror = false; //!< also the mirrored left-hand pass on each crop
 	//! The keypoint model's "is a hand" score needed to keep a view (Mercury's fixed value was 0.97).
 	float keypoint_hand_confidence = 0.97f;
+	/*!
+	 * Finger keypoints from MediaPipe's hand landmark model (hand_landmarks_detector.onnx, Google's Hand Landmarker,
+	 * Apache-2.0) instead of Mercury's own: same crops placed the same way, but 224 px and turned so the fingers point
+	 * up (how that model was trained); its 21 points go to the same 3D fitting. Off: Mercury's model.
+	 */
+	bool mediapipe_keypoints = false;
+	float mediapipe_box_fac = 2.0f;     //!< crop side / the hand's extent (MediaPipe's own tracking uses 2.0)
+	float mediapipe_presence = 0.5f;    //!< the model's hand presence needed to keep a view (MediaPipe's own: 0.5)
+	float mediapipe_xy_conf = 1.0f;     //!< confidence_xy given to every point (the model has no per-point one)
+	float mediapipe_depth_conf = 0.0f;  //!< confidence_depth given to its relative depths (0: depth unused)
+	/*!
+	 * Gesture measurements from MediaPipe's landmarks (needs mediapipe_keypoints): pinch distance and finger
+	 * extension from the landmarks, and the category of MediaPipe's Gesture Recognizer (gesture_embedder.onnx +
+	 * canned_gesture_classifier.onnx). Read with t_hand_tracking_sync_mercury_get_gestures.
+	 */
+	bool mediapipe_gestures = false;
 };
 
 struct hg_tuneable_values *

@@ -10,7 +10,10 @@
 // Many C api things were stolen from here (MIT license):
 // https://github.com/microsoft/onnxruntime-inference-examples/blob/main/c_cxx/fns_candy_style_transfer/fns_candy_style_transfer.c
 #include "hg_sync.hpp"
+#include "hg_gesture_geometry.hpp"
+#include "hg_stereographic_unprojection.hpp"
 #include <atomic>
+#include <limits>
 #include "hg_image_math.inl"
 #include "hg_numerics_checker.hpp"
 
@@ -21,6 +24,9 @@
 namespace xrt::tracking::hand::mercury {
 
 using namespace xrt::auxiliary::onnx;
+
+//! MediaPipe hand landmark model's input side (pixels).
+constexpr int MP_SIZE = 224;
 
 static cv::Matx23f
 blackbar(const cv::Mat &in, enum t_camera_orientation rot, cv::Mat &out, xrt_size out_size)
@@ -583,9 +589,168 @@ run_hand_detection(void *ptr)
 }
 
 void
+init_keypoint_estimation_mediapipe(HandTracking *hgt, onnx_state *state)
+{
+	{
+		// MediaPipe's hand landmark model: input_1 [1, 3, 224, 224] (RGB 0..1), outputs 21 x (x, y, z) in input
+		// pixels, hand presence, handedness and 21 metric points.
+		std::filesystem::path path = hgt->models_folder;
+		path /= "hand_landmarks_detector.onnx";
+		state->wraps.clear();
+		state->wrap = std::make_unique<OnnxWrapper>(hgt->log_level, path.string(), "monado_ht");
+		OnnxWrapper &wrap = *state->wrap;
+		model_input_wrap inputimg = {};
+		inputimg.name = "input_1";
+		inputimg.dimensions[0] = 1;
+		inputimg.dimensions[1] = 3;
+		inputimg.dimensions[2] = MP_SIZE;
+		inputimg.dimensions[3] = MP_SIZE;
+		inputimg.num_dimensions = 4;
+		const size_t bytes = 3 * MP_SIZE * MP_SIZE * sizeof(float);
+		inputimg.data = (float *)malloc(bytes);
+		ORT_SAFE(wrap, CreateTensorWithDataAsOrtValue(wrap.meminfo, inputimg.data, bytes, inputimg.dimensions,
+		                                              inputimg.num_dimensions,
+		                                              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &inputimg.tensor));
+		state->wraps.push_back(inputimg);
+	}
+}
+
+//! An ONNX input of @p dims (float) owned by @p state.
+static void
+add_float_input(OnnxWrapper &wrap, onnx_state *state, const char *name, std::initializer_list<int64_t> dims)
+{
+	model_input_wrap in = {};
+	in.name = name;
+	size_t count = 1;
+	for (int64_t d : dims) {
+		in.dimensions[in.num_dimensions++] = d;
+		count *= (size_t)d;
+	}
+	in.data = (float *)calloc(count, sizeof(float));
+	ORT_SAFE(wrap, CreateTensorWithDataAsOrtValue(wrap.meminfo, in.data, count * sizeof(float), in.dimensions,
+	                                              in.num_dimensions, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in.tensor));
+	state->wraps.push_back(in);
+}
+
+void
+init_gesture_models(HandTracking *hgt)
+{
+	std::filesystem::path embedder = hgt->models_folder, classifier = hgt->models_folder;
+	embedder /= "gesture_embedder.onnx";
+	classifier /= "canned_gesture_classifier.onnx";
+	hgt->gesture_embedder.wraps.clear();
+	hgt->gesture_embedder.wrap = std::make_unique<OnnxWrapper>(hgt->log_level, embedder.string(), "monado_ht");
+	add_float_input(*hgt->gesture_embedder.wrap, &hgt->gesture_embedder, "hand", {1, 21, 3});
+	add_float_input(*hgt->gesture_embedder.wrap, &hgt->gesture_embedder, "handedness", {1, 1});
+	add_float_input(*hgt->gesture_embedder.wrap, &hgt->gesture_embedder, "world_hand", {1, 21, 3});
+	hgt->gesture_classifier.wraps.clear();
+	hgt->gesture_classifier.wrap = std::make_unique<OnnxWrapper>(hgt->log_level, classifier.string(), "monado_ht");
+	add_float_input(*hgt->gesture_classifier.wrap, &hgt->gesture_classifier, "hand_embedding", {1, 128});
+}
+
+/*!
+ * MediaPipe's LandmarksToMatrixCalculator with object normalization (origin landmark 0), as its gesture recognizer
+ * graph runs it (mediapipe/tasks/cc/vision/gesture_recognizer/calculators/landmarks_to_matrix_calculator.cc):
+ * subtract the wrist, divide by the larger of the x and y extents (+1e-5). Its max_x / max_y start at
+ * numeric_limits<float>::min() (the smallest positive float), kept so results match. The rotation step there undoes
+ * the crop's turn, which our crop-space landmarks never had.
+ */
+static void
+mediapipe_object_normalize(const float in[63], float out[63])
+{
+	float min_x = std::numeric_limits<float>::max(), max_x = std::numeric_limits<float>::min();
+	float min_y = std::numeric_limits<float>::max(), max_y = std::numeric_limits<float>::min();
+	for (int i = 0; i < 21; i++) {
+		for (int c = 0; c < 3; c++) {
+			out[i * 3 + c] = in[i * 3 + c] - in[c];
+		}
+		min_x = fminf(min_x, out[i * 3]), max_x = fmaxf(max_x, out[i * 3]);
+		min_y = fminf(min_y, out[i * 3 + 1]), max_y = fmaxf(max_y, out[i * 3 + 1]);
+	}
+	const float scale = fmaxf(max_x - min_x, max_y - min_y) + 1e-5f;
+	for (int i = 0; i < 63; i++) {
+		out[i] /= scale;
+	}
+}
+
+void
+compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out)
+{
+	*out = {};
+	int best = -1;
+	for (int v = 0; v < 2; v++) {
+		const HandTracking::mp_view_output &o = hgt->mp_outputs[hand][v];
+		if (o.valid && o.presence >= hgt->tuneable_values.mediapipe_presence &&
+		    (best < 0 || o.presence > hgt->mp_outputs[hand][best].presence)) {
+			best = v;
+		}
+	}
+	if (best < 0) {
+		return;
+	}
+	const HandTracking::mp_view_output &o = hgt->mp_outputs[hand][best];
+
+	// Geometry on the hand-centred metric landmarks.
+	gesture::Landmarks lm;
+	for (int i = 0; i < 21; i++) {
+		lm.p[i] = {o.world[i * 3], o.world[i * 3 + 1], o.world[i * 3 + 2]};
+	}
+	lm.valid = true;
+	const gesture::HandGeometry geo = gesture::measure(lm);
+	if (!geo.valid) {
+		return;
+	}
+
+	// Gesture Recognizer: image landmarks normalised to the crop (x, y / 224; z / 224 / 0.4 as MediaPipe's landmark
+	// graph does, kLandmarksNormalizeZ), then object-normalised; the same for the world landmarks.
+	float img[63], norm[63], world_norm[63];
+	for (int i = 0; i < 21; i++) {
+		img[i * 3] = o.landmarks[i * 3] / MP_SIZE;
+		img[i * 3 + 1] = o.landmarks[i * 3 + 1] / MP_SIZE;
+		img[i * 3 + 2] = o.landmarks[i * 3 + 2] / MP_SIZE / 0.4f;
+	}
+	mediapipe_object_normalize(img, norm);
+	mediapipe_object_normalize(o.world, world_norm);
+	onnx_state &e = hgt->gesture_embedder;
+	memcpy(e.wraps[0].data, norm, sizeof(norm));
+	e.wraps[1].data[0] = o.handedness;
+	memcpy(e.wraps[2].data, world_norm, sizeof(world_norm));
+	OnnxWrapper &ew = *e.wrap;
+	const OrtValue *e_in[] = {e.wraps[0].tensor, e.wraps[1].tensor, e.wraps[2].tensor};
+	const char *e_names[] = {e.wraps[0].name, e.wraps[1].name, e.wraps[2].name};
+	OrtValue *e_out = nullptr;
+	const char *e_out_name = "Identity";
+	ORT_SAFE(ew, Run(ew.session, nullptr, e_names, e_in, 3, &e_out_name, 1, &e_out));
+	float *embedding = nullptr;
+	ORT_SAFE(ew, GetTensorMutableData(e_out, (void **)&embedding));
+	onnx_state &c = hgt->gesture_classifier;
+	memcpy(c.wraps[0].data, embedding, 128 * sizeof(float));
+	ew.api->ReleaseValue(e_out);
+	OnnxWrapper &cw = *c.wrap;
+	const OrtValue *c_in[] = {c.wraps[0].tensor};
+	const char *c_names[] = {c.wraps[0].name};
+	OrtValue *c_out = nullptr;
+	ORT_SAFE(cw, Run(cw.session, nullptr, c_names, c_in, 1, &e_out_name, 1, &c_out));
+	float *scores = nullptr;
+	ORT_SAFE(cw, GetTensorMutableData(c_out, (void **)&scores));
+	int top = 0;
+	for (int i = 1; i < T_HAND_GESTURE_COUNT; i++) {
+		top = scores[i] > scores[top] ? i : top;
+	}
+	const bool scores_ok = std::isfinite(scores[top]);
+	out->category = (enum t_hand_gesture_category)top;
+	out->category_score = scores_ok ? scores[top] : 0.0f;
+	cw.api->ReleaseValue(c_out);
+
+	out->confidence = o.presence;
+	out->pinch_distance_normalized = geo.pinch_distance_normalized;
+	out->extended_mask = geo.extended_mask;
+	out->valid = scores_ok;
+}
+
+void
 init_keypoint_estimation(HandTracking *hgt, onnx_state *state)
 {
-
 	std::filesystem::path path = hgt->models_folder;
 
 	path /= "grayscale_keypoint_jan18.onnx";
@@ -767,9 +932,231 @@ set_predicted_zero(float *data)
 	}
 }
 
+/*!
+ * The turn (twist, radians) that brings the direction from the wrist (0) to the middle finger's knuckle (9) to
+ * straight up in a crop made with @p current_twist, given those two points in that crop's stereographic frame
+ * (x right, y up, before any mirroring). A point at angle a in the crop lands at a + (twist change).
+ */
+static float
+upright_twist(float current_twist, xrt_vec2 wrist_sg, xrt_vec2 middle_sg)
+{
+	const float dx = middle_sg.x - wrist_sg.x, dy = middle_sg.y - wrist_sg.y;
+	if (dx * dx + dy * dy < 1e-12f) {
+		return current_twist;
+	}
+	return current_twist + (float)M_PI_2 - atan2f(dy, dx);
+}
+
+/*!
+ * Runs MediaPipe's landmark model on the crop @p instr describes; the points come back in Mercury's scaled
+ * stereographic form (x, y in -1..1 of the crop, mirrored like the crop), with depth relative to the middle knuckle
+ * divided by the wrist-to-knuckle length. Returns the hand presence.
+ */
+static float
+mediapipe_run(keypoint_estimation_run_info &info, const projection_instructions &instr, MLOutput2D &px_coord,
+              cv::Mat &crop)
+{
+	onnx_state *state = &info.view->keypoint_mp[info.hand_idx];
+	OnnxWrapper &wrap = *state->wrap;
+	struct HandTracking *hgt = info.view->hgt;
+	const int view_idx = info.view->view;
+
+	stereographic_project_image_sized(info.view->hgdist, instr, hgt->views[view_idx].run_model_on_this, MP_SIZE,
+	                                  crop);
+
+	// Contrast stretch (1st to 99th percentile over the crop); the same gray in all three channels. (Measured over the
+	// crop's middle only, or CLAHE first: the dim left hand was rejected more, 51-52% vs 35%; 2026-11-24.)
+	{
+		XRT_TRACE_IDENT(convert_format);
+		int hist[256] = {0};
+		const int n = MP_SIZE * MP_SIZE;
+		const uint8_t *px = crop.ptr<uint8_t>(0);
+		for (int i = 0; i < n; i++) {
+			hist[px[i]]++;
+		}
+		int lo = 0, hi = 255, acc = 0;
+		for (int v = 0; v < 256; v++) {
+			acc += hist[v];
+			if (acc >= n / 100) {
+				lo = v;
+				break;
+			}
+		}
+		acc = 0;
+		for (int v = 255; v >= 0; v--) {
+			acc += hist[v];
+			if (acc >= n / 100) {
+				hi = v;
+				break;
+			}
+		}
+		const float scale = 1.0f / fmaxf((float)(hi - lo), 1.0f);
+		float *data = state->wraps[0].data;
+		for (int i = 0; i < n; i++) {
+			const float v = fminf(fmaxf((px[i] - lo) * scale, 0.0f), 1.0f);
+			data[i] = v, data[n + i] = v, data[2 * n + i] = v;
+		}
+	}
+
+	const OrtValue *inputs[] = {state->wraps[0].tensor};
+	const char *input_names[] = {state->wraps[0].name};
+	// Identity: 21 x (x, y, z) in input pixels; Identity_1: presence; Identity_2: right-hand score; Identity_3: 21
+	// hand-centred metric points.
+	OrtValue *output_tensors[] = {nullptr, nullptr, nullptr, nullptr};
+	const char *output_names[] = {"Identity", "Identity_1", "Identity_2", "Identity_3"};
+	{
+		XRT_TRACE_IDENT(model);
+		ORT_SAFE(wrap, Run(wrap.session, nullptr, input_names, inputs, 1, output_names, 4, output_tensors));
+	}
+	float *pts = nullptr, *presence = nullptr, *handedness = nullptr, *world = nullptr;
+	ORT_SAFE(wrap, GetTensorMutableData(output_tensors[0], (void **)&pts));
+	ORT_SAFE(wrap, GetTensorMutableData(output_tensors[1], (void **)&presence));
+	ORT_SAFE(wrap, GetTensorMutableData(output_tensors[2], (void **)&handedness));
+	ORT_SAFE(wrap, GetTensorMutableData(output_tensors[3], (void **)&world));
+	const float present = presence[0];
+	{
+		// Kept for the gesture measurements (compute_hand_gestures); this job owns this [hand][view] slot.
+		HandTracking::mp_view_output &o = hgt->mp_outputs[info.hand_idx][view_idx];
+		o.presence = present;
+		o.handedness = handedness[0];
+		memcpy(o.landmarks, pts, sizeof(o.landmarks));
+		memcpy(o.world, world, sizeof(o.world));
+		o.valid = true;
+	}
+
+	const float s = (float)MP_SIZE;
+	const float len = sqrtf((pts[27] - pts[0]) * (pts[27] - pts[0]) + (pts[28] - pts[1]) * (pts[28] - pts[1]) +
+	                        (pts[29] - pts[2]) * (pts[29] - pts[2]));
+	const float z9 = pts[29];
+	for (int i = 0; i < 21; i++) {
+		const float u = pts[i * 3], v = pts[i * 3 + 1], z = pts[i * 3 + 2];
+		// x: -1 at the crop's left edge (+1 when mirrored), y: +1 at its top (see stereographic_project_image_sized)
+		px_coord[i].pos_2d.x = instr.flip ? 1.0f - 2.0f * u / s : -1.0f + 2.0f * u / s;
+		px_coord[i].pos_2d.y = 1.0f - 2.0f * v / s;
+		px_coord[i].confidence_xy = hgt->tuneable_values.mediapipe_xy_conf;
+		px_coord[i].depth_relative_to_midpxm = len > 1e-3f ? (z - z9) / len : 0.0f;
+		px_coord[i].confidence_depth = hgt->tuneable_values.mediapipe_depth_conf;
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(output_tensors); i++) {
+		wrap.api->ReleaseValue(output_tensors[i]);
+	}
+	return present;
+}
+
+//! Mercury's keypoint step with MediaPipe's landmark model (hg_tuneable_values::mediapipe_keypoints).
+static void
+run_keypoint_estimation_mediapipe(keypoint_estimation_run_info &info)
+{
+	struct HandTracking *hgt = info.view->hgt;
+	const int view_idx = info.view->view;
+	const int hand_idx = info.hand_idx;
+	one_frame_one_view &this_output = hgt->keypoint_outputs[hand_idx].views[view_idx];
+	MLOutput2D &px_coord = this_output.keypoints_in_scaled_stereographic;
+	t_camera_model_params dist = info.view->hgdist;
+	projection_instructions instr(info.view->hgdist);
+	cv::Mat crop;
+	float present = 0.0f;
+
+	// Only for tracked hands (pose-predicted regions); detection boxes go to Mercury's model.
+	Eigen::Array<float, 3, 21> keypoints_in_camera;
+	if (view_idx == 0) {
+		keypoints_in_camera = hgt->pose_predicted_keypoints[hand_idx];
+	} else {
+		for (int i = 0; i < 21; i++) {
+			Eigen::Quaternionf ori = map_quat(hgt->left_in_right.orientation);
+			Eigen::Vector3f tmp = hgt->pose_predicted_keypoints[hand_idx].col(i);
+			tmp = ori * tmp;
+			tmp += map_vec3(hgt->left_in_right.position);
+			keypoints_in_camera.col(i) = tmp;
+		}
+	}
+	// The predicted hand with the camera's up, then turned so its wrist-to-knuckle direction points up.
+	// (make_projection_instructions gives x mirrored when flipped and y negated: undone here.)
+	hand21_2d pred;
+	make_projection_instructions(dist, hand_idx, 1.0f, 0.0f, keypoints_in_camera, instr, pred);
+	const float flip = instr.flip ? -1.0f : 1.0f;
+	const float twist = upright_twist(0.0f, {pred[0].pos_2d.x * flip, -pred[0].pos_2d.y},
+	                                  {pred[9].pos_2d.x * flip, -pred[9].pos_2d.y});
+	/*
+	 * MediaPipe's own tracking crop (hand_landmarks_detector_graph: HandLandmarksToRect on the palm and the base
+	 * finger joints, then RectTransformation scale 2.0, shift_y -0.1): the box around landmarks 0, 1, 2, 3, 5, 6,
+	 * 9, 10, 13, 14, 17, 18 in the turned frame, twice that size, moved a tenth of its side toward the fingers. The
+	 * other joints are set to the wrist so make_projection_instructions boxes only these (its palm-size floor uses
+	 * 0, 5, 9, 17, kept). A box around the whole hand made the fingers much smaller in the crop: offline, pinch
+	 * barely separated from an open hand (median thumb-index / palm width 0.94 vs 1.23).
+	 */
+	Eigen::Array<float, 3, 21> partial = keypoints_in_camera;
+	for (int i : {4, 7, 8, 11, 12, 15, 16, 19, 20}) {
+		partial.col(i) = keypoints_in_camera.col(0);
+	}
+	make_projection_instructions(dist, hand_idx, hgt->tuneable_values.mediapipe_box_fac, twist, partial, instr,
+	                             pred);
+	{
+		// The tenth-of-the-side shift toward the fingers: up in the turned crop (+y, stereographic).
+		const Eigen::Vector3f moved =
+		    instr.rot_quat * stereographic_unprojection(0.0f, 0.2f * instr.stereographic_radius);
+		instr.rot_quat = direction(moved, twist);
+	}
+	present = mediapipe_run(info, instr, px_coord, crop);
+
+	xrt::auxiliary::math::map_quat(this_output.look_dir) = instr.rot_quat;
+	this_output.stereographic_radius = instr.stereographic_radius;
+
+	HG_TRACE(hgt, "mediapipe presence view %d hand %d: %f", view_idx, hand_idx, present);
+	this_output.active = present >= hgt->tuneable_values.mediapipe_presence;
+
+	// No finger curls from this model: a variance so large the fitting ignores them.
+	for (int i = 0; i < 5; i++) {
+		this_output.curls[i].value = 0.0f;
+		this_output.curls[i].variance = 1e6f;
+	}
+
+	if (hgt->debug_scribble) {
+		int root_x = 8 + ((2 * hand_idx) * (128 + 8));
+		int root_y = 8 + (2 * view_idx * (128 + 8));
+		cv::Mat small;
+		cv::resize(crop, small, cv::Size(128, 128));
+		small.copyTo(hgt->visualizers.mat(cv::Rect(root_x, root_y, 128, 128)));
+	}
+
+	// Development: MERCURY_MEDIAPIPE_DUMP=<dir> writes every 4th crop as a PGM (named by frame time), to check the turn
+	// and box.
+	static const char *dump = getenv("MERCURY_MEDIAPIPE_DUMP");
+	static std::atomic<int> dumped{0};
+	if (dump != nullptr) {
+		const int k = dumped++;
+		if (k % 4 == 0 && k < 4 * 4000) {
+			char path[1024];
+			// The landmarks' centre in the crop (0 = middle, crop pixels): how well the crop was placed.
+			const HandTracking::mp_view_output &mo = hgt->mp_outputs[hand_idx][view_idx];
+			float mx = 0, my = 0;
+			for (int i = 0; i < 21; i++) {
+				mx += mo.landmarks[i * 3] / 21.0f, my += mo.landmarks[i * 3 + 1] / 21.0f;
+			}
+			snprintf(path, sizeof(path), "%s/mp_%lld_h%d_v%d_dx%+04d_dy%+04d_p%03d.pgm", dump,
+			         (long long)hgt->current_frame_timestamp, hand_idx, view_idx, (int)lroundf(mx - MP_SIZE / 2.0f),
+			         (int)lroundf(my - MP_SIZE / 2.0f), (int)(present * 100));
+			cv::imwrite(path, crop);
+		}
+	}
+}
+
 static void
 run_keypoint_estimation_unsafe(keypoint_estimation_run_info &info)
 {
+	// MediaPipe for tracked hands; a fresh detection box goes to Mercury's own model, which picks hands up from
+	// those far more reliably (offline, PS VR2: MediaPipe kept 25% of detection crops vs 91% of tracked ones).
+	// When MediaPipe doesn't see a hand in a tracked crop, Mercury's model gets the same frame: a hand MediaPipe
+	// doubts in one frame (faint, at a camera's edge) was otherwise lost whole and slow to be found again (offline:
+	// left hand 152 such losses vs 34 with Mercury's model alone).
+	if (info.view->hgt->tuneable_values.mediapipe_keypoints &&
+	    info.view->regions_of_interest_this_frame[info.hand_idx].provenance != ROIProvenance::HAND_DETECTION) {
+		run_keypoint_estimation_mediapipe(info);
+		if (info.view->hgt->keypoint_outputs[info.hand_idx].views[info.view->view].active) {
+			return;
+		}
+	}
+
 	onnx_state *state = &info.view->keypoint[info.hand_idx];
 	OnnxWrapper &wrap = *state->wrap;
 
@@ -1124,6 +1511,9 @@ run_keypoint_estimation(void *ptr)
 void
 release_onnx_state(onnx_state *state)
 {
+	if (!state->wrap) {
+		return; // never loaded (MediaPipe off)
+	}
 	OnnxWrapper &wrap = *state->wrap;
 
 	for (model_input_wrap &a : state->wraps) {
