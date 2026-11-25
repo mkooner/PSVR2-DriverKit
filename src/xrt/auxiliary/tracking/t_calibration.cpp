@@ -1343,6 +1343,7 @@ t_calibration_stereo_create(struct xrt_frame_context *xfctx,
 	make_gui_str(c);
 
 	int ret = 0;
+#ifdef XRT_OPENCV_HIGHGUI
 	if (debug_get_bool_option_hsv_filter()) {
 		ret = t_debug_hsv_filter_create(xfctx, *out_sink, out_sink);
 	}
@@ -1354,6 +1355,12 @@ t_calibration_stereo_create(struct xrt_frame_context *xfctx,
 	if (debug_get_bool_option_hsv_viewer()) {
 		ret = t_debug_hsv_viewer_create(xfctx, *out_sink, out_sink);
 	}
+#else
+	if (debug_get_bool_option_hsv_filter() || debug_get_bool_option_hsv_picker() ||
+	    debug_get_bool_option_hsv_viewer()) {
+		U_LOG_W("HSV debug windows need OpenCV's highgui (built with XRT_OPENCV_HIGHGUI=OFF)");
+	}
+#endif
 
 	// Ensure we only get rgb, yuv, yuyv, uyvy or l8 frames.
 	u_sink_create_to_rgb_yuv_yuyv_uyvy_or_l8(xfctx, *out_sink, out_sink);

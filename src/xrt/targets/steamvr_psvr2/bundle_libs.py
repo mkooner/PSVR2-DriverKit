@@ -19,6 +19,10 @@ build, 2026-11-22: 35 of OpenCV's libraries, Qt, GStreamer and FFmpeg among them
 into a DT_RPATH (the tag only, the path stays): the loader then searches it and, after it, the RPATHs of the libraries
 that loaded it, up to the plugin's $ORIGIN. No tool needed (an earlier version used patchelf, which a user's build
 then stopped on, for libjpeg).
+A library the runtime has is still bundled when the runtime's copy is too old for us: it lacks a symbol the plugin or a
+bundled library takes from it (e.g. the runtime's 2021 libdeflate under the system's OpenEXR: undefined symbol
+libdeflate_alloc_compressor_ex; its fontconfig under libass: FcConfigSetDefaultSubstitute; 2026-11-24). Checked with
+binutils' nm, repeated until nothing changes; without nm, the runtime's copies are used as before.
 Never bundled: the C runtime (glibc, libstdc++, libgcc_s): pressure-vessel uses the newer of the host's and the
 runtime's, and a second copy would clash with the one SteamVR itself loads.
 """
@@ -63,6 +67,64 @@ def dependencies(path):
         elif parts and parts[0].startswith("/") and "ld-linux" not in parts[0]:
             deps[os.path.basename(parts[0])] = parts[0]
     return deps
+
+
+def dynamic_symbols(path, defined):
+    """The library's dynamic symbol names (defined ones, or undefined ones), versions stripped; None without nm."""
+    flag = "--defined-only" if defined else "--undefined-only"
+    try:
+        out = subprocess.run(["nm", "-D", flag, path], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    names = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if parts:
+            names.add(parts[-1].split("@", 1)[0])
+    return names
+
+
+def runtime_copy(files_dir, name):
+    """The runtime's file for a library, also in subfolders (Debian keeps BLAS/LAPACK in openblas-pthread/)."""
+    for d in ("lib/x86_64-linux-gnu", "usr/lib/x86_64-linux-gnu"):
+        base = os.path.join(files_dir, d)
+        p = os.path.join(base, name)
+        if os.path.exists(p):
+            return p
+        if os.path.isdir(base):
+            for root, _dirs, files in os.walk(base):
+                if name in files:
+                    return os.path.join(root, name)
+                # the runtime's unpacked files may hold only the versioned file (libharfbuzz.so.0.20704.0)
+                versioned = sorted(f for f in files if f.startswith(name + "."))
+                if versioned:
+                    return os.path.join(root, versioned[-1])
+    return None
+
+
+def too_old_in_runtime(deps, files_dir, bundled):
+    """Runtime-provided libraries whose runtime copy lacks symbols the plugin or bundled libraries take from them."""
+    consumers = [p for n, p in deps.items() if n in bundled]
+    undefined = {}
+    for p in consumers:
+        u = dynamic_symbols(p, False)
+        if u is None:
+            return []
+        undefined[p] = u
+    need_all = set().union(*undefined.values()) if undefined else set()
+    old = []
+    for name, src in sorted(deps.items()):
+        if name in bundled or any(name.startswith(n) for n in NEVER):
+            continue
+        rt = runtime_copy(files_dir, name)
+        host_def = dynamic_symbols(src, True)
+        rt_def = dynamic_symbols(rt, True) if rt else None
+        if host_def is None or rt_def is None:
+            continue
+        missing = (need_all & host_def) - rt_def
+        if missing:
+            old.append((name, sorted(missing)[0], len(missing)))
+    return old
 
 
 def runpath_to_rpath(path):
@@ -124,6 +186,18 @@ def main():
         if name in have:
             continue
         bundled.append(name)
+    # The plugin itself takes symbols from its dependencies too.
+    deps_with_plugin = dict(deps)
+    deps_with_plugin["(plugin)"] = os.path.abspath(plugin)
+    newer = []
+    while True:
+        old = too_old_in_runtime(deps_with_plugin, files_dir, set(bundled) | {"(plugin)"})
+        if not old:
+            break
+        for name, sym, n in old:
+            bundled.append(name)
+            newer.append(f"{name} ({n} symbols, e.g. {sym})")
+    bundled = [b for b in bundled if b != "(plugin)"]
     for name in bundled:
         src = deps[name]
         if not dry:
@@ -136,6 +210,8 @@ def main():
           f"from Steam's runtime, {len(skipped)} from the system (C runtime, graphics, udev/dbus)")
     if bundled:
         print("bundled: " + " ".join(bundled))
+    if newer:
+        print("bundled although the runtime has them (its copies too old): " + "; ".join(newer))
     if repathed:
         print(f"{len(repathed)} had a RUNPATH, now an RPATH (they find the bundled libraries): " + " ".join(repathed))
     return 0
