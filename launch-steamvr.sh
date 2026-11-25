@@ -391,8 +391,8 @@ if [ "${HAND_TRACKING:-0}" = 1 ]; then
 fi
 # MediaPipe hands (default when hand_landmarks_detector.onnx, gesture_embedder.onnx and canned_gesture_classifier.onnx
 # are in ~/.local/share/monado/hand-tracking-models): Mercury reads the fingers with Google's MediaPipe hand landmark
-# model and the gestures come from MediaPipe's measurements (pinch = trigger, Closed_Fist = grip; dashboard: palm
-# toward the face at eye level, pinch held). MEDIAPIPE_HANDS=0: Mercury's own model and joint gestures, as before.
+# model and the gestures come from MediaPipe's measurements (pinch = trigger, Closed_Fist = grip; dashboard: open palm
+# toward the face, then a fist). MEDIAPIPE_HANDS=0: Mercury's own model and joint gestures, as before.
 # GESTURE_DEBUG=1 logs every gesture change with its reason.
 if [ "${MEDIAPIPE_HANDS:-1}" = 0 ]; then
 	export MERCURY_MEDIAPIPE=0 MERCURY_MEDIAPIPE_GESTURES=0

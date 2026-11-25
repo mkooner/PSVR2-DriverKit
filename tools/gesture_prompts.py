@@ -19,7 +19,7 @@ import time
 REACTION_S = 1.0
 HOLD_S = 3.0  # a gesture
 REST_S = 2.0  # "open" between gestures
-SYSTEM_S = 5.0  # the dashboard gesture: time to raise the hand, pinch and hold
+SYSTEM_S = 5.0  # the dashboard gesture: time to raise an open palm, then close it into a fist
 
 
 def now_ns():
@@ -50,11 +50,11 @@ def schedule(rounds):
             ):
                 steps.append((hand, gesture, orientation, HOLD_S, text))
                 steps.append((hand, "open", "any", REST_S, "open"))
-        # The dashboard gesture (raised palm toward the face, pinch held), then closing it the same way.
+        # The dashboard gesture (raised open palm toward the face, then a fist), then closing it the same way.
         for action in ("open", "close"):
             steps.append((hand, "system", f"{action}_dashboard", SYSTEM_S,
-                          f"{action} the dashboard: raise your {hand} hand to eye level, palm toward your face, "
-                          "pinch and hold"))
+                          f"{action} the dashboard: raise your open {hand} hand, palm toward your face, "
+                          "then make a fist"))
             steps.append((hand, "open", "any", REST_S + 1, "let go, and lower your hand"))
     return steps
 

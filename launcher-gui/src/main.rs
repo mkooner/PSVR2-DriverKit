@@ -119,7 +119,7 @@ fn headset_settings(target: Target, accel: bool) -> Vec<Setting> {
         t(toggle("PSVR2_SONY_LD_CONFIG", "Sony's LED detector settings",
                  "Send Sony's LED detector settings to the headset (controller tracking in bright rooms).", true)),
         t(toggle("PSVR2_HAND_TRACKING", "Hand tracking (experimental)",
-                 "Experimental, off by default. Tracks your bare hands with the headset's cameras while a Sense controller is off: finger tracking in SteamVR games, pinch as the trigger, a closed hand as the grip, palm toward your face and pinch for the dashboard. Needs a driver compiled with Compile hand tracking ticked (Compile Driver tab); turn a controller back on to use it again.", false)),
+                 "Experimental, off by default. Tracks your bare hands with the headset's cameras while a Sense controller is off: finger tracking in SteamVR games, pinch as the trigger, a closed hand as the grip, an open palm toward your face, then a fist, for the dashboard. Needs a driver compiled with Compile hand tracking ticked (Compile Driver tab); turn a controller back on to use it again.", false)),
         t(toggle("PSVR2_BASALT", "Basalt referee",
                  "Basalt visual-inertial tracking checks the headset's position jumps in fast turns (~2 CPU cores).", false)),
         t(value("VIT_SYSTEM_LIBRARY_PATH", "Basalt library", "libbasalt.so for the Basalt referee.", "", true)),
