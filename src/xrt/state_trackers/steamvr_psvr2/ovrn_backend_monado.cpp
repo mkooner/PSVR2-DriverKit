@@ -773,6 +773,20 @@ public:
 	 * joints relative to it), in the backend's tracking space like the device poses (the tracking origin's offset
 	 * applied). The tracker answers from its latest result without waiting for a camera frame.
 	 */
+	std::string
+	handTrackingProfile() override
+	{
+#if defined(XRT_BUILD_DRIVER_PSVR2) && defined(XRT_BUILD_DRIVER_HANDTRACKING)
+		if (m_head == NULL || m_head->name != XRT_DEVICE_PSVR2) {
+			return {};
+		}
+		const char *p = psvr2_hand_tracking_get_profile(psvr2_hmd_get_hand_tracker(m_head));
+		return p != NULL ? p : "";
+#else
+		return {};
+#endif
+	}
+
 	bool
 	handGestures(Hand hand, gest::Sample *out) override
 	{

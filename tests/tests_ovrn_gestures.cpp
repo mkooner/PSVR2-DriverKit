@@ -380,76 +380,61 @@ TEST_CASE("pinch value")
 	CHECK(m.pinchValue() == Approx(0.0f));
 }
 
-TEST_CASE("dashboard gesture: open palm toward the face, then a fist")
+TEST_CASE("dashboard gesture: open palm toward the face, raised, held about 1 s (judged over a window)")
 {
 	constexpr int64_t ms = 1'000'000;
-	// frames every 16 ms; returns the button after running [from, to)
-	const auto run = [](SystemGesture &g, int64_t from, int64_t to, bool pose, bool palm, bool fist) {
+	// frames every 11 ms; open_every: Open_Palm on 1 of that many readings (MediaPipe's flicker), the rest "none"
+	const auto run = [](SystemGesture &g, int64_t from, int64_t to, bool pose, int open_every, bool bad = false) {
 		bool down = false;
-		for (int64_t t = from; t < to; t += 16) {
-			down = g.update(t * ms, pose, palm, fist);
+		int k = 0;
+		for (int64_t t = from; t < to; t += 11, k++) {
+			down = g.update(t * ms, pose, true, open_every > 0 && k % open_every == 0, bad);
 		}
 		return down;
 	};
-	SECTION("palm 0.6 s then fist presses; the button stays down while the fist is held, up after")
+	SECTION("a steady open palm held 1 s presses; down while held, up when the pose ends")
 	{
 		SystemGesture g;
-		CHECK_FALSE(run(g, 0, 620, true, true, false));
-		CHECK(g.armed(620 * ms));
-		CHECK(run(g, 620, 700, true, false, true));
-		CHECK(run(g, 700, 1100, false, false, true)); // the pose may go while the fist is held
-		CHECK_FALSE(run(g, 1100, 1116, true, false, false));
-		CHECK_FALSE(g.armed(1116 * ms)); // a new open palm is needed for the next press
-		CHECK_FALSE(run(g, 1116, 1200, true, false, true));
+		CHECK_FALSE(run(g, 0, 900, true, 1));
+		CHECK(run(g, 900, 1100, true, 1));
+		CHECK(run(g, 1100, 2000, true, 1));
+		CHECK_FALSE(run(g, 2000, 2700, false, 0));
 	}
-	SECTION("a fist without the open palm first does nothing")
+	SECTION("MediaPipe's flicker (open on half the readings) still presses")
 	{
 		SystemGesture g;
-		CHECK_FALSE(run(g, 0, 1000, true, false, true));
+		CHECK(run(g, 0, 1200, true, 2));
 	}
-	SECTION("too short an open palm doesn't arm (a glance at the hand, then a grab)")
+	SECTION("too little open palm (1 in 4 readings) doesn't press")
 	{
 		SystemGesture g;
-		CHECK_FALSE(run(g, 0, 400, true, true, false));
-		CHECK_FALSE(run(g, 400, 600, true, false, true));
+		CHECK_FALSE(run(g, 0, 2000, true, 4));
 	}
-	SECTION("open palm not toward the face (or too low) doesn't arm")
+	SECTION("a fist or pinch in the window doesn't press")
 	{
 		SystemGesture g;
-		CHECK_FALSE(run(g, 0, 1000, false, true, false));
-		CHECK_FALSE(run(g, 1000, 1200, true, false, true));
+		CHECK_FALSE(run(g, 0, 2000, true, 1, true));
 	}
-	SECTION("the fist must follow within 0.5 s")
+	SECTION("the pose must hold: open palm not toward the face (or too low) doesn't press")
 	{
 		SystemGesture g;
-		run(g, 0, 620, true, true, false);
-		run(g, 620, 1200, false, false, false);
-		CHECK_FALSE(run(g, 1200, 1300, true, false, true));
-		SystemGesture h;
-		run(h, 0, 620, true, true, false);
-		run(h, 620, 1000, false, false, false);
-		CHECK(run(h, 1000, 1100, true, false, true));
+		CHECK_FALSE(run(g, 0, 2000, false, 1));
 	}
-	SECTION("short gaps (invalid frames) don't restart the open palm; long ones do")
+	SECTION("one hold is one press; a second hold after letting go is another")
 	{
 		SystemGesture g;
-		run(g, 0, 300, true, true, false);
-		run(g, 300, 400, false, false, false); // 0.1 s gap
-		run(g, 400, 620, true, true, false);
-		CHECK(g.armed(620 * ms));
-		SystemGesture h;
-		run(h, 0, 300, true, true, false);
-		run(h, 300, 540, false, false, false); // 0.24 s gap
-		run(h, 540, 900, true, true, false);
-		CHECK_FALSE(h.armed(900 * ms));
+		CHECK(run(g, 0, 1200, true, 1));
+		CHECK(run(g, 1200, 3000, true, 1)); // still the same press
+		CHECK_FALSE(run(g, 3000, 3700, false, 0));
+		CHECK_FALSE(run(g, 3700, 4500, true, 1)); // the window still holds the let-go frames
+		CHECK(run(g, 4500, 5000, true, 1));
 	}
-	SECTION("reset (hand lost) lets go and forgets the palm")
+	SECTION("reset (hand lost) lets go and forgets the window")
 	{
 		SystemGesture g;
-		run(g, 0, 620, true, true, false);
-		CHECK(run(g, 620, 700, true, false, true));
+		CHECK(run(g, 0, 1200, true, 1));
 		g.reset();
 		CHECK_FALSE(g.down());
-		CHECK_FALSE(g.armed(700 * ms));
+		CHECK_FALSE(run(g, 1200, 1700, true, 1));
 	}
 }

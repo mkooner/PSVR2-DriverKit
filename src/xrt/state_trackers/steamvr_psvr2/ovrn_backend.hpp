@@ -297,6 +297,13 @@ public:
 	 * has none (gestures off or unavailable): the joint-based gestures are used. With true, out->valid tells whether
 	 * they belong to the hand as tracked now.
 	 */
+	//! The hand tracker's profile ("mercury", "mediapipe"; empty: none or not running yet), for per-profile gestures.
+	virtual std::string
+	handTrackingProfile()
+	{
+		return {};
+	}
+
 	virtual bool
 	handGestures(Hand hand, gest::Sample *out)
 	{

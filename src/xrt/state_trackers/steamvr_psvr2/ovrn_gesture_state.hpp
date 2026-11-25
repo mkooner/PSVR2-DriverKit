@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include <deque>
 
 namespace ovrn::gest {
 
@@ -290,71 +291,72 @@ private:
 };
 
 /*!
- * The dashboard (system button) gesture: an open palm toward the face, then a fist.
+ * The dashboard (system button) gesture: an open palm toward the face, raised, held for a moment.
  *
- * Why not "palm toward the face, pinch and hold" (until 2026-11-24): on both labelled sessions (20:50, 21:47) it
- * caught 0 of 8 dashboard attempts. With the hand raised toward the face MediaPipe sees a clear open palm (presence
- * 0.99, Open_Palm) and the thumb-index gap stays about 1.2 palm widths: the pinch isn't seen there. Open palm and fist
- * are the two shapes it recognises best (fist: every grip prompt in every session).
+ * Built only from what MediaPipe reads reliably with the palm facing the headset's cameras (2026-11-25 benchmark,
+ * camera-20261125-002624, the four dashboard prompts and all 12 pinch prompts):
+ *  - the palm's direction and height (the tracked 3D hand): matched every prompted palm orientation;
+ *  - MediaPipe's Open_Palm category, judged over a window: on a palm facing the cameras it alternates with "none"
+ *    (right-hand prompt: open on 92 frames, none on 312), so requiring it on every frame made the result depend on
+ *    where the flickers fell (hand_sim, same recording: 1 of 4 prompts in one run, 4 of 4 in another).
+ * Not used, because MediaPipe misreads them in this pose: a fist (Closed_Fist in 0 of the 4 prompts after the open
+ * palm), finger straightness (an open palm read as 0-1 straight fingers) and a held pinch (under the threshold on 5-81
+ * of ~270 readings in palm-toward pinch prompts). The earlier designs depended on those and never opened (palm + held
+ * pinch with straight fingers: 0 of 8; open palm then fist: 0 of 4).
  *
- * Arming: the open palm with the pose (palm toward the face, raised) for palm_ns, with gaps up to gap_ns (invalid
- * frames while the hand turns). Then a fist within fist_within_ns presses the system button; it stays down while the
- * fist is held and goes up when the fist ends. A fist on its own (no open palm toward the face first) does nothing.
- * The open palm must be held still a moment (palm_ns) and the fist must follow quickly (fist_within_ns): looking at
- * the open hand and then grabbing something is an everyday move too (see Config).
+ * Over the last window_ns: the pose (palm toward the face, raised) on at least pose_min of the frames, MediaPipe's
+ * Open_Palm on at least open_min of its valid readings and a fist or pinch on at most bad_max. Then the system button
+ * goes down and stays down until the pose drops below rearm_below of the window, so one hold is one press (SteamVR
+ * toggles the dashboard per press). hand_sim on the benchmark (three runs): 4 of 4 dashboard prompts every run; presses
+ * elsewhere 0, 1, 1, each in an "open hand" prompt where the open palm was held up toward the face (the same pose).
  */
 class SystemGesture
 {
 public:
 	struct Config
 	{
-		/*
-		 * 0.6 s and 0.5 s since the 2026-11-24 23:37 session: 0.3 s and 1 s let a look at the open hand followed
-		 * by a grab toggle the dashboard (replay: 9 presses in 40 s with the -0.25 m height, 2 now). The open palm
-		 * on the 8 deliberate attempts of the 20:50 and 21:47 sessions lasted 0.6 s on 5 (not asked to hold it).
-		 */
-		int64_t palm_ns = 600'000'000;
-		int64_t gap_ns = 150'000'000;
-		int64_t fist_within_ns = 500'000'000;
+		int64_t window_ns = 1'000'000'000;
+		float pose_min = 0.95f;
+		float open_min = 0.40f;
+		float bad_max = 0.10f;
+		float rearm_below = 0.50f;
 	};
 
 	SystemGesture() = default;
 	explicit SystemGesture(const Config &cfg) : m_cfg(cfg) {}
 
 	/*!
-	 * One frame. pose_ok: palm toward the face and raised; open_palm, fist: the steady gestures (Machine::state()).
+	 * One frame. pose_ok: palm toward the face and raised; gestures_valid: MediaPipe measured the hand this frame;
+	 * open_palm: its Open_Palm (enough score); fist_or_pinch: its Closed_Fist (enough score) or thumb and index together.
 	 * Returns whether the system button is down.
 	 */
 	bool
-	update(int64_t now_ns, bool pose_ok, bool open_palm, bool fist)
+	update(int64_t now_ns, bool pose_ok, bool gestures_valid, bool open_palm, bool fist_or_pinch)
 	{
+		m_frames.push_back({now_ns, pose_ok, gestures_valid, gestures_valid && open_palm,
+		                    gestures_valid && fist_or_pinch});
+		while (!m_frames.empty() && m_frames.front().t < now_ns - m_cfg.window_ns) {
+			m_frames.pop_front();
+		}
+		int pose = 0, valid = 0, open = 0, bad = 0;
+		for (const Frame &f : m_frames) {
+			pose += f.pose ? 1 : 0;
+			valid += f.valid ? 1 : 0;
+			open += f.open ? 1 : 0;
+			bad += f.bad ? 1 : 0;
+		}
+		const float n = (float)m_frames.size();
+		const float pose_share = pose / n;
+		const bool full = m_frames.back().t - m_frames.front().t >= m_cfg.window_ns * 95 / 100;
 		if (m_down) {
-			m_down = fist;
+			m_down = pose_share >= m_cfg.rearm_below;
 			return m_down;
 		}
-		if (pose_ok && open_palm) {
-			if (!m_palm || now_ns - m_lastOkNs > m_cfg.gap_ns) {
-				m_sinceNs = now_ns;
-			}
-			m_palm = true;
-			m_lastOkNs = now_ns;
-			if (now_ns - m_sinceNs >= m_cfg.palm_ns) {
-				m_armed = true;
-				m_armedUntilNs = now_ns + m_cfg.fist_within_ns;
-			}
-		}
-		if (fist && armed(now_ns)) {
+		if (full && pose_share >= m_cfg.pose_min && valid > 0 && (float)open / valid >= m_cfg.open_min &&
+		    (float)bad / valid <= m_cfg.bad_max) {
 			m_down = true;
-			m_armed = m_palm = false;
 		}
 		return m_down;
-	}
-
-	//! Whether a fist now would press the button (the open palm was seen, the time to close it hasn't run out).
-	bool
-	armed(int64_t now_ns) const
-	{
-		return m_armed && now_ns <= m_armedUntilNs;
 	}
 
 	bool
@@ -363,19 +365,30 @@ public:
 		return m_down;
 	}
 
-	//! The hand is lost: let go and forget the open palm.
+	//! Whether the pose is on in the latest frame (for diagnostics).
+	bool
+	posing() const
+	{
+		return !m_frames.empty() && m_frames.back().pose;
+	}
+
+	//! The hand is lost: let go and forget the window.
 	void
 	reset()
 	{
-		m_down = m_armed = m_palm = false;
+		m_frames.clear();
+		m_down = false;
 	}
 
 private:
+	struct Frame
+	{
+		int64_t t;
+		bool pose, valid, open, bad;
+	};
 	Config m_cfg;
+	std::deque<Frame> m_frames;
 	bool m_down = false;
-	bool m_palm = false;  //!< the open palm toward the face seen (since m_sinceNs, last at m_lastOkNs)
-	bool m_armed = false; //!< the open palm lasted palm_ns: a fist until m_armedUntilNs presses
-	int64_t m_sinceNs = 0, m_lastOkNs = 0, m_armedUntilNs = 0;
 };
 
 } // namespace ovrn::gest
