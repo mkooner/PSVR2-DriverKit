@@ -7,13 +7,10 @@
  * The hand tracker measures each camera frame (backend: HandGestures; Mercury with MediaPipe's models): the thumb to
  * index tip distance over the palm width, which fingers are extended, and the Gesture Recognizer's category. This
  * turns those per-frame measurements into steady gestures:
- *  - pinch: hysteresis (on below pinch_on, off above pinch_off) and a few frames' confirmation each way;
- *  - deliberate pinch (for the system gesture): a pinch with the other fingers open (deliberate_min_other_fingers of
- *    middle, ring, little straight): a fist or a pointing hand brings the thumb to the index finger with them curled;
- *  - fist: the Gesture Recognizer's Closed_Fist with enough score, confirmed; while a fist is held, no pinch (a fist
- *    brings the thumb to the index finger);
- *  - open palm, victory, I-love-you: the Gesture Recognizer's categories, confirmed; point: geometry (index extended,
- *    the other three fingers not), as the recognizer's Pointing_Up needs the finger up in the image;
+ *  - pinch (the trigger): hysteresis (on below pinch_on, off above pinch_off) and a few frames' confirmation each way;
+ *  - fist (the grip): the Gesture Recognizer's Closed_Fist with enough score, confirmed; while a fist is held, no
+ *    pinch (a fist brings the thumb to the index finger);
+ *  - open palm (the dashboard gesture's first half, SystemGesture): its Open_Palm, confirmed;
  *  - everything lets go at once when the hand is lost, the measurement is invalid, old, of low confidence, or its time
  *    goes backwards (a new association); a press is reported once per activation.
  * Only a new camera frame (a later timestamp) advances the confirmations, however often update() is called.
@@ -69,17 +66,10 @@ struct Config
 	float pinch_on = 0.50f;
 	float pinch_off = 0.65f;
 	float min_confidence = 0.5f; //!< the landmark model's hand presence needed
-	/*!
-	 * How many of the middle, ring and little fingers must be straight for a pinch (pinch_min_other_fingers) or a
-	 * deliberate pinch (deliberate_min_other_fingers) to start; it lets go when fewer than one less are. 2026-11-24
-	 * labelled recording, frames with thumb and index close: real pinches had 2 or more straight in 177 of 205,
-	 * fists in 0 of 94, pointing in 0 of 20, open hands in 3 of 20. Per prompt, requiring it for the trigger kept the
-	 * right hand's pinches (6/6) but cut the left's from 3/5 to 1/5 (MediaPipe reads the left hand's fingers as bent
-	 * more often), so the trigger doesn't require it; the system gesture, where a false press opens the dashboard
-	 * and takes the input away, does. 0: no requirement.
+	/*
+	 * No "other fingers straight" rule for the pinch: on the 2026-11-24 labelled recording it kept the right hand's
+	 * pinches (6/6) but cut the left's from 3/5 to 1/5 (MediaPipe reads the left hand's fingers as bent more often).
 	 */
-	int pinch_min_other_fingers = 0;
-	int deliberate_min_other_fingers = 2;
 	/*!
 	 * The Gesture Recognizer's score needed for its categories (the top of 8 at 0.5 is a clear winner). 0.6 missed a
 	 * held fist whose Closed_Fist score sat at 0.51 throughout (same recording); Closed_Fist never came up outside the
@@ -98,12 +88,8 @@ struct State
 	float confidence = 0.0f;
 
 	bool pinch = false;
-	bool deliberatePinch = false; //!< a pinch with the other fingers open (the system gesture's)
 	bool fist = false;
 	bool openPalm = false;
-	bool point = false;
-	bool victory = false;
-	bool iLoveYou = false;
 
 	float pinchDistanceNormalized = 0.0f;
 };
@@ -202,12 +188,8 @@ public:
 		}
 		m_state = State{};
 		m_pinch.reset();
-		m_deliberate.reset();
 		m_fist.reset();
 		m_open.reset();
-		m_point.reset();
-		m_victory.reset();
-		m_ily.reset();
 		m_lastTs = 0;
 		return e;
 	}
@@ -255,43 +237,24 @@ public:
 			e.reason = m_fist.on ? "fist recognised" : "fist ended";
 		}
 		const float d = s.pinch_distance_normalized;
-		const int others = ((s.extended_mask >> 2) & 1) + ((s.extended_mask >> 3) & 1) + ((s.extended_mask >> 4) & 1);
-		const bool fingers_open = others >= m_cfg.pinch_min_other_fingers;
-		const bool fingers_closed = others + 1 < m_cfg.pinch_min_other_fingers;
-		const bool deliberate_open = others >= m_cfg.deliberate_min_other_fingers;
-		const bool deliberate_closed = others + 1 < m_cfg.deliberate_min_other_fingers;
-		if (m_fist.on) {
-			m_deliberate.reset();
-		} else {
-			m_deliberate.step(d < m_cfg.pinch_on && deliberate_open, d > m_cfg.pinch_off || deliberate_closed, n);
-		}
 		if (m_fist.on) {
 			if (m_pinch.on) {
 				e.pinch_released = true;
 				e.reason = "fist: no pinch";
 			}
 			m_pinch.reset();
-		} else if (m_pinch.step(d < m_cfg.pinch_on && fingers_open, d > m_cfg.pinch_off || fingers_closed, n)) {
+		} else if (m_pinch.step(d < m_cfg.pinch_on, d > m_cfg.pinch_off, n)) {
 			(m_pinch.on ? e.pinch_pressed : e.pinch_released) = true;
-			e.reason = m_pinch.on ? "pinch distance below pinch_on, other fingers open"
-			                      : (d > m_cfg.pinch_off ? "pinch distance above pinch_off" : "other fingers curled");
+			e.reason = m_pinch.on ? "pinch distance below pinch_on" : "pinch distance above pinch_off";
 		}
 		m_open.step(is(OpenPalm), !is(OpenPalm), n);
-		m_victory.step(is(Victory), !is(Victory), n);
-		m_ily.step(is(ILoveYou), !is(ILoveYou), n);
-		const bool pointing = (s.extended_mask & 0x02) != 0 && (s.extended_mask & 0x1c) == 0;
-		m_point.step(pointing, !pointing, n);
 
 		m_state.valid = true;
 		m_state.timestamp_ns = s.timestamp_ns;
 		m_state.confidence = s.confidence;
 		m_state.pinch = m_pinch.on;
-		m_state.deliberatePinch = m_deliberate.on;
 		m_state.fist = m_fist.on;
 		m_state.openPalm = m_open.on;
-		m_state.point = m_point.on;
-		m_state.victory = m_victory.on;
-		m_state.iLoveYou = m_ily.on;
 		m_state.pinchDistanceNormalized = d;
 		return e;
 	}
@@ -322,7 +285,7 @@ private:
 	Config m_cfg;
 	State m_state;
 	Stats m_stats;
-	detail::Debounced m_pinch, m_deliberate, m_fist, m_open, m_point, m_victory, m_ily;
+	detail::Debounced m_pinch, m_fist, m_open;
 	int64_t m_lastTs = 0;
 };
 
@@ -337,17 +300,22 @@ private:
  * Arming: the open palm with the pose (palm toward the face, raised) for palm_ns, with gaps up to gap_ns (invalid
  * frames while the hand turns). Then a fist within fist_within_ns presses the system button; it stays down while the
  * fist is held and goes up when the fist ends. A fist on its own (no open palm toward the face first) does nothing.
- * Replay (open palm 0.3 s, fist within 1 s): no openings on any open, pinch, point or claw prompt; it fires only on the
- * fist prompts, where the open hand was raised toward the cameras and then closed, which is this gesture.
+ * The open palm must be held still a moment (palm_ns) and the fist must follow quickly (fist_within_ns): looking at
+ * the open hand and then grabbing something is an everyday move too (see Config).
  */
 class SystemGesture
 {
 public:
 	struct Config
 	{
-		int64_t palm_ns = 300'000'000;
+		/*
+		 * 0.6 s and 0.5 s since the 2026-11-24 23:37 session: 0.3 s and 1 s let a look at the open hand followed
+		 * by a grab toggle the dashboard (replay: 9 presses in 40 s with the -0.25 m height, 2 now). The open palm
+		 * on the 8 deliberate attempts of the 20:50 and 21:47 sessions lasted 0.6 s on 5 (not asked to hold it).
+		 */
+		int64_t palm_ns = 600'000'000;
 		int64_t gap_ns = 150'000'000;
-		int64_t fist_within_ns = 1'000'000'000;
+		int64_t fist_within_ns = 500'000'000;
 	};
 
 	SystemGesture() = default;

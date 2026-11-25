@@ -44,6 +44,13 @@ public:
 	      m_mp(gestureConfig()), m_mpDebug(envFlag("OVRN_GESTURE_DEBUG"))
 	{}
 
+	~HandDevice()
+	{
+		if (s_systemHolder == this) {
+			s_systemHolder = nullptr;
+		}
+	}
+
 	Hand
 	hand() const
 	{
@@ -99,7 +106,7 @@ public:
 			// A lost hand lets go of the gesture's system press (the headset button still works: sendSystem).
 			m_systemPinch = false;
 			m_systemSinceNs = 0;
-			m_systemOn = false;
+			m_systemOn = systemPress(false);
 			m_systemGesture.reset();
 			sendSystem();
 			return;
@@ -136,11 +143,8 @@ public:
 			logGestureEvents(m_mp.reset("gesture measurements unavailable"), now_ns);
 		}
 		/*
-		 * The system gesture's pose (either hand): the palm toward the face, raised (kSystemMinHeightM). Raised is
-		 * what keeps everyday hand shapes out: on the
-		 * 2026-11-24 20:05 session all 4 dashboard openings, 3 of them unwanted (claw, fist, a tilted pinch), had
-		 * the palm 20-51 cm below the eyes, where the hands are while using them; the cameras still track a hand up to
-		 * about eye level (earlier sessions: half the tracked frames 10-20 cm below).
+		 * The dashboard gesture's pose: the palm toward the face, raised (kSystemMinHeightM below the eyes or
+		 * higher). Height is what tells it from everyday use (see kSystemMinHeightM).
 		 */
 		bool system = false;
 		TrackedPose head;
@@ -156,37 +160,30 @@ public:
 			                          eye);
 		}
 		/*
-		 * Without MediaPipe's gestures, a hold, as Meta's system gesture (palm toward you, pinch held until its ring
-		 * fills): the system button goes down only after the palm-toward-head pinch has lasted kSystemHoldNs (now 0.5 s), and up when it ends. Before, it fired on
-		 * the first frame: on 2026-11-24 (14:35 session) curling a hand into a fist with the palm toward the face read
-		 * as a pinch and toggled the dashboard 4 times unasked (palms really faced the cameras, camera images 15.5 s
-		 * and 23 s); a fist curl lasts a fraction of a second.
+		 * The system button (SteamVR's dashboard toggle):
+		 *  - with MediaPipe's gestures: an open palm toward the face, then a fist (gest::SystemGesture);
+		 *  - without them (Mercury's joints only): the palm-toward-face pinch held kSystemHoldNs.
+		 * Either way one press for both hands (systemPress).
 		 */
+		bool gesture_down = false;
 		if (mp_on) {
-			// MediaPipe's gestures: an open palm toward the face, then a fist (gest::SystemGesture).
 			const gest::State &st = m_mp.state();
-			m_systemOn = m_systemGesture.update(now_ns, system, st.openPalm, st.fist);
+			gesture_down = m_systemGesture.update(now_ns, system, st.openPalm, st.fist);
 			m_systemPinch = false;
 			m_systemSinceNs = 0;
 		} else {
-			// Without them (Mercury's joints only): the palm-toward-head pinch held kSystemHoldNs.
 			m_systemGesture.reset();
 			m_systemPinch = skel::click(system ? g.pinch : 0.0f, m_systemPinch);
 			if (!m_systemPinch) {
 				m_systemSinceNs = 0;
-				m_systemOn = false;
 			} else if (m_systemSinceNs == 0) {
 				m_systemSinceNs = now_ns;
-			} else if (now_ns - m_systemSinceNs >= kSystemHoldNs) {
-				m_systemOn = true;
 			}
+			gesture_down = m_systemPinch && now_ns - m_systemSinceNs >= kSystemHoldNs;
 		}
+		m_systemOn = systemPress(gesture_down);
 		sendSystem();
-		/*
-		 * While the palm faces the head (the system gesture's pose), this hand's pinches don't reach the app: one
-		 * pinch would otherwise toggle the dashboard and click in the game at once. Meta does the same with its
-		 * system gesture (apps get no pinch while it's in progress; required by its store's VRC.Quest.Input.8).
-		 */
+
 		m_stat.palm_facing += system ? 1 : 0;
 		m_stat.max_pinch = std::max(m_stat.max_pinch, g.pinch);
 		m_stat.max_grab = std::max(m_stat.max_grab, g.grab);
@@ -194,26 +191,22 @@ public:
 			m_stat.system_clicks++;
 		}
 		m_stat.system_was = m_systemOn;
+
 		skel::Gestures out = g;
 		if (mp_on) {
+			// Trigger = pinch, grip = fist. The fist that presses the dashboard isn't also a grip in the game.
 			const gest::State &st = m_mp.state();
+			const bool dashboard_fist = m_systemGesture.armed(now_ns) || m_systemGesture.down();
 			out.pinch = m_mp.pinchValue();
 			out.finger_pinch[0] = out.pinch;
-			/*
-			 * The fist that presses the system button isn't a grip for the app: one fist would otherwise open
-			 * the dashboard and grab in the game at once (as the pinch is held back while the palm faces the head).
-			 */
-			const bool dashboard_fist = m_systemGesture.armed(now_ns) || m_systemGesture.down();
 			out.grab = (st.fist && !dashboard_fist) ? 1.0f : 0.0f;
-			if (system) {
-				out.pinch = 0.0f;
-				for (float &p : out.finger_pinch) {
-					p = 0.0f;
-				}
-			}
-			setOutputs(out, st.pinch && !system, st.fist && !dashboard_fist);
+			setOutputs(out, st.pinch, st.fist && !dashboard_fist);
 			return;
 		}
+		/*
+		 * Joint gestures: while the palm faces the head, this hand's pinches don't reach the app, as the pinch is
+		 * the dashboard gesture there (one pinch would toggle the dashboard and click in the game at once).
+		 */
 		if (system || m_systemPinch) {
 			out.pinch = 0.0f;
 			for (float &p : out.finger_pinch) {
@@ -231,6 +224,33 @@ public:
 	setHeadButton(bool down)
 	{
 		m_headButton = down;
+	}
+
+	/*!
+	 * One dashboard press for both hands: each hand has its own system button, and SteamVR toggles the dashboard on
+	 * each press, so both hands making the gesture together opened and closed it at once (2026-11-24 23:37 session:
+	 * opened, closed 0.17 s later; replay: both hands pressed at 12.5 s). A hand presses only while the other one
+	 * isn't; a press that started while the other hand held it stays ignored until that fist ends.
+	 */
+	bool
+	systemPress(bool gesture_down)
+	{
+		if (!gesture_down) {
+			m_systemIgnored = false;
+			if (s_systemHolder == this) {
+				s_systemHolder = nullptr;
+			}
+			return false;
+		}
+		if (s_systemHolder == this) {
+			return true;
+		}
+		if (s_systemHolder == nullptr && !m_systemIgnored) {
+			s_systemHolder = this;
+			return true;
+		}
+		m_systemIgnored = true;
+		return false;
 	}
 
 	//! The system button: the gesture's hold or the headset button (sent when it changes).
@@ -384,7 +404,7 @@ private:
 	/*!
 	 * Every 10 s while the hand was tracked: what the gestures sent SteamVR (RunFrame thread), to tell "the gesture
 	 * never fired" from "it fired but nothing reacted": tracked share, trigger (pinch) / grip (grab) / system clicks
-	 * and time held, peak pinch and grab values, how often the palm faced the head (pinches are held back then).
+	 * and time held, peak pinch and grab values, how often the palm faced the head (the dashboard gesture's pose).
 	 */
 	void
 	gestureLog(int64_t now_ns)
@@ -514,28 +534,20 @@ private:
 	vr::VRInputComponentHandle_t m_poseTip = vr::k_ulInvalidInputComponentHandle;
 	skel::detail::V m_tipPos{0.0f, 0.0f, -0.08f};
 	bool m_triggerOn = false, m_gripOn = false, m_tracked = false, m_systemOn = false;
-	//! The system gesture: the palm-toward-head pinch's click state and since when it's held (0: not held).
+	//! Joint gestures' system pinch: its click state and since when it's held (0: not held).
 	bool m_systemPinch = false;
 	bool m_headButton = false, m_systemSent = false; //!< the headset button's share of the system button, last sent
 	int64_t m_systemSinceNs = 0;
-	/*!
-	 * How long the palm-toward-head pinch must be held to press the system button (Meta: until a ring fills, about 1 s
-	 * by third-party accounts, not published). 0.6 s first (2026-11-24 15:03 session): the dashboard never opened;
-	 * with the palm toward the head Mercury barely sees the pinch (replay: pinch median 0 while the palm faced the
-	 * head, the longest clicked pinch 0.37 s). 0.3 s: still longer than an accidental flick, within what it sees.
-	 */
+	//! Joint gestures only: how long the palm-toward-face pinch must be held to press the system button.
 	static constexpr int64_t kSystemHoldNs = 500'000'000;
 	/*!
-	 * 0.5 s since 2026-11-24 evening (MediaPipe's pinch is seen at palm-toward-face angles, where Mercury's wasn't);
-	 * Meta holds "until the icon fills". Replay of the labelled session: openings outside the pinch prompts 5 at
-	 * 0.3 s, 1 at 0.5 s.
+	 * How high the palm must be for the system gesture: no lower than this below the eyes (metres, negative). Height
+	 * is what tells the gesture from everyday use: deliberate dashboard attempts had the palm 1-17 cm below the eyes
+	 * (2026-11-24 20:50, 21:47 sessions), normal use about 20 cm (23:37). -0.25 for one build toggled the dashboard
+	 * on ordinary open-hand-then-grab moves (replay of 23:37: 9 presses in 40 s; 2 with -0.15 and SystemGesture's
+	 * 0.6 s / 0.5 s).
 	 */
-	/*!
-	 * How high the palm must be for the system gesture: no lower than this below the eyes (metres, negative). -0.25
-	 * since the open-palm-then-fist gesture (was -0.15): a hand raised to the eyes left the cameras' crop on the
-	 * 21:47 session's close attempt; replay openings outside the fist prompts stayed none at -0.25.
-	 */
-	static constexpr double kSystemMinHeightM = -0.25;
+	static constexpr double kSystemMinHeightM = -0.15;
 	struct GestureStats
 	{
 		int64_t since_ns = 0;
@@ -549,6 +561,9 @@ private:
 	gest::Machine m_mp;   //!< RunFrame thread: MediaPipe gesture state
 	const bool m_mpDebug; //!< OVRN_GESTURE_DEBUG
 	gest::SystemGesture m_systemGesture; //!< RunFrame thread: the dashboard gesture with MediaPipe's gestures
+	bool m_systemIgnored = false;         //!< this hand's gesture press started while the other hand held it
+	//! The hand whose gesture holds the dashboard press now (RunFrame thread; both hands run there).
+	static inline HandDevice *s_systemHolder = nullptr;
 };
 
 } // namespace ovrn
