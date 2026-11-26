@@ -1,6 +1,19 @@
 [
 	{
 		"language_tag": "en_US",
-		"monado_controller" : "Monado Driver Controller"
+		"monado_controller": "Monado Driver Controller",
+		"playstation_vr2_hand": "PlayStation VR2 Hand Tracking",
+		"/input/index_pinch": "Index Pinch",
+		"/input/middle_pinch": "Middle Pinch",
+		"/input/ring_pinch": "Ring Pinch",
+		"/input/pinky_pinch": "Little Finger Pinch",
+		"/input/trigger": "Pinch (Trigger)",
+		"/input/grip": "Fist (Grip)",
+		"/input/point": "Point",
+		"/input/thumbs_up": "Thumbs Up",
+		"/input/thumbs_down": "Thumbs Down",
+		"/input/victory": "Victory",
+		"/input/i_love_you": "I Love You",
+		"/input/open_palm": "Open Palm"
 	}
 ]

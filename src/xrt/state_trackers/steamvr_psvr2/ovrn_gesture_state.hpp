@@ -139,6 +139,8 @@ struct State
 	bool pinch = false;
 	bool fist = false;
 	bool openPalm = false;
+	//! Hand Landmarker's own gestures (its Gesture Recognizer categories, confirmed): index Category.
+	bool category[8] = {};
 
 	float pinchDistanceNormalized = 0.0f;
 	bool imageValid = false;       //!< the image pinch detector decided the pinch this frame
@@ -276,6 +278,9 @@ public:
 		m_pinch.reset();
 		m_fist.reset();
 		m_open.reset();
+		for (detail::Debounced &d : m_cat) {
+			d.reset();
+		}
 		m_imgCount = m_imgNext = 0;
 		m_imgMean = 0.0f;
 		m_lastTs = 0;
@@ -380,6 +385,10 @@ public:
 			e.reason = m_pinch.on ? "pinch distance below pinch_on" : "pinch distance above pinch_off";
 		}
 		m_open.step(is(OpenPalm), !is(OpenPalm), n);
+		// Hand Landmarker's other gestures, used as it names them (point, thumbs up / down, victory, I-love-you).
+		for (int c : {PointingUp, ThumbDown, ThumbUp, Victory, ILoveYou}) {
+			m_cat[c].step(is(c), !is(c), n);
+		}
 
 		m_state.valid = true;
 		m_state.timestamp_ns = s.timestamp_ns;
@@ -387,6 +396,9 @@ public:
 		m_state.pinch = m_pinch.on;
 		m_state.fist = m_fist.on;
 		m_state.openPalm = m_open.on;
+		for (int c = 0; c < 8; c++) {
+			m_state.category[c] = c == OpenPalm ? m_open.on : m_cat[c].on;
+		}
 		m_state.pinchDistanceNormalized = d;
 		m_state.customValid = custom;
 		m_state.imageValid = s.pinch_image_valid;
@@ -435,6 +447,7 @@ private:
 	int m_imgNext = 0, m_imgCount = 0;
 	float m_imgMean = 0.0f;
 	detail::Debounced m_fist, m_open;
+	detail::Debounced m_cat[8];
 	int64_t m_lastTs = 0;
 };
 

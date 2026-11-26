@@ -833,3 +833,33 @@ TEST_CASE("formula pinch rule decides the pinch when it can measure; the gesture
 	}
 	CHECK(f.state().pinch);
 }
+
+TEST_CASE("Hand Landmarker's own gestures: confirmed from its categories, low scores ignored, reset releases them")
+{
+	Config c;
+	c.confirm_frames = 2;
+	c.min_category_score = 0.6f;
+	for (int cat : {PointingUp, ThumbUp, ThumbDown, Victory, ILoveYou, OpenPalm}) {
+		Machine m(c);
+		int64_t t = 1000;
+		m.update(sample(t, 1.2f, cat, 0.9f), t * 1'000'000LL);
+		CHECK_FALSE(m.state().category[cat]); // one frame: not yet confirmed
+		t += 16;
+		m.update(sample(t, 1.2f, cat, 0.9f), t * 1'000'000LL);
+		CHECK(m.state().category[cat]);
+		for (int other : {PointingUp, ThumbUp, ThumbDown, Victory, ILoveYou, OpenPalm}) {
+			if (other != cat) {
+				CHECK_FALSE(m.state().category[other]);
+			}
+		}
+		m.reset("test");
+		CHECK_FALSE(m.state().category[cat]);
+		// a low score never counts
+		Machine low(c);
+		int64_t u = 1000;
+		for (int i = 0; i < 5; i++, u += 16) {
+			low.update(sample(u, 1.2f, cat, 0.4f), u * 1'000'000LL);
+		}
+		CHECK_FALSE(low.state().category[cat]);
+	}
+}

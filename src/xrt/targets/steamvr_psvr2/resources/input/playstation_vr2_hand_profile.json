@@ -79,6 +79,60 @@
       ],
       "order": 0
     },
+    "/input/point": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        20,
+        10
+      ],
+      "order": 4
+    },
+    "/input/thumbs_up": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        70,
+        20
+      ],
+      "order": 4
+    },
+    "/input/thumbs_down": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        70,
+        30
+      ],
+      "order": 4
+    },
+    "/input/victory": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        30,
+        10
+      ],
+      "order": 4
+    },
+    "/input/i_love_you": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        55,
+        10
+      ],
+      "order": 4
+    },
+    "/input/open_palm": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        45,
+        40
+      ],
+      "order": 4
+    },
     "/pose/raw": {
       "type": "pose",
       "binding_image_point": [

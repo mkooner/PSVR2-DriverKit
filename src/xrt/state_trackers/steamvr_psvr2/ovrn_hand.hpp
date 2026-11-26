@@ -104,6 +104,7 @@ public:
 		if (!inUse() || !m_backend->handJoints(m_hand, now_ns, &j) || !j.active || !j.joint_valid[0]) {
 			m_tracked = false;
 			logGestureEvents(m_mp.reset("hand not tracked"), now_ns);
+			setHandGestures(nullptr);
 			ruleChanges(m_rules.reset(now_ns, "hand not tracked", m_ruleChanges, kRuleChanges), &sample_none());
 			setGestures(skel::Gestures{});
 			// A lost hand lets go of the gesture's system press (the headset button still works: sendSystem).
@@ -253,6 +254,7 @@ public:
 			out.finger_pinch[0] = out.pinch;
 			out.grab = st.fist ? 1.0f : 0.0f;
 			setOutputs(out, st.pinch, st.fist);
+			setHandGestures(&st);
 			return;
 		}
 		/*
@@ -345,6 +347,9 @@ protected:
 			                          vr::VRScalarUnits_NormalizedOneSided);
 		}
 		in->CreateBooleanComponent(m_container, "/input/system/click", &m_system);
+		for (int i = 0; i < kHandGestureCount; i++) {
+			in->CreateBooleanComponent(m_container, kHandGestures[i].path, &m_handGesture[i]);
+		}
 		// The poses apps and the dashboard bind (no render model gives them): raw and grip at the palm, tip ahead.
 		in->CreatePoseComponent(m_container, "/pose/raw", &m_poseRaw);
 		in->CreatePoseComponent(m_container, "/pose/grip", &m_poseGrip);
@@ -485,6 +490,13 @@ private:
 				    s.frames > 0 ? s.min_pinch : 0.0f, m_mp.config().pinch_on, m_mp.config().pinch_off,
 				    s.category[gest::ClosedFist], s.category[gest::OpenPalm], s.category[gest::PointingUp],
 				    s.category[gest::Victory], s.category[gest::ILoveYou], s.category[gest::None]);
+				log("ovrn: %s hand Hand Landmarker gestures (10 s presses): point %u, thumbs up %u, thumbs down %u, "
+				    "victory %u, I-love-you %u, open palm %u\n",
+				    m_hand == Hand::Left ? "left" : "right", m_handGestureClicks[0], m_handGestureClicks[1],
+				    m_handGestureClicks[2], m_handGestureClicks[3], m_handGestureClicks[4], m_handGestureClicks[5]);
+				for (uint32_t &c : m_handGestureClicks) {
+					c = 0;
+				}
 				const uint32_t pn = m_stat.pinch_formula + m_stat.pinch_image + m_stat.pinch_mapping;
 				log("ovrn: %s hand pinch source (10 s): formula %.0f%%, image detector %.0f%%, gesture mapping "
 				    "%.0f%% of %u frames\n",
@@ -503,6 +515,7 @@ private:
 	setGestures(const skel::Gestures &g)
 	{
 		setOutputs(g, skel::click(g.pinch, m_triggerOn), skel::click_grab(g.grab, m_gripOn));
+		setHandGestures(nullptr); // Hand Landmarker's gestures need its measurements
 	}
 
 	//! The trigger, grip and finger pinch inputs (values from @p g, clicks given).
@@ -604,6 +617,43 @@ private:
 	vr::VRInputComponentHandle_t m_pinch[4] = {vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle,
 	                                           vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle};
 	vr::VRInputComponentHandle_t m_system = vr::k_ulInvalidInputComponentHandle;
+	/*!
+	 * Hand Landmarker's own gestures as buttons (its Gesture Recognizer categories, confirmed by the gesture state;
+	 * all released while the hand isn't tracked): for games and SteamVR's binding screen.
+	 */
+	struct HandGestureInput
+	{
+		const char *path;
+		int category;
+	};
+	static constexpr int kHandGestureCount = 6;
+	static constexpr HandGestureInput kHandGestures[kHandGestureCount] = {
+	    {"/input/point/click", gest::PointingUp}, {"/input/thumbs_up/click", gest::ThumbUp},
+	    {"/input/thumbs_down/click", gest::ThumbDown}, {"/input/victory/click", gest::Victory},
+	    {"/input/i_love_you/click", gest::ILoveYou}, {"/input/open_palm/click", gest::OpenPalm}};
+	vr::VRInputComponentHandle_t m_handGesture[kHandGestureCount] = {
+	    vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle,
+	    vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle,
+	    vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle};
+	bool m_handGestureOn[kHandGestureCount] = {};
+	uint32_t m_handGestureClicks[kHandGestureCount] = {};
+
+	//! The Hand Landmarker gesture buttons from @p st (nullptr: all released).
+	void
+	setHandGestures(const gest::State *st)
+	{
+		vr::IVRDriverInput *in = vr::VRDriverInput();
+		for (int i = 0; i < kHandGestureCount; i++) {
+			const bool on = st != nullptr && st->valid && st->category[kHandGestures[i].category];
+			if (on && !m_handGestureOn[i]) {
+				m_handGestureClicks[i]++;
+			}
+			if (on != m_handGestureOn[i] || on) {
+				in->UpdateBooleanComponent(m_handGesture[i], on, 0.0);
+			}
+			m_handGestureOn[i] = on;
+		}
+	}
 	vr::VRInputComponentHandle_t m_poseRaw = vr::k_ulInvalidInputComponentHandle;
 	vr::VRInputComponentHandle_t m_poseGrip = vr::k_ulInvalidInputComponentHandle;
 	vr::VRInputComponentHandle_t m_poseTip = vr::k_ulInvalidInputComponentHandle;
