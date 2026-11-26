@@ -5,6 +5,7 @@
 //! needs to use Monado, and keeps the driver settings we use (with their defaults) switchable.
 
 mod theme;
+mod wayvr_bindings;
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -163,7 +164,7 @@ fn default_settings() -> Vec<Setting> {
     v.extend(headset_settings(Target::SteamVR, true));
     // OpenXR (monado-service)
     v.push(toggle("WAYVR", "Start WayVR with monado-service (desktop in VR)",
-                  "Off (default). On: Start monado-service (or Launch app) also starts WayVR on Monado (OpenXR, pointed at this build's runtime) once the service is up, and stops it with the service. WayVR is a separate program you install yourself (Arch AUR package wayvr, or its AppImage in ~/Applications). The first time, your desktop asks which screen to share. Sense controllers: double-press Triangle shows/hides it.", false).monado());
+                  "Off (default). On: Start monado-service (or Launch app) also starts WayVR on Monado (OpenXR, pointed at this build's runtime) once the service is up, and stops it with the service. WayVR is a separate program you install yourself (Arch AUR package wayvr, or its AppImage in ~/Applications). The first time, your desktop asks which screen to share. Sense controllers: Options (right controller) or Create (left controller) shows/hides it: DriverKit adds a PS VR2 block to WayVR's ~/.config/wayvr/openxr_actions.json5 (only between its own marker lines; the original is backed up once; your own PS VR2 block is never changed).", false).monado());
     v.push(value("OXR_VIEWPORT_SCALE_PERCENTAGE", "Render size (%)",
                  "Recommended render size for apps on monado-service, on top of Monado's own 140% (100, the default: 2800x2856 per eye).", "100", true).monado());
     v.extend(headset_settings(Target::Monado, false));
@@ -774,6 +775,42 @@ fn find_wayvr() -> Option<PathBuf> {
     None
 }
 
+/// WayVR's PS VR2 bindings for monado-service (wayvr_bindings): show/hide on the right Options button, every other
+/// action as before. Returns the log lines and whether the file changed.
+fn wayvr_psvr2_bindings(bin: &Path) -> (Vec<String>, bool) {
+    let mut notes = vec![format!("[WayVR] Detected WayVR installation: {}", bin.display())];
+    let Some(dir) = wayvr_bindings::config_dir() else {
+        notes.push("[WayVR] No config folder (no HOME / XDG_CONFIG_HOME): bindings left as they are.".into());
+        return (notes, false);
+    };
+    notes.push(format!(
+        "[WayVR] PS VR2 Sense profile {}: show/hide on Options (/user/hand/right/input/options_mndx/click) or Create (/user/hand/left/input/share_mndx/click), one press",
+        wayvr_bindings::PROFILE
+    ));
+    match wayvr_bindings::apply(&dir) {
+        wayvr_bindings::Outcome::Written { created, backup } => {
+            if let Some(b) = backup {
+                notes.push(format!("[WayVR] Original saved as {}", b.display()));
+            }
+            notes.push(format!(
+                "[WayVR] {} {}/openxr_actions.json5; configuration validation successful",
+                if created { "Created" } else { "Updated" },
+                dir.display()
+            ));
+            notes.push("[WayVR] Dashboard toggle mapped to the PS VR2 Options and Create buttons.".into());
+            (notes, true)
+        }
+        wayvr_bindings::Outcome::Unchanged => {
+            notes.push("[WayVR] Dashboard toggle already on the PS VR2 Options and Create buttons; nothing changed.".into());
+            (notes, false)
+        }
+        wayvr_bindings::Outcome::LeftAlone(why) => {
+            notes.push(format!("[WayVR] Bindings left as they are: {why}"));
+            (notes, false)
+        }
+    }
+}
+
 /// Whether a WayVR already runs (its own single-instance pid file, $XDG_RUNTIME_DIR/wayvr.pid).
 fn wayvr_running() -> bool {
     let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
@@ -1030,13 +1067,26 @@ impl Launcher {
     /// logs/wayvr-monado-<time>.log. Left alone if a WayVR already runs.
     fn start_wayvr_with_service(&mut self) {
         let on = self.cfg.settings.iter().any(|s| s.key == "WAYVR" && s.target == Target::Monado && s.enabled);
-        if !on || wayvr_running() || self.wayvr.lock().unwrap().is_some() {
+        if !on || self.wayvr.lock().unwrap().is_some() {
             return;
         }
         let Some(bin) = find_wayvr() else {
             self.message = "Start WayVR with monado-service is on, but WayVR isn't installed (Arch: AUR package wayvr; others: its AppImage in ~/Applications).".into();
             return;
         };
+        // WayVR's PS VR2 bindings (show/hide on Options), before WayVR starts and reads them.
+        let (notes, changed) = wayvr_psvr2_bindings(&bin);
+        for n in &notes {
+            eprintln!("{n}");
+        }
+        if wayvr_running() {
+            self.message = if changed {
+                "WayVR already runs: restart it so Options / Create show and hide it (its bindings were just updated).".into()
+            } else {
+                "WayVR already runs; left alone.".into()
+            };
+            return;
+        }
         let log = self.logs_dir().join(format!("wayvr-monado-{}.log", stamp()));
         let manifest = self.cfg.manifest();
         let slot = self.wayvr.clone();
@@ -1051,7 +1101,10 @@ impl Launcher {
             if !sock.exists() {
                 return;
             }
-            let Ok(out) = fs::File::create(&log) else { return };
+            let Ok(mut out) = fs::File::create(&log) else { return };
+            for n in &notes {
+                let _ = writeln!(out, "{n}");
+            }
             let err = out.try_clone().ok();
             let mut cmd = Command::new(&bin);
             cmd.args(["--openxr", "--log-to"]).arg(&log).env("XR_RUNTIME_JSON", &manifest);
