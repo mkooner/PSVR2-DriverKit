@@ -156,6 +156,12 @@ struct t_hand_gestures
 	uint8_t extended_mask;           //!< bit f: finger f extended (0 thumb ... 4 little finger)
 	enum t_hand_gesture_category category; //!< the gesture classifier's top category
 	float category_score;                  //!< its score, 0..1
+	bool pinch_image_valid;                //!< false: pinch_image isn't meaningful
+	float pinch_image;                     //!< the image pinch detector's probability (mean over the cameras), 0..1
+	bool joint_features_valid;             //!< false: joint_features isn't meaningful
+	//! The joint features of MediaPipe's landmarks (Mercury's gesture::jointFeatures order and units), from the
+	//! camera with the highest hand presence: what calibrated gesture rules read.
+	float joint_features[18];
 	bool custom_valid;                     //!< false: the custom mapping below isn't meaningful
 	enum t_hand_custom_gesture custom;     //!< the custom mapping's gesture (over its last frames)
 	float custom_scores[T_HAND_CUSTOM_COUNT]; //!< its probability per gesture, 0..1

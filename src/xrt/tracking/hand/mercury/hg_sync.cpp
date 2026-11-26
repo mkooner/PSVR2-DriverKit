@@ -42,6 +42,7 @@ DEBUG_GET_ONCE_FLOAT_OPTION(mercury_detection_tile_fraction, "MERCURY_DETECTION_
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_detection_tile_min, "MERCURY_DETECTION_TILE_MIN", 0.0)
 DEBUG_GET_ONCE_BOOL_OPTION(mercury_mp_both_views, "MERCURY_MP_BOTH_VIEWS", false)
 DEBUG_GET_ONCE_BOOL_OPTION(mercury_custom_gestures, "MERCURY_CUSTOM_GESTURES", true)
+DEBUG_GET_ONCE_BOOL_OPTION(mercury_pinch_image, "MERCURY_PINCH_IMAGE", true)
 DEBUG_GET_ONCE_NUM_OPTION(mercury_detection_tiles_per_frame, "MERCURY_DETECTION_TILES_PER_FRAME", 1)
 DEBUG_GET_ONCE_BOOL_OPTION(mercury_detection_tile_mirror, "MERCURY_DETECTION_TILE_MIRROR", false)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_keypoint_hand_confidence, "MERCURY_KEYPOINT_HAND_CONFIDENCE", 0.97)
@@ -731,6 +732,7 @@ HandTracking::~HandTracking()
 	for (int v = 0; v < 2; v++) {
 		for (int h = 0; h < 2; h++) {
 			release_onnx_state(&this->views[v].keypoint_mp[h]);
+			release_onnx_state(&this->views[v].pinch_img[h]);
 		}
 	}
 	release_onnx_state(&this->gesture_embedder);
@@ -868,6 +870,7 @@ callback_process_unsafe(HandTracking *hgt,
 	// Dispatch keypoint estimator neural nets
 	for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
 		hgt->mp_outputs[hand_idx][0].valid = hgt->mp_outputs[hand_idx][1].valid = false;
+		hgt->mp_outputs[hand_idx][0].pinch = hgt->mp_outputs[hand_idx][1].pinch = -1.0f;
 		// Only this frame's scores count (a view with no region keeps 0).
 		hgt->keypoint_outputs[hand_idx].views[0].hand_score = hgt->keypoint_outputs[hand_idx].views[1].hand_score = 0;
 	}
@@ -1392,6 +1395,20 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 				HG_INFO(hgt, "Hand gestures: MediaPipe's Gesture Recognizer models loaded");
 			} catch (const std::exception &e) {
 				HG_WARN(hgt, "Hand gestures off: MediaPipe's gesture models didn't load (%s)", e.what());
+			}
+			// The image pinch detector, when installed (MERCURY_PINCH_IMAGE=0: not used).
+			if (hgt->gestures_enabled && debug_get_bool_option_mercury_pinch_image()) {
+				try {
+					for (int v = 0; v < 2; v++) {
+						for (int h = 0; h < 2; h++) {
+							init_pinch_image_model(hgt, &hgt->views[v].pinch_img[h]);
+						}
+					}
+					hgt->pinch_image = true;
+					HG_INFO(hgt, "Pinch: the image pinch detector (psvr2_pinch.onnx) on MediaPipe's crops");
+				} catch (const std::exception &e) {
+					HG_INFO(hgt, "Pinch: no image pinch detector (%s); pinch from the gesture mapping", e.what());
+				}
 			}
 		}
 	} catch (const std::exception &e) {

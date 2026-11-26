@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <cmath>
 #include <deque>
 
@@ -65,6 +66,18 @@ struct Sample
 	bool custom_valid = false;
 	int custom = CustomOpen;
 	float custom_scores[CustomCount] = {};
+	//! The image pinch detector's probability (mean over the cameras), when the driver has it.
+	bool pinch_image_valid = false;
+	float pinch_image = 0.0f;
+	//! MediaPipe's joint features (Mercury's gesture::jointFeatures), for the calibrated rules.
+	bool features_valid = false;
+	float features[18] = {};
+	//! The calibrated rules' results this frame (ovrn_gesture_rules.hpp; set by the hand before update()).
+	bool rule_fist_decides = false; //!< an enabled fist rule decides the fist (else the custom mapping / category)
+	bool rule_fist = false;         //!< it is active
+	bool rule_block_pinch = false;  //!< an active gesture that rules out a pinch (point, claw)
+	bool rule_pinch_decides = false; //!< an enabled pinch rule decides the pinch (thumb tip to index tip)
+	bool rule_pinch = false;         //!< it is active
 };
 
 //! Tuning (heuristics; see the defaults' notes).
@@ -103,6 +116,15 @@ struct Config
 	 * re-presses from 3 to 0, presses in non-pinch prompts 16 -> 10, pinch prompts 10 -> 9 of 12; longer lost pinches.
 	 */
 	int64_t pinch_press_ns = 60'000'000;
+	/*!
+	 * The image pinch detector (when the driver has it): the mean of its last image_pinch_frames probabilities, on at
+	 * image_pinch_on, off below image_pinch_off, each change held image_pinch_hold_ns. Trained on the 2026-11-25
+	 * labelled recordings (psvr2-test hands/pinch_image.py); these were the settings tried in its validation.
+	 */
+	int image_pinch_frames = 3;
+	float image_pinch_on = 0.6f;
+	float image_pinch_off = 0.4f;
+	int64_t image_pinch_hold_ns = 30'000'000;
 	int64_t pinch_release_ns = 60'000'000;
 	int64_t max_age_ns = 200'000'000; //!< a measurement older than this (vs now) counts as lost
 };
@@ -119,6 +141,8 @@ struct State
 	bool openPalm = false;
 
 	float pinchDistanceNormalized = 0.0f;
+	bool imageValid = false;       //!< the image pinch detector decided the pinch this frame
+	float imagePinch = 0.0f;       //!< its averaged probability
 	bool customValid = false;      //!< the driver's custom mapping decided pinch and fist this frame
 	float customPinchScore = 0.0f; //!< its pinch probability
 };
@@ -252,6 +276,8 @@ public:
 		m_pinch.reset();
 		m_fist.reset();
 		m_open.reset();
+		m_imgCount = m_imgNext = 0;
+		m_imgMean = 0.0f;
 		m_lastTs = 0;
 		return e;
 	}
@@ -302,8 +328,9 @@ public:
 		 * hand on the round it wasn't fitted on.
 		 */
 		const bool custom = s.custom_valid;
-		const bool fist_on = custom ? s.custom == CustomFist : is(ClosedFist);
-		if (m_fist.step(fist_on, !fist_on, n)) {
+		// The calibrated fist rule has its own hold times (no extra confirmation frames on top).
+		const bool fist_on = s.rule_fist_decides ? s.rule_fist : (custom ? s.custom == CustomFist : is(ClosedFist));
+		if (m_fist.step(fist_on, !fist_on, s.rule_fist_decides ? 1 : n)) {
 			(m_fist.on ? e.fist_pressed : e.fist_released) = true;
 			e.reason = m_fist.on ? "fist recognised" : "fist ended";
 		}
@@ -314,6 +341,33 @@ public:
 				e.reason = "fist: no pinch";
 			}
 			m_pinch.reset();
+		} else if (s.rule_block_pinch) {
+			if (m_pinch.on) {
+				e.pinch_released = true;
+				e.reason = "calibrated rule: a pose that isn't a pinch";
+			}
+			m_pinch.reset();
+		} else if (s.rule_pinch_decides) {
+			// The calibrated pinch rule has its own hold times.
+			if (m_pinch.step(s.rule_pinch, !s.rule_pinch, s.timestamp_ns, 0, 0)) {
+				(m_pinch.on ? e.pinch_pressed : e.pinch_released) = true;
+				e.reason = m_pinch.on ? "calibrated pinch rule: pinch" : "calibrated pinch rule: no pinch";
+			}
+		} else if (s.pinch_image_valid) {
+			m_img[m_imgNext] = s.pinch_image;
+			m_imgNext = (m_imgNext + 1) % kImgMax;
+			m_imgCount = m_imgCount < kImgMax ? m_imgCount + 1 : kImgMax;
+			const int k = std::min(std::max(m_cfg.image_pinch_frames, 1), std::min(m_imgCount, kImgMax));
+			float sum = 0.0f;
+			for (int i = 0; i < k; i++) {
+				sum += m_img[(m_imgNext - 1 - i + kImgMax) % kImgMax];
+			}
+			m_imgMean = sum / (float)k;
+			const bool want = m_pinch.on ? m_imgMean >= m_cfg.image_pinch_off : m_imgMean >= m_cfg.image_pinch_on;
+			if (m_pinch.step(want, !want, s.timestamp_ns, m_cfg.image_pinch_hold_ns, m_cfg.image_pinch_hold_ns)) {
+				(m_pinch.on ? e.pinch_pressed : e.pinch_released) = true;
+				e.reason = m_pinch.on ? "image pinch detector: pinch" : "image pinch detector: no pinch";
+			}
 		} else if (custom) {
 			const bool pinch_on = s.custom == CustomPinch;
 			if (m_pinch.step(pinch_on, !pinch_on, s.timestamp_ns, m_cfg.pinch_press_ns, m_cfg.pinch_release_ns)) {
@@ -335,6 +389,8 @@ public:
 		m_state.openPalm = m_open.on;
 		m_state.pinchDistanceNormalized = d;
 		m_state.customValid = custom;
+		m_state.imageValid = s.pinch_image_valid;
+		m_state.imagePinch = s.pinch_image_valid ? m_imgMean : 0.0f;
 		m_state.customPinchScore = custom ? s.custom_scores[CustomPinch] : 0.0f;
 		return e;
 	}
@@ -348,6 +404,10 @@ public:
 	{
 		if (!m_state.valid || m_state.fist) {
 			return 0.0f;
+		}
+		if (m_state.imageValid) {
+			// The image detector's (averaged) probability, held at 1 while its pinch is on (the click).
+			return m_state.pinch ? 1.0f : std::fmax(0.0f, std::fmin(1.0f, m_state.imagePinch));
 		}
 		if (m_state.customValid) {
 			// The custom mapping's pinch probability, held at 1 while its pinch is on (the click).
@@ -370,6 +430,10 @@ private:
 	State m_state;
 	Stats m_stats;
 	detail::TimedDebounced m_pinch;
+	static constexpr int kImgMax = 8;
+	float m_img[kImgMax] = {};
+	int m_imgNext = 0, m_imgCount = 0;
+	float m_imgMean = 0.0f;
 	detail::Debounced m_fist, m_open;
 	int64_t m_lastTs = 0;
 };

@@ -42,6 +42,9 @@ if(XRT_HAVE_DBUS)
 	target_include_directories(st_ovrn SYSTEM PRIVATE ${DBUS_INCLUDE_DIRS})
 endif()
 
+# Gesture rules read Mercury's joint features (hg_gesture_geometry.hpp: header only, no dependencies).
+target_include_directories(st_ovrn PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/tracking/hand/mercury)
+
 # The room calibration measures the floor with a resting Sense controller's LED outline.
 if(XRT_BUILD_DRIVER_PSSENSE)
 	target_link_libraries(st_ovrn PRIVATE drv_pssense drv_includes tracking-includes constellation)

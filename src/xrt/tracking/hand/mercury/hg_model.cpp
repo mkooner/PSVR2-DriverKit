@@ -12,7 +12,9 @@
 #include "hg_sync.hpp"
 #include "hg_gesture_geometry.hpp"
 #include "hg_stereographic_unprojection.hpp"
+#include <algorithm>
 #include <atomic>
+#include <stdexcept>
 #include <limits>
 #include "hg_image_math.inl"
 #include "hg_numerics_checker.hpp"
@@ -691,6 +693,66 @@ add_float_input(OnnxWrapper &wrap, onnx_state *state, const char *name, std::ini
 }
 
 void
+init_pinch_image_model(HandTracking *hgt, onnx_state *state)
+{
+	std::filesystem::path path = hgt->models_folder;
+	path /= "psvr2_pinch.onnx";
+	if (!std::filesystem::exists(path)) {
+		throw std::runtime_error(path.string() + " not found");
+	}
+	state->wraps.clear();
+	state->wrap = std::make_unique<OnnxWrapper>(hgt->log_level, path.string(), "monado_ht");
+	add_float_input(*state->wrap, state, "crop", {1, 1, 96, 96});
+}
+
+/*!
+ * The image pinch detector on one MediaPipe crop, prepared as in training (psvr2-test hands/pinch_image.py): the crop
+ * downscaled to 112x112 (area), left hands mirrored, the middle 96x96, contrast stretched between its 1st and 99th
+ * percentile; returns the pinch probability.
+ */
+static float
+pinch_image_run(onnx_state *state, const cv::Mat &crop, bool left)
+{
+	cv::Mat gray, small;
+	if (crop.channels() == 1) {
+		gray = crop;
+	} else {
+		cv::cvtColor(crop, gray, cv::COLOR_RGB2GRAY);
+	}
+	cv::resize(gray, small, cv::Size(112, 112), 0, 0, cv::INTER_AREA);
+	if (left) {
+		cv::flip(small, small, 1);
+	}
+	float *data = state->wraps[0].data;
+	uint8_t px[96 * 96];
+	for (int y = 0; y < 96; y++) {
+		memcpy(&px[y * 96], small.ptr(y + 8) + 8, 96);
+	}
+	uint8_t sorted[96 * 96];
+	memcpy(sorted, px, sizeof(px));
+	const int n = 96 * 96, i_lo = (n - 1) / 100, i_hi = (n - 1) * 99 / 100;
+	std::nth_element(sorted, sorted + i_lo, sorted + n);
+	const float lo = sorted[i_lo];
+	std::nth_element(sorted, sorted + i_hi, sorted + n);
+	const float hi = sorted[i_hi];
+	const float scale = 1.0f / fmaxf((hi - lo) / 255.0f, 1e-3f);
+	for (int i = 0; i < n; i++) {
+		data[i] = fminf(fmaxf((px[i] - lo) / 255.0f * scale, 0.0f), 1.0f);
+	}
+	OnnxWrapper &w = *state->wrap;
+	const OrtValue *in[] = {state->wraps[0].tensor};
+	const char *in_names[] = {state->wraps[0].name};
+	OrtValue *out = nullptr;
+	const char *out_name = "pinch_logit";
+	ORT_SAFE(w, Run(w.session, nullptr, in_names, in, 1, &out_name, 1, &out));
+	float *logit = nullptr;
+	ORT_SAFE(w, GetTensorMutableData(out, (void **)&logit));
+	const float p = 1.0f / (1.0f + expf(-logit[0]));
+	w.api->ReleaseValue(out);
+	return std::isfinite(p) ? p : -1.0f;
+}
+
+void
 init_gesture_models(HandTracking *hgt)
 {
 	std::filesystem::path embedder = hgt->models_folder, classifier = hgt->models_folder;
@@ -768,6 +830,23 @@ compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out, 
 	const gesture::HandGeometry geo = gesture::measure(lm);
 	if (!geo.valid) {
 		return;
+	}
+	static_assert(gesture::kFeatureCount == sizeof(out->joint_features) / sizeof(out->joint_features[0]),
+	              "t_hand_gestures joint_features size");
+	out->joint_features_valid = gesture::jointFeatures(lm, out->joint_features);
+	if (only_view < 0) {
+		// The image pinch detector: the mean over the cameras that saw the hand.
+		float sum = 0.0f;
+		int n = 0;
+		for (int v = 0; v < 2; v++) {
+			const HandTracking::mp_view_output &ov = hgt->mp_outputs[hand][v];
+			if (ov.valid && ov.presence >= hgt->tuneable_values.mediapipe_presence && ov.pinch >= 0.0f) {
+				sum += ov.pinch;
+				n++;
+			}
+		}
+		out->pinch_image_valid = n > 0;
+		out->pinch_image = n > 0 ? sum / (float)n : 0.0f;
 	}
 
 	/*
@@ -1360,6 +1439,40 @@ run_keypoint_estimation_mediapipe(keypoint_estimation_run_info &info, bool for_f
 		instr.rot_quat = direction(moved, twist);
 	}
 	present = mediapipe_run(info, instr, px_coord, crop);
+	if (hgt->pinch_image && !crop.empty() && present >= hgt->tuneable_values.mediapipe_presence) {
+		hgt->mp_outputs[hand_idx][view_idx].pinch =
+		    pinch_image_run(&info.view->pinch_img[hand_idx], crop, hand_idx == 0);
+	}
+
+	/*
+	 * Development: MERCURY_CROP_LOG=<file> appends every MediaPipe crop, downscaled to 112x112 grayscale, as a record:
+	 * int64 frame time ns, int8 hand, int8 view, float presence, then 112*112 bytes (for training image-based gesture
+	 * detectors offline on labelled recordings; psvr2-test hands/pinch_image.py).
+	 */
+	{
+		static FILE *crop_log = getenv("MERCURY_CROP_LOG") ? fopen(getenv("MERCURY_CROP_LOG"), "wb") : nullptr;
+		static std::mutex crop_log_mutex;
+		if (crop_log != nullptr && !crop.empty()) {
+			cv::Mat gray, small;
+			if (crop.channels() == 1) {
+				gray = crop;
+			} else {
+				cv::cvtColor(crop, gray, cv::COLOR_RGB2GRAY);
+			}
+			cv::resize(gray, small, cv::Size(112, 112), 0, 0, cv::INTER_AREA);
+			const int64_t ts = hgt->current_frame_timestamp;
+			const int8_t h8 = (int8_t)hand_idx, v8 = (int8_t)view_idx;
+			std::lock_guard<std::mutex> lock(crop_log_mutex);
+			fwrite(&ts, 8, 1, crop_log);
+			fwrite(&h8, 1, 1, crop_log);
+			fwrite(&v8, 1, 1, crop_log);
+			fwrite(&present, 4, 1, crop_log);
+			for (int y = 0; y < 112; y++) {
+				fwrite(small.ptr(y), 1, 112, crop_log);
+			}
+			fflush(crop_log);
+		}
+	}
 
 	xrt::auxiliary::math::map_quat(this_output.look_dir) = instr.rot_quat;
 	this_output.stereographic_radius = instr.stereographic_radius;
