@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 R="${MONADO_SRC:-$PWD/../../trial}"; B="$R/build"; L="$B/src/xrt"
 PLUGIN_DIR="${PLUGIN_DIR:-$R/src/xrt/state_trackers/steamvr_psvr2}"
 OUT="${OUT:-./hand_sim}"
-INC="-I$R/src/xrt/include -I$B/src/xrt/include -I$R/src/xrt/auxiliary -I$B/src/xrt/auxiliary -I$R/src/xrt/tracking -I$B/src/xrt/tracking -I$R/src/xrt/drivers/psvr2 -I$R/src/xrt/drivers -I$R/src/external -I$R/src/external/bcdec -I$R/src/external/cjson $(pkg-config --cflags libusb-1.0)"
+INC="-I$R/src/xrt/include -I$B/src/xrt/include -I$R/src/xrt/auxiliary -I$B/src/xrt/auxiliary -I$R/src/xrt/tracking -I$B/src/xrt/tracking -I$R/src/xrt/tracking/hand/mercury -I$R/src/xrt/drivers/psvr2 -I$R/src/xrt/drivers -I$R/src/external -I$R/src/external/bcdec -I$R/src/external/cjson $(pkg-config --cflags libusb-1.0)"
 DEFS="-D_GNU_SOURCE -DXRT_BUILD_DRIVER_PSVR2 -DXRT_BUILD_DRIVER_HANDTRACKING"
 T=$(mktemp -d)
 gcc -std=gnu11 -O2 $DEFS $INC -c sim_ht_side.c -o $T/sim_ht_side.o

@@ -149,6 +149,12 @@ sim_ht_gestures(int hand, struct sim_gestures *out)
 	out->extended_mask = g.extended_mask;
 	out->category = (int)g.category;
 	out->category_score = g.category_score;
+	out->pinch_image_valid = g.pinch_image_valid;
+	out->pinch_image = g.pinch_image;
+	out->features_valid = g.joint_features_valid;
+	for (int f = 0; f < 18; f++) {
+		out->features[f] = g.joint_features[f];
+	}
 	out->custom_valid = g.custom_valid;
 	out->custom = (int)g.custom;
 	for (int c = 0; c < 5; c++) {

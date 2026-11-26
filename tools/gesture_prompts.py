@@ -8,15 +8,19 @@ output (espeak-ng), so whoever wears the headset needs no screen, and writes whe
 CLOCK_MONOTONIC like the camera recording (PSVR2_RECORD_CAMERA) and tools/vrhandlog. The labels then tell the
 offline analysis what the hand was really doing at every moment.
 
-Output CSV: start_ns,end_ns,hand,gesture,orientation. start_ns is REACTION_S after the prompt began (time to react),
-end_ns when the next prompt starts. Usage: gesture_prompts.py out.csv [rounds]
+Output CSV: start_ns,end_ns,hand,gesture,orientation. start_ns is when the spoken prompt has finished plus a short
+reaction time (HEARD_REACTION_S; people act once they've heard the instruction: a long prompt takes up to 3 s to say,
+and the 2026-11-25 sessions, labelled from the speech's start, were off by up to 3 s), end_ns the same moment of the
+next prompt (the gesture is held until the next instruction is heard). The hold time runs from the end of the speech.
+Usage: gesture_prompts.py out.csv [rounds]
 """
 import shutil
 import subprocess
 import sys
 import time
 
-REACTION_S = 1.0
+REACTION_S = 1.0  # the old labels' allowance after the speech began (hands/retime_labels.py re-times those)
+HEARD_REACTION_S = 0.5  # after the speech ends (0.3 for the quick steps)
 HOLD_S = 3.0  # a gesture
 REST_S = 2.0  # "open" between gestures
 SYSTEM_S = 5.0  # the dashboard gesture: time to raise an open palm, then close it into a fist
@@ -27,7 +31,7 @@ def now_ns():
 
 
 def say(text):
-    """Speak without waiting (the hold starts with the prompt); returns the process."""
+    """Start speaking; returns the process (wait() on it for the end of the speech)."""
     if shutil.which("espeak-ng") is None:
         print(f"PROMPT: {text}", flush=True)
         return None
@@ -93,23 +97,108 @@ def schedule(rounds):
     return steps
 
 
+def focus_steps(group, rounds):
+    """One gesture group at a time (GESTURE_PROMPTS_SET=<group>), so each can be made good before the next:
+    pinch (pinch vs open hand: held, moving, high, low, palm up, slow pinches, quick taps and bursts of three; relaxed,
+    half-open and moving open hands),
+    fist (held and quick fists vs open), pointclaw (point and claw, which must not click). Both hands, left first,
+    rounds times. Each step: (hand, gesture, orientation, seconds, spoken text, reaction seconds)."""
+    steps = []
+    for r in range(rounds):
+        for hand in ("left", "right"):
+            steps.append((hand, "open", "any", REST_S + 1, f"{hand} hand. Hold it open in front of you", REACTION_S))
+            if group == "pinch":
+                for gesture, orientation, hold, text in (
+                    ("pinch", "hold", HOLD_S, "pinch and hold"),
+                    ("open", "any", REST_S, "open"),
+                    ("pinch", "hold_move", 5.0, "pinch and hold, and move your hand slowly left and right"),
+                    ("open", "moving", 4.0, "open hand, keep moving it around"),
+                    ("pinch", "hold_vertical", 5.0, "pinch and hold, and move your hand slowly up and down"),
+                    ("open", "any", REST_S, "open"),
+                    ("pinch", "high", HOLD_S, "pinch with your hand up at eye height"),
+                    ("open", "high", REST_S, "open, keep it up"),
+                    ("pinch", "low", HOLD_S, "pinch with your hand low, at belly height"),
+                    ("open", "low", REST_S, "open, keep it low"),
+                    ("pinch", "palm_up", HOLD_S, "pinch with your palm facing up"),
+                    ("open", "palm_up", REST_S, "open, palm up"),
+                    ("open", "relaxed", HOLD_S, "relax your hand, fingers loosely curled"),
+                    ("open", "half", HOLD_S, "half open hand"),
+                ):
+                    steps.append((hand, gesture, orientation, hold, text, REACTION_S))
+                # Slow pinches: the closing and opening are "transition" (not used to fit; they time the click).
+                for _ in range(2):
+                    steps.append((hand, "transition", "slow_close", 2.5,
+                                  "slowly bring your thumb and index finger together", 0.5))
+                    steps.append((hand, "pinch", "slow_hold", 2.0, "hold the pinch", 0.3))
+                    steps.append((hand, "transition", "slow_open", 2.5, "slowly open", 0.5))
+                    steps.append((hand, "open", "any", REST_S, "open", REACTION_S))
+                # Fast pinches: single quick taps, then bursts of three ("burst": count the clicks, not fitted).
+                steps.append((hand, "open", "tap_ready", 2.0, "quick taps. Pinch when I say pinch", REACTION_S))
+                for _ in range(6):
+                    steps.append((hand, "pinch", "tap", 0.7, "pinch", 0.35))
+                    steps.append((hand, "open", "tap_release", 0.7, "open", 0.35))
+                for _ in range(2):
+                    steps.append((hand, "burst", "three", 3.0, "pinch three times quickly", 0.5))
+                    steps.append((hand, "open", "any", REST_S, "open", REACTION_S))
+            elif group == "fist":
+                for gesture, orientation, hold, text in (
+                    ("fist", "hold", HOLD_S, "make a fist and hold it"),
+                    ("open", "any", REST_S, "open"),
+                    ("fist", "hold_move", 5.0, "fist, and move your hand around"),
+                    ("open", "moving", 4.0, "open hand, keep moving it around"),
+                    ("open", "relaxed", HOLD_S, "relax your hand, fingers loosely curled"),
+                ):
+                    steps.append((hand, gesture, orientation, hold, text, REACTION_S))
+                for _ in range(4):
+                    steps.append((hand, "fist", "quick", 1.5, "fist", 0.4))
+                    steps.append((hand, "open", "quick", 1.5, "open", 0.4))
+            elif group == "pointclaw":
+                for gesture, orientation, hold, text in (
+                    ("point", "hold", HOLD_S, "point with your index finger"),
+                    ("open", "any", REST_S, "open"),
+                    ("point", "hold_move", 5.0, "point, and move your hand around"),
+                    ("open", "any", REST_S, "open"),
+                    ("claw", "hold", HOLD_S, "claw, fingers bent, not touching"),
+                    ("open", "any", REST_S, "open"),
+                    ("claw", "hold_move", 5.0, "claw, and move your hand around"),
+                    ("open", "any", REST_S, "open"),
+                ):
+                    steps.append((hand, gesture, orientation, hold, text, REACTION_S))
+            else:
+                raise SystemExit(f"unknown GESTURE_PROMPTS_SET {group!r} (pinch, fist, pointclaw)")
+            steps.append((hand, "open", "any", REST_S + 1, "let go, and lower your hand", REACTION_S))
+    return steps
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 1
     rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 2
-    steps = schedule(rounds)
+    import os
+    if os.environ.get("GESTURE_PROMPTS_SET"):
+        # One round: the earlier benchmark is the other session to test against (shorter sessions, less video).
+        steps = focus_steps(os.environ["GESTURE_PROMPTS_SET"], int(sys.argv[2]) if len(sys.argv) > 2 else 1)
+    else:
+        steps = [s + (REACTION_S,) for s in schedule(rounds)]
     total = sum(s[3] for s in steps)
     with open(sys.argv[1], "w") as out:
         out.write("start_ns,end_ns,hand,gesture,orientation\n")
         p = say(f"Gesture test, about {int(total / 60) + 1} minutes. Starting in five seconds.")
         time.sleep(5.0)
-        for hand, gesture, orientation, hold, text in steps:
-            began = now_ns()
+        prev = None  # (heard ns, hand, gesture, orientation) of the prompt before
+        for hand, gesture, orientation, hold, text, reaction in steps:
             p = say(text)
+            if p is not None:
+                p.wait()  # the instruction has been heard
+            heard = now_ns() + int((HEARD_REACTION_S if reaction >= HEARD_REACTION_S else 0.3) * 1e9)
+            if prev is not None:
+                out.write(f"{prev[0]},{heard},{prev[1]},{prev[2]},{prev[3]}\n")
+                out.flush()
+            prev = (heard, hand, gesture, orientation)
             time.sleep(hold)
-            out.write(f"{began + int(REACTION_S * 1e9)},{now_ns()},{hand},{gesture},{orientation}\n")
-            out.flush()
+        if prev is not None:
+            out.write(f"{prev[0]},{now_ns()},{prev[1]},{prev[2]},{prev[3]}\n")
         say("Done. Thank you.")
         time.sleep(2.0)
     print(f"{len(steps)} prompts written to {sys.argv[1]}", file=sys.stderr)
