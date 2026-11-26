@@ -7,9 +7,15 @@
       "sources": [
         {
           "inputs": {
-            "double": {
+            "click": {
               "output": "/actions/default/in/showhide"
-            },
+            }
+          },
+          "mode": "button",
+          "path": "/user/hand/right/input/options"
+        },
+        {
+          "inputs": {
             "touch": {
               "output": "/actions/default/in/clickmodifierright"
             }
@@ -135,7 +141,7 @@
   },
   "category": "steamvr_input",
   "controller_type": "playstation_vr2_sense",
-  "description": "Our own binding for the WayVR desktop overlay (a separate program, not part of this driver), laid out like WayVR's Oculus Touch defaults: double-press Triangle shows/hides the overlays, L2/R2 click (touch shows the pointer), L1/R1 grab, sticks scroll, touching Triangle/Circle gives the right-click laser and Square/Cross the middle-click laser.",
+  "description": "Our own binding for the WayVR desktop overlay (a separate program, not part of this driver), laid out like WayVR's Oculus Touch defaults except show/hide: a press of Options (right controller) shows/hides the overlays (as on monado-service), L2/R2 click (touch shows the pointer), L1/R1 grab, sticks scroll, touching Triangle/Circle gives the right-click laser and Square/Cross the middle-click laser.",
   "name": "WayVR desktop overlay bindings for PlayStation VR2 Sense controllers",
   "options": {
     "mirror_actions": false,
