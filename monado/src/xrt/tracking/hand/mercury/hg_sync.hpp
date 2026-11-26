@@ -217,6 +217,8 @@ struct ht_view
 	onnx_state keypoint[2];
 	//! MediaPipe's landmark model per hand (hg_tuneable_values::mediapipe_keypoints), for tracked hands.
 	onnx_state keypoint_mp[2];
+	//! The image pinch detector per hand (psvr2_pinch.onnx; optional), run on MediaPipe's crop.
+	onnx_state pinch_img[2];
 	int view;
 
 	struct t_camera_extra_info_one_view camera_info;
@@ -339,7 +341,10 @@ public:
 		//! The crop they're in (never mirrored): crop pixel -> camera direction (mediapipe_crop_direction).
 		Eigen::Quaternionf rot = Eigen::Quaternionf::Identity();
 		float radius = 0;
+		float pinch = -1.0f; //!< the image pinch detector's probability on this crop (-1: not run)
 	} mp_outputs[2][2];
+	//! The image pinch detector (psvr2_pinch.onnx) loaded: pinch from the crop's image, not the landmarks.
+	bool pinch_image = false;
 	/*!
 	 * MediaPipe's own landmarks of the last frame per [hand][view], as camera directions: the next frame's crop is
 	 * placed from them, as MediaPipe's tracking does (HAND_RECT_NEXT_FRAME from the landmarks), not from Mercury's hand.
@@ -431,6 +436,13 @@ init_keypoint_estimation(HandTracking *hgt, onnx_state *wrap);
 //! MediaPipe's hand landmark model (hand_landmarks_detector.onnx).
 void
 init_keypoint_estimation_mediapipe(HandTracking *hgt, onnx_state *wrap);
+
+/*!
+ * The image pinch detector (psvr2_pinch.onnx in the models folder: a small CNN trained on labelled PS VR2 hand crops,
+ * psvr2-test hands/pinch_image.py); throws when it isn't there or doesn't load.
+ */
+void
+init_pinch_image_model(HandTracking *hgt, onnx_state *state);
 
 //! MediaPipe's Gesture Recognizer models (gesture_embedder.onnx, canned_gesture_classifier.onnx); throws on failure.
 void

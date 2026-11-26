@@ -9,11 +9,15 @@
 
 #include "hg_gesture_geometry.hpp"
 #include "ovrn_gesture_state.hpp"
+#include "ovrn_gesture_rules.hpp"
+#include "ovrn_gesture_rules_default.hpp"
 
 #include "catch_amalgamated.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 
 using namespace xrt::tracking::hand::mercury::gesture;
 using namespace ovrn::gest;
@@ -505,4 +509,327 @@ TEST_CASE("custom mapping: decides pinch and fist when valid, held 60 ms; point 
 	Machine old(c);
 	feed(old, 1000, 5, 1.0f, ClosedFist);
 	CHECK(old.state().fist);
+}
+
+// ------------------------------------------------------------------------------------------- joint features and rules
+
+namespace {
+
+namespace rl = ovrn::gest::rules;
+
+//! The same features psvr2-test hands/gesture_fit.py computes for these synthetic hands (copied from its output).
+const float kOpenFeatures[kFeatureCount] = {180.0f, 180.0f, 180.0f, 180.0f, 180.0f, 180.0f, 180.0f, 180.0f, 1.8478f,
+                                            1.9365f, 1.8779f, 1.7264f, 1.3877f, 1.6088f, 1.8650f, 2.1333f, 180.0f,
+                                            0.8339f};
+const float kFistFeatures[kFeatureCount] = {81.8699f, 116.5651f, 81.8699f, 116.5651f, 81.8699f, 116.5651f, 81.8699f,
+                                            116.5651f, 0.8379f,  0.8128f,   0.8296f,  0.8693f,   0.8728f,  1.1933f,
+                                            1.5213f,  1.8403f,   180.0f,   0.8339f};
+
+const char *const kTestConfig = R"json({
+ "smooth_frames": 1, "grace_ms": 100,
+ "hands": {
+  "left": {
+   "fist": {"enabled": true, "output": "grip", "priority": 3, "min_confidence": 0.5, "activate_ms": 50,
+            "release_ms": 50, "terms": [{"feature": "index_reach", "op": "<=", "on": 1.0, "off": 1.2}]},
+   "point": {"enabled": true, "output": "block_pinch", "priority": 2, "activate_ms": 30, "release_ms": 30,
+             "terms": [{"feature": "middle_reach", "op": "<=", "on": 1.0, "off": 1.1},
+                       {"feature": "index_reach", "op": ">=", "on": 1.5, "off": 1.4}]},
+   "thumbs_up": {"enabled": false, "terms": [], "status": "no recorded examples"}
+  },
+  "right": {}
+ }
+})json";
+
+//! Feeds @p f every 16 ms for @p frames frames from @p t_ms; returns the time after.
+int64_t
+feedRules(rl::Engine &e, const float *f, int64_t t_ms, int frames, float conf = 0.9f, bool valid = true)
+{
+	rl::Change ch[8];
+	for (int i = 0; i < frames; i++, t_ms += 16) {
+		e.update(f, valid, conf, t_ms * 1'000'000LL, ch, 8);
+	}
+	return t_ms;
+}
+
+} // namespace
+
+TEST_CASE("joint features match the fit tool's on synthetic hands; names round-trip; bad input is invalid")
+{
+	float f[kFeatureCount];
+	REQUIRE(jointFeatures(open_hand(), f));
+	for (int i = 0; i < kFeatureCount; i++) {
+		CHECK(f[i] == Approx(kOpenFeatures[i]).margin(1e-3));
+	}
+	REQUIRE(jointFeatures(fist_hand(), f));
+	for (int i = 0; i < kFeatureCount; i++) {
+		CHECK(f[i] == Approx(kFistFeatures[i]).margin(1e-3));
+	}
+	for (int i = 0; i < kFeatureCount; i++) {
+		CHECK(featureIndex(featureName(i)) == i);
+	}
+	CHECK(featureIndex("nope") == -1);
+	Landmarks bad = open_hand();
+	bad.p[8].x = std::numeric_limits<float>::quiet_NaN();
+	CHECK_FALSE(jointFeatures(bad, f));
+	Landmarks zero = open_hand();
+	zero.p[17] = zero.p[5]; // palm width 0
+	CHECK_FALSE(jointFeatures(zero, f));
+}
+
+TEST_CASE("gesture rules config: parse, defaults, errors; the built-in config parses")
+{
+	std::string err;
+	const rl::Config c = rl::parse(kTestConfig, &err);
+	REQUIRE(c.valid);
+	REQUIRE(c.hands[0].gestures.size() == 3);
+	CHECK(c.hands[1].gestures.empty());
+	const rl::Gesture &fist = c.hands[0].gestures[0];
+	CHECK(fist.id == "fist");
+	CHECK(fist.output == rl::Output::Grip);
+	CHECK(fist.activate_ns == 50'000'000);
+	REQUIRE(fist.terms.size() == 1);
+	CHECK(fist.terms[0].feature == F_INDEX_REACH);
+	CHECK(fist.terms[0].below);
+	CHECK(fist.terms[0].off == Approx(1.2f));
+	CHECK_FALSE(rl::parse("{", &err).valid);
+	CHECK_FALSE(rl::parse(R"({"hands": {"left": {"x": {"terms": [{"feature": "nope", "op": "<=", "on": 1}]}}}})", &err).valid);
+	CHECK_FALSE(rl::parse(R"({"hands": {"left": {"x": {"terms": [{"feature": "index_pip", "op": "<="}]}}}})", &err).valid);
+	const rl::Config builtin = rl::parse(rl::kDefaultConfig, &err);
+	CHECK(builtin.valid);
+}
+
+TEST_CASE("gesture rules: activation after its hold time, hysteresis, release, one press")
+{
+	std::string err;
+	const rl::Config c = rl::parse(kTestConfig, &err);
+	rl::Engine e(c.hands[0], 1, 100'000'000);
+	int64_t t = feedRules(e, kOpenFeatures, 1000, 5);
+	CHECK(e.activeIndex() == -1);
+	t = feedRules(e, kFistFeatures, t, 3); // 32 ms of fist: still a candidate
+	CHECK(e.activeIndex() == -1);
+	CHECK(e.phase(0) == rl::Phase::Candidate);
+	t = feedRules(e, kFistFeatures, t, 3);
+	CHECK(e.activeIndex() == 0);
+	CHECK(e.activeOutput(rl::Output::Grip));
+	CHECK(e.decides(rl::Output::Grip));
+	// hysteresis: index reach 1.1 is above "on" (1.0) but inside "off" (1.2): stays active
+	float f[kFeatureCount];
+	std::copy(kFistFeatures, kFistFeatures + kFeatureCount, f);
+	f[F_INDEX_REACH] = 1.1f;
+	t = feedRules(e, f, t, 20);
+	CHECK(e.activeIndex() == 0);
+	// a one-frame dip past "off" doesn't release (release_ms 50)
+	t = feedRules(e, kOpenFeatures, t, 1);
+	CHECK(e.phase(0) == rl::Phase::Releasing);
+	t = feedRules(e, kFistFeatures, t, 1);
+	CHECK(e.phase(0) == rl::Phase::Active);
+	// open for long enough: released
+	t = feedRules(e, kOpenFeatures, t, 6);
+	CHECK(e.activeIndex() == -1);
+	// the same camera frame again doesn't advance anything
+	rl::Change ch[8];
+	CHECK(e.update(kFistFeatures, true, 0.9f, (t - 16) * 1'000'000LL, ch, 8) == 0);
+}
+
+TEST_CASE("gesture rules: tracking loss holds for the grace time, then lets go; found again starts fresh")
+{
+	std::string err;
+	const rl::Config c = rl::parse(kTestConfig, &err);
+	rl::Engine e(c.hands[0], 1, 100'000'000);
+	int64_t t = feedRules(e, kFistFeatures, 1000, 10);
+	REQUIRE(e.activeIndex() == 0);
+	t = feedRules(e, kFistFeatures, t, 4, 0.9f, false); // 64 ms without a measurement: held
+	CHECK(e.activeIndex() == 0);
+	t = feedRules(e, kFistFeatures, t, 5, 0.9f, false); // past 100 ms: let go
+	CHECK(e.activeIndex() == -1);
+	// low confidence counts as lost too
+	t = feedRules(e, kFistFeatures, t, 10);
+	REQUIRE(e.activeIndex() == 0);
+	t = feedRules(e, kFistFeatures, t, 10, 0.2f);
+	CHECK(e.activeIndex() == -1);
+	// found again after a gap: from idle, the hold time again
+	t = feedRules(e, kFistFeatures, t + 500, 1);
+	CHECK(e.activeIndex() == -1);
+	t = feedRules(e, kFistFeatures, t, 5);
+	CHECK(e.activeIndex() == 0);
+	// reset lets go at once
+	rl::Change ch[8];
+	CHECK(e.reset(t * 1'000'000LL, "test", ch, 8) == 1);
+	CHECK(e.activeIndex() == -1);
+}
+
+TEST_CASE("gesture rules: one gesture at a time, higher priority takes over; disabled and empty rules never fire")
+{
+	std::string err;
+	const rl::Config c = rl::parse(kTestConfig, &err);
+	rl::Engine e(c.hands[0], 1, 100'000'000);
+	// a pose that is both a point (middle curled, index straight) and, with index curled, a fist: point first
+	float point[kFeatureCount];
+	std::copy(kFistFeatures, kFistFeatures + kFeatureCount, point);
+	point[F_INDEX_REACH] = 1.8f;
+	int64_t t = feedRules(e, point, 1000, 5);
+	CHECK(e.activeIndex() == 1);
+	CHECK(e.activeOutput(rl::Output::BlockPinch));
+	// now a fist (priority 3 > 2): takes over after its hold time; never two active
+	t = feedRules(e, kFistFeatures, t, 6);
+	CHECK(e.activeIndex() == 0);
+	CHECK(e.phase(1) == rl::Phase::Idle);
+	// thumbs_up is disabled with no terms: never leaves idle
+	CHECK(e.phase(2) == rl::Phase::Idle);
+	// no gestures at all (the right hand here): nothing, no crash
+	rl::Engine none(c.hands[1], 3, 100'000'000);
+	feedRules(none, kFistFeatures, 1000, 10);
+	CHECK(none.activeIndex() == -1);
+	CHECK_FALSE(none.decides(rl::Output::Grip));
+}
+
+TEST_CASE("gesture rules smoothing: the mean of the last frames")
+{
+	std::string err;
+	const rl::Config c = rl::parse(kTestConfig, &err);
+	rl::Engine e(c.hands[0], 3, 100'000'000);
+	float a[kFeatureCount], b[kFeatureCount];
+	std::copy(kOpenFeatures, kOpenFeatures + kFeatureCount, a);
+	std::copy(kOpenFeatures, kOpenFeatures + kFeatureCount, b);
+	a[F_INDEX_REACH] = 0.9f;
+	b[F_INDEX_REACH] = 1.5f;
+	int64_t t = feedRules(e, a, 1000, 1);
+	t = feedRules(e, b, t, 1);
+	t = feedRules(e, a, t, 1);
+	CHECK(e.smoothed()[F_INDEX_REACH] == Approx((0.9f + 1.5f + 0.9f) / 3.0f));
+	t = feedRules(e, b, t, 1);
+	CHECK(e.smoothed()[F_INDEX_REACH] == Approx((1.5f + 0.9f + 1.5f) / 3.0f));
+}
+
+TEST_CASE("the calibrated rules drive the state machine's fist and rule out the pinch")
+{
+	Config cfg;
+	cfg.confirm_frames = 3;
+	Machine m(cfg);
+	int64_t t = 1000;
+	// the rule says fist: on at once (its own hold time already passed), whatever the category / custom mapping says
+	Sample s = sample(t, 1.2f);
+	s.custom_valid = true;
+	s.custom = CustomOpen;
+	s.rule_fist_decides = true;
+	s.rule_fist = true;
+	CHECK(m.update(s, t * 1'000'000LL).fist_pressed);
+	CHECK(m.state().fist);
+	// the rule says no fist: off even if the custom mapping says fist
+	t += 16;
+	s = sample(t, 1.2f);
+	s.custom_valid = true;
+	s.custom = CustomFist;
+	s.rule_fist_decides = true;
+	s.rule_fist = false;
+	CHECK(m.update(s, t * 1'000'000LL).fist_released);
+	// an active point rules out the custom mapping's pinch
+	Machine p(cfg);
+	int64_t u = 1000;
+	for (int i = 0; i < 20; i++, u += 16) {
+		Sample q = sample(u, 1.2f);
+		q.custom_valid = true;
+		q.custom = CustomPinch;
+		q.custom_scores[CustomPinch] = 0.9f;
+		q.rule_block_pinch = true;
+		p.update(q, u * 1'000'000LL);
+	}
+	CHECK_FALSE(p.state().pinch);
+}
+
+TEST_CASE("image pinch detector: averaged probability, on 0.6 / off 0.4 (hysteresis), held 30 ms, reset clears it")
+{
+	Config cfg;
+	Machine m(cfg);
+	const auto img = [](int64_t ts_ms, float p) {
+		Sample s = sample(ts_ms, 1.5f); // an open-looking landmark distance: the image decides
+		s.pinch_image_valid = true;
+		s.pinch_image = p;
+		return s;
+	};
+	int64_t t = 1000;
+	int presses = 0, releases = 0;
+	for (int i = 0; i < 10; i++, t += 16) {
+		presses += m.update(img(t, 0.2f), t * 1'000'000LL).pinch_pressed ? 1 : 0;
+	}
+	CHECK(presses == 0);
+	// probability 0.9: the 3-frame mean crosses 0.6 on the 2nd frame, then 30 ms held
+	for (int i = 0; i < 6; i++, t += 16) {
+		presses += m.update(img(t, 0.9f), t * 1'000'000LL).pinch_pressed ? 1 : 0;
+	}
+	CHECK(presses == 1);
+	CHECK(m.state().pinch);
+	CHECK(m.pinchValue() == 1.0f);
+	// 0.5 is below "on" but above "off": stays on
+	for (int i = 0; i < 10; i++, t += 16) {
+		releases += m.update(img(t, 0.5f), t * 1'000'000LL).pinch_released ? 1 : 0;
+	}
+	CHECK(releases == 0);
+	// 0.1: released after the hold
+	for (int i = 0; i < 8; i++, t += 16) {
+		releases += m.update(img(t, 0.1f), t * 1'000'000LL).pinch_released ? 1 : 0;
+	}
+	CHECK(releases == 1);
+	CHECK_FALSE(m.state().pinch);
+	// a single high frame doesn't click (the mean of 3 stays under 0.6)
+	presses = 0;
+	presses += m.update(img(t, 0.95f), t * 1'000'000LL).pinch_pressed ? 1 : 0;
+	t += 16;
+	for (int i = 0; i < 6; i++, t += 16) {
+		presses += m.update(img(t, 0.1f), t * 1'000'000LL).pinch_pressed ? 1 : 0;
+	}
+	CHECK(presses == 0);
+	// a fist still wins over the image pinch
+	Machine f(cfg);
+	int64_t u = 1000;
+	for (int i = 0; i < 10; i++, u += 16) {
+		Sample s = img(u, 0.95f);
+		s.rule_fist_decides = true;
+		s.rule_fist = true;
+		f.update(s, u * 1'000'000LL);
+	}
+	CHECK(f.state().fist);
+	CHECK_FALSE(f.state().pinch);
+	// reset clears the history: the next high frame needs the mean again
+	m.reset("test");
+	t += 16;
+	CHECK_FALSE(m.update(img(t, 0.9f), t * 1'000'000LL).pinch_pressed);
+}
+
+TEST_CASE("formula pinch rule decides the pinch when it can measure; the gesture mapping covers the rest")
+{
+	Config cfg;
+	// the built-in config has the formula pinch on for both hands
+	std::string err;
+	const rl::Config builtin = rl::parse(rl::kDefaultConfig, &err);
+	REQUIRE(builtin.valid);
+	for (int h = 0; h < 2; h++) {
+		rl::Engine e(builtin.hands[h], builtin.smooth_frames, builtin.grace_ns);
+		CHECK(e.decides(rl::Output::Pinch));
+		CHECK(e.decides(rl::Output::Grip));
+	}
+	// the rule decides: its pinch, not the mapping's
+	Machine m(cfg);
+	int64_t t = 1000;
+	for (int i = 0; i < 5; i++, t += 16) {
+		Sample s = sample(t, 1.2f);
+		s.custom_valid = true;
+		s.custom = CustomOpen; // the mapping says no pinch
+		s.rule_pinch_decides = true;
+		s.rule_pinch = true;
+		m.update(s, t * 1'000'000LL);
+	}
+	CHECK(m.state().pinch);
+	// no measurement: the mapping's pinch covers the frames
+	Machine f(cfg);
+	int64_t u = 1000;
+	for (int i = 0; i < 10; i++, u += 16) {
+		Sample s = sample(u, 1.2f);
+		s.custom_valid = true;
+		s.custom = CustomPinch;
+		s.custom_scores[CustomPinch] = 0.9f;
+		s.rule_pinch_decides = false;
+		f.update(s, u * 1'000'000LL);
+	}
+	CHECK(f.state().pinch);
 }

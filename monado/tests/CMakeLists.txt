@@ -120,6 +120,7 @@ if(XRT_FEATURE_STEAMVR_PLUGIN)
 		tests_ovrn_gestures PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2
 					    ${PROJECT_SOURCE_DIR}/src/xrt/tracking/hand/mercury
 		)
+	target_link_libraries(tests_ovrn_gestures PRIVATE xrt-external-cjson aux_util)
 	if(XRT_BUILD_DRIVER_PSVR2)
 		target_include_directories(
 			tests_ovrn_camera PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/state_trackers/steamvr_psvr2

@@ -29,6 +29,8 @@
 #include "ovrn_device.hpp"
 #include "ovrn_hand_gestures.hpp"
 #include "ovrn_gesture_state.hpp"
+#include "ovrn_gesture_rules.hpp"
+#include "ovrn_gesture_rules_default.hpp"
 
 #include <cstdlib>
 #include <string>
@@ -102,6 +104,7 @@ public:
 		if (!inUse() || !m_backend->handJoints(m_hand, now_ns, &j) || !j.active || !j.joint_valid[0]) {
 			m_tracked = false;
 			logGestureEvents(m_mp.reset("hand not tracked"), now_ns);
+			ruleChanges(m_rules.reset(now_ns, "hand not tracked", m_ruleChanges, kRuleChanges), &sample_none());
 			setGestures(skel::Gestures{});
 			// A lost hand lets go of the gesture's system press (the headset button still works: sendSystem).
 			m_systemPinch = false;
@@ -148,11 +151,36 @@ public:
 			}
 		}
 		if (mp_on) {
+			/*
+			 * The calibrated rules (fitted on labelled recordings; ovrn_gesture_rules.hpp) on this frame's joint
+			 * features: an enabled fist rule decides the fist, an active point / claw rules out a pinch. The pinch
+			 * itself stays the custom mapping's (the joints don't carry it on these cameras).
+			 */
+			ruleChanges(m_rules.update(sample.features, sample.valid && sample.features_valid, sample.confidence,
+			                           sample.timestamp_ns, m_ruleChanges, kRuleChanges),
+			            &sample);
+			sample.rule_fist_decides = m_rules.decides(gest::rules::Output::Grip);
+			sample.rule_fist = m_rules.activeOutput(gest::rules::Output::Grip);
+			sample.rule_block_pinch = m_rules.activeOutput(gest::rules::Output::BlockPinch);
+			/*
+			 * The formula pinch (thumb tip to index tip) decides whenever this frame has the joint measurements, or
+			 * while its pinch is held through a short dropout (the rules' grace time); otherwise the fallback (the
+			 * image detector if installed, else the gesture mapping) covers the frame.
+			 */
+			sample.rule_pinch = m_rules.activeOutput(gest::rules::Output::Pinch);
+			sample.rule_pinch_decides = m_rules.decides(gest::rules::Output::Pinch) &&
+			                            ((sample.valid && sample.features_valid) || sample.rule_pinch);
+			m_stat.pinch_formula += sample.rule_pinch_decides ? 1 : 0;
+			m_stat.pinch_image += !sample.rule_pinch_decides && sample.pinch_image_valid ? 1 : 0;
+			m_stat.pinch_mapping +=
+			    !sample.rule_pinch_decides && !sample.pinch_image_valid && sample.custom_valid ? 1 : 0;
 			logGestureEvents(m_mp.update(sample, now_ns), now_ns, &sample);
 			m_stat.mp_frames++;
 			m_stat.mp_valid += m_mp.state().valid ? 1 : 0;
 		} else if (m_mp.state().valid) {
 			logGestureEvents(m_mp.reset("gesture measurements unavailable"), now_ns);
+			ruleChanges(m_rules.reset(now_ns, "gesture measurements unavailable", m_ruleChanges, kRuleChanges),
+			            &sample_none());
 		}
 		/*
 		 * The dashboard gesture's pose: the palm toward the face, raised (kSystemMinHeightM below the eyes or
@@ -457,6 +485,11 @@ private:
 				    s.frames > 0 ? s.min_pinch : 0.0f, m_mp.config().pinch_on, m_mp.config().pinch_off,
 				    s.category[gest::ClosedFist], s.category[gest::OpenPalm], s.category[gest::PointingUp],
 				    s.category[gest::Victory], s.category[gest::ILoveYou], s.category[gest::None]);
+				const uint32_t pn = m_stat.pinch_formula + m_stat.pinch_image + m_stat.pinch_mapping;
+				log("ovrn: %s hand pinch source (10 s): formula %.0f%%, image detector %.0f%%, gesture mapping "
+				    "%.0f%% of %u frames\n",
+				    m_hand == Hand::Left ? "left" : "right", pn ? 100.0 * m_stat.pinch_formula / pn : 0.0,
+				    pn ? 100.0 * m_stat.pinch_image / pn : 0.0, pn ? 100.0 * m_stat.pinch_mapping / pn : 0.0, pn);
 			}
 		}
 		const bool system_was = m_stat.system_was;
@@ -603,12 +636,71 @@ private:
 		int64_t since_ns = 0;
 		uint32_t frames = 0, tracked = 0, palm_facing = 0;
 		uint32_t trigger_clicks = 0, grip_clicks = 0, system_clicks = 0, trigger_on = 0, grip_on = 0;
+		//! Frames whose pinch the formula rule, the image detector, the gesture mapping decided.
+		uint32_t pinch_formula = 0, pinch_image = 0, pinch_mapping = 0;
 		uint32_t mp_frames = 0, mp_valid = 0; //!< frames with MediaPipe measurements, and how many valid
 		float max_pinch = 0.0f, max_grab = 0.0f;
 		bool system_was = false;
 	} m_stat; //!< RunFrame thread: the 10 s gesture summary (gestureLog)
 	uint64_t m_updates = 0;
+	//! The gesture rules config, loaded once (both hands; the file or the built-in one).
+	static const gest::rules::Config &
+	gestureRules()
+	{
+		static const gest::rules::Config c = [] {
+			std::string note;
+			gest::rules::Config cfg = gest::rules::loadConfig(gest::rules::kDefaultConfig, &note);
+			log("ovrn: gesture rules: %s\n", note.c_str());
+			static const char *const hn[2] = {"left", "right"};
+			for (int h = 0; h < 2; h++) {
+				for (const gest::rules::Gesture &g : cfg.hands[h].gestures) {
+					log("ovrn: gesture rules: %s %s: %s (%s)\n", hn[h], g.id.c_str(),
+					    g.enabled && !g.terms.empty() ? "on" : "off", g.status.c_str());
+				}
+			}
+			return cfg;
+		}();
+		return c;
+	}
+
+	static const gest::Sample &
+	sample_none()
+	{
+		static const gest::Sample s;
+		return s;
+	}
+
+	//! Logs the rules' state changes into an active gesture or out of one (and every change with OVRN_GESTURE_DEBUG).
+	void
+	ruleChanges(int n, const gest::Sample *s)
+	{
+		for (int i = 0; i < n; i++) {
+			const gest::rules::Change &c = m_ruleChanges[i];
+			const bool edge = c.to == gest::rules::Phase::Active || c.from == gest::rules::Phase::Active ||
+			                  c.from == gest::rules::Phase::Releasing;
+			if (c.gesture < 0 || !(edge || m_mpDebug)) {
+				continue;
+			}
+			const gest::rules::Gesture &g = m_rules.hand().gestures[c.gesture];
+			std::string terms;
+			for (const gest::rules::Term &t : g.terms) {
+				char buf[96];
+				snprintf(buf, sizeof(buf), "%s%s %.3f (on %s %.3f, off %.3f)", terms.empty() ? "" : ", ",
+				         gest::rules::geo::featureName(t.feature), m_rules.smoothed()[t.feature],
+				         t.below ? "<=" : ">=", t.on, t.off);
+				terms += buf;
+			}
+			log("ovrn: %s gesture rule %s: %s -> %s (%s); %s; presence %.2f\n", m_hand == Hand::Left ? "left" : "right",
+			    g.id.c_str(), gest::rules::phaseName(c.from), gest::rules::phaseName(c.to), c.reason, terms.c_str(),
+			    s != nullptr ? s->confidence : 0.0f);
+		}
+	}
+
+	static constexpr int kRuleChanges = 16;
+	gest::rules::Change m_ruleChanges[kRuleChanges];
 	gest::Machine m_mp;   //!< RunFrame thread: MediaPipe gesture state
+	gest::rules::Engine m_rules = gest::rules::Engine(gestureRules().hands[m_hand == Hand::Left ? 0 : 1],
+	                                                  gestureRules().smooth_frames, gestureRules().grace_ns);
 	const bool m_mpDebug; //!< OVRN_GESTURE_DEBUG
 	gest::SystemGesture m_systemGesture; //!< RunFrame thread: the dashboard gesture with MediaPipe's gestures
 	std::string m_gestureProfile;        //!< RunFrame thread: the profile the gesture tuning is for

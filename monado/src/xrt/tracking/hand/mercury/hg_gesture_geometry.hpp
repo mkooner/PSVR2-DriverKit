@@ -203,4 +203,99 @@ measure(const Landmarks &lm, const ExtensionLimits &lim = {})
 	return g;
 }
 
+/*!
+ * The joint features calibrated gesture rules use (psvr2-test hands/gesture_fit.py computes the same): per finger
+ * (index, middle, ring, little) the angle at the middle joint (PIP) and the end joint (DIP) in degrees (180 straight),
+ * the reach (tip-to-wrist / knuckle-to-wrist: about 1.8 straight, under 1 curled), the thumb tip to that fingertip /
+ * palm width; the thumb's IP angle and its tip to the index knuckle / palm width (small: tucked in).
+ */
+enum Feature : int
+{
+	F_INDEX_PIP = 0,
+	F_INDEX_DIP,
+	F_MIDDLE_PIP,
+	F_MIDDLE_DIP,
+	F_RING_PIP,
+	F_RING_DIP,
+	F_LITTLE_PIP,
+	F_LITTLE_DIP,
+	F_INDEX_REACH,
+	F_MIDDLE_REACH,
+	F_RING_REACH,
+	F_LITTLE_REACH,
+	F_THUMB_INDEX,
+	F_THUMB_MIDDLE,
+	F_THUMB_RING,
+	F_THUMB_LITTLE,
+	F_THUMB_IP,
+	F_THUMB_OUT,
+	kFeatureCount,
+};
+
+//! The features' names, as the gesture config and the analysis tools write them.
+inline const char *
+featureName(int f)
+{
+	static const char *const names[kFeatureCount] = {
+	    "index_pip",    "index_dip",    "middle_pip",  "middle_dip",   "ring_pip",   "ring_dip",
+	    "little_pip",   "little_dip",   "index_reach", "middle_reach", "ring_reach", "little_reach",
+	    "thumb_index",  "thumb_middle", "thumb_ring",  "thumb_little", "thumb_ip",   "thumb_out",
+	};
+	return f >= 0 && f < kFeatureCount ? names[f] : "";
+}
+
+//! The feature with this name, or -1.
+inline int
+featureIndex(const char *name)
+{
+	for (int f = 0; f < kFeatureCount && name != nullptr; f++) {
+		const char *n = featureName(f);
+		int i = 0;
+		while (n[i] != '\0' && n[i] == name[i]) {
+			i++;
+		}
+		if (n[i] == '\0' && name[i] == '\0') {
+			return f;
+		}
+	}
+	return -1;
+}
+
+//! All joint features of one hand; false (and @p out untouched) when any can't be measured.
+inline bool
+jointFeatures(const Landmarks &lm, float out[kFeatureCount])
+{
+	if (!lm.valid) {
+		return false;
+	}
+	float f[kFeatureCount];
+	for (int finger = 0; finger < 4; finger++) {
+		const int mcp = INDEX_MCP + 4 * finger, pip = mcp + 1, dip = mcp + 2, tip = mcp + 3;
+		const Value a1 = angleDeg(lm.p[mcp], lm.p[pip], lm.p[dip]);
+		const Value a2 = angleDeg(lm.p[pip], lm.p[dip], lm.p[tip]);
+		const Value tip_reach = distance(lm.p[tip], lm.p[WRIST]);
+		const Value base_reach = distance(lm.p[mcp], lm.p[WRIST]);
+		const Value thumb = normalizedDistance(lm, THUMB_TIP, tip);
+		if (!a1.valid || !a2.valid || !tip_reach.valid || !base_reach.valid || !(base_reach.value > kEpsilon) ||
+		    !thumb.valid) {
+			return false;
+		}
+		f[F_INDEX_PIP + 2 * finger] = a1.value;
+		f[F_INDEX_DIP + 2 * finger] = a2.value;
+		f[F_INDEX_REACH + finger] = tip_reach.value / base_reach.value;
+		f[F_THUMB_INDEX + finger] = thumb.value;
+	}
+	const Value ip = angleDeg(lm.p[THUMB_MCP], lm.p[THUMB_IP], lm.p[THUMB_TIP]);
+	const Value out_v = normalizedDistance(lm, THUMB_TIP, INDEX_MCP);
+	if (!ip.valid || !out_v.valid) {
+		return false;
+	}
+	f[F_THUMB_IP] = ip.value;
+	f[F_THUMB_OUT] = out_v.value;
+	for (int i = 0; i < kFeatureCount; i++) {
+		out[i] = f[i];
+	}
+	return true;
+}
+
 } // namespace xrt::tracking::hand::mercury::gesture
