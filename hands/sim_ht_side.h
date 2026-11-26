@@ -30,6 +30,9 @@ struct sim_gestures
 	uint8_t extended_mask;
 	int category;
 	float category_score;
+	int custom_valid;
+	int custom;
+	float custom_scores[5];
 };
 
 int

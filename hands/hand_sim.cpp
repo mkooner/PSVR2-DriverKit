@@ -439,6 +439,11 @@ public:
 		out->extended_mask = g.extended_mask;
 		out->category = g.category;
 		out->category_score = g.category_score;
+		out->custom_valid = g.custom_valid != 0;
+		out->custom = g.custom;
+		for (int c = 0; c < 5; c++) {
+			out->custom_scores[c] = g.custom_scores[c];
+		}
 		return true;
 	}
 	ovrn::WorldTransform worldFromDriver() override { return {}; } // the head poses are already SteamVR's world
@@ -516,6 +521,7 @@ main(int argc, char **argv)
 			start = mono_ns();
 			// The recording's frame times are the session's monotonic clock.
 			g_replayToSession = first_rec - start;
+			fprintf(stderr, "REPLAY_TO_SESSION_NS %lld\n", (long long)g_replayToSession);
 			// Skip SteamVR frames before the recording.
 			while (next_frame < g_frame_t.size() &&
 			       g_t0 + (int64_t)(g_frame_t[next_frame] * 1e9) < first_rec) {
