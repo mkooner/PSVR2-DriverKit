@@ -357,6 +357,13 @@ public:
 	 */
 	int mp_gesture_view[2] = {0, 1};
 	struct keypoint_estimation_run_info mp_gesture_info[2] = {};
+	//! The second view's gesture job per hand (both cameras for the custom gesture mapping; MERCURY_MP_BOTH_VIEWS).
+	struct keypoint_estimation_run_info mp_gesture_info_other[2] = {};
+	//! The custom gesture mapping's scores of the last frames per hand (averaged; restarted after a gap).
+	float custom_logits[2][10][T_HAND_CUSTOM_COUNT] = {};
+	int custom_count[2] = {};
+	int custom_next[2] = {};
+	int64_t custom_last_ns[2] = {};
 
 	//! Gesture measurements (hg_tuneable_values::mediapipe_gestures; false when off or the models didn't load).
 	bool gestures_enabled = false;
@@ -432,7 +439,15 @@ init_gesture_models(HandTracking *hgt);
 //! @p hand's gesture measurements from this frame's MediaPipe outputs (the most confident view); out->valid false
 //! when no view has a hand.
 void
-compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out);
+compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out, int only_view = -1,
+                      float *embedding_out = nullptr);
+
+/*!
+ * The custom gesture mapping (hg_custom_gesture_weights.h) for @p hand this frame, from both cameras' MediaPipe
+ * outputs, into @p out's custom fields.
+ */
+void
+compute_custom_gesture(HandTracking *hgt, int hand, struct t_hand_gestures *out);
 
 // These are passed into C callbacks, so they have to be extern "C".
 extern "C" {

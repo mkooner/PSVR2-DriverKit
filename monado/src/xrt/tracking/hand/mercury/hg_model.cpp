@@ -16,6 +16,7 @@
 #include <limits>
 #include "hg_image_math.inl"
 #include "hg_numerics_checker.hpp"
+#include "hg_custom_gesture_weights.h"
 
 
 #include <filesystem>
@@ -739,11 +740,14 @@ mediapipe_crop_direction(const Eigen::Quaternionf &rot, float radius, float u, f
 }
 
 void
-compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out)
+compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out, int only_view, float *embedding_out)
 {
 	*out = {};
 	int best = -1;
 	for (int v = 0; v < 2; v++) {
+		if (only_view >= 0 && v != only_view) {
+			continue;
+		}
 		const HandTracking::mp_view_output &o = hgt->mp_outputs[hand][v];
 		if (o.valid && o.presence >= hgt->tuneable_values.mediapipe_presence &&
 		    (best < 0 || o.presence > hgt->mp_outputs[hand][best].presence)) {
@@ -823,6 +827,27 @@ compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out)
 	ORT_SAFE(ew, Run(ew.session, nullptr, e_names, e_in, 3, &e_out_name, 1, &e_out));
 	float *embedding = nullptr;
 	ORT_SAFE(ew, GetTensorMutableData(e_out, (void **)&embedding));
+	if (embedding_out != nullptr) {
+		memcpy(embedding_out, embedding, 128 * sizeof(float));
+	}
+	// Development (MERCURY_DETECTION_LOG, per-view calls only): "E" lines with everything Hand Landmarker gives for
+	// this hand in this view: frame time ns, hand, view, presence, right-hand score, then the 21 world landmarks (m,
+	// hand-centred, 63), the 21 crop landmarks (crop pixels and z, 63), the gesture embedding (128).
+	if (only_view >= 0 && getenv("MERCURY_DETECTION_LOG") != nullptr) {
+		char line[16384];
+		int n = snprintf(line, sizeof(line), "E,%lld,%d,%d,%.4f,%.4f", (long long)hgt->current_frame_timestamp,
+		                 hand, best, o.presence, o.handedness);
+		for (int i = 0; i < 63 && n < (int)sizeof(line) - 32; i++) {
+			n += snprintf(line + n, sizeof(line) - n, ",%.5f", o.world[i]);
+		}
+		for (int i = 0; i < 63 && n < (int)sizeof(line) - 32; i++) {
+			n += snprintf(line + n, sizeof(line) - n, ",%.2f", o.landmarks[i]);
+		}
+		for (int i = 0; i < 128 && n < (int)sizeof(line) - 32; i++) {
+			n += snprintf(line + n, sizeof(line) - n, ",%.5f", embedding[i]);
+		}
+		detection_log("%s\n", line);
+	}
 	onnx_state &c = hgt->gesture_classifier;
 	memcpy(c.wraps[0].data, embedding, 128 * sizeof(float));
 	ew.api->ReleaseValue(e_out);
@@ -846,6 +871,109 @@ compute_hand_gestures(HandTracking *hgt, int hand, struct t_hand_gestures *out)
 	out->pinch_distance_normalized = geo.pinch_distance_normalized;
 	out->extended_mask = geo.extended_mask;
 	out->valid = scores_ok;
+}
+
+/*!
+ * The custom mapping's joint measures of one camera's MediaPipe world landmarks (as psvr2-test gesture_map.py's
+ * joints_feats): thumb tip to each fingertip and each fingertip to the wrist (index, middle, ring, little; / palm width,
+ * index to little finger knuckle), then the cosine of the bend at 10 finger joints.
+ */
+static void
+custom_gesture_joint_measures(const float *world, float out[18])
+{
+	const auto p = [&](int i) { return Eigen::Vector3f(world[i * 3], world[i * 3 + 1], world[i * 3 + 2]); };
+	const float palm = (p(5) - p(17)).norm() + 1e-6f;
+	int n = 0;
+	for (int tip : {8, 12, 16, 20}) {
+		out[n++] = (p(4) - p(tip)).norm() / palm;
+		out[n++] = (p(tip) - p(0)).norm() / palm;
+	}
+	static const int bends[10][3] = {{5, 6, 7},    {6, 7, 8},    {9, 10, 11},  {10, 11, 12}, {13, 14, 15},
+	                                 {14, 15, 16}, {17, 18, 19}, {18, 19, 20}, {1, 2, 3},    {2, 3, 4}};
+	for (const auto &b : bends) {
+		const Eigen::Vector3f u = p(b[0]) - p(b[1]), v = p(b[2]) - p(b[1]);
+		out[n++] = u.dot(v) / (u.norm() * v.norm() + 1e-9f);
+	}
+}
+
+void
+compute_custom_gesture(HandTracking *hgt, int hand, struct t_hand_gestures *out)
+{
+	out->custom_valid = false;
+	if (!hgt->tuneable_values.custom_gestures) {
+		return;
+	}
+	static_assert(HG_CUSTOM_GESTURE_FEATURES == 2 * 128 + 2 + 2 * 18 + 2, "feature layout");
+	static_assert(HG_CUSTOM_GESTURE_CLASSES == T_HAND_CUSTOM_COUNT, "classes");
+	float x[HG_CUSTOM_GESTURE_FEATURES] = {};
+	bool have[2] = {false, false};
+	for (int v = 0; v < 2; v++) {
+		const HandTracking::mp_view_output &o = hgt->mp_outputs[hand][v];
+		if (!o.valid || o.presence < hgt->tuneable_values.mediapipe_presence) {
+			continue;
+		}
+		struct t_hand_gestures g;
+		float emb[128];
+		memset(emb, 0, sizeof(emb));
+		compute_hand_gestures(hgt, hand, &g, v, emb);
+		if (!g.valid) {
+			continue;
+		}
+		have[v] = true;
+		memcpy(&x[v * 128], emb, sizeof(emb));
+		custom_gesture_joint_measures(o.world, &x[2 * 128 + 2 + v * 18]);
+	}
+	const int64_t now = hgt->current_frame_timestamp;
+	if (!have[0] && !have[1]) {
+		return;
+	}
+	x[256] = have[0] ? 1.0f : 0.0f, x[257] = have[1] ? 1.0f : 0.0f;
+	x[HG_CUSTOM_GESTURE_FEATURES - 2] = x[256], x[HG_CUSTOM_GESTURE_FEATURES - 1] = x[257];
+
+	const hg_custom_gesture_model &m = hg_custom_gesture_models[hand];
+	float z[HG_CUSTOM_GESTURE_CLASSES];
+	for (int c = 0; c < HG_CUSTOM_GESTURE_CLASSES; c++) {
+		float acc = m.bias[c];
+		const float *w = &m.weight[c * HG_CUSTOM_GESTURE_FEATURES];
+		for (int i = 0; i < HG_CUSTOM_GESTURE_FEATURES; i++) {
+			acc += w[i] * (x[i] - m.mean[i]) / m.scale[i];
+		}
+		z[c] = acc;
+	}
+
+	// The mean score over this hand's last 10 frames with a reading (restarted after 100 ms without one), as fitted.
+	if (hgt->custom_count[hand] > 0 && now - hgt->custom_last_ns[hand] > 100 * U_TIME_1MS_IN_NS) {
+		hgt->custom_count[hand] = 0;
+	}
+	hgt->custom_last_ns[hand] = now;
+	memcpy(hgt->custom_logits[hand][hgt->custom_next[hand]], z, sizeof(z));
+	hgt->custom_next[hand] = (hgt->custom_next[hand] + 1) % 10;
+	hgt->custom_count[hand] = std::min(hgt->custom_count[hand] + 1, 10);
+	float mean[HG_CUSTOM_GESTURE_CLASSES] = {};
+	for (int k = 0; k < hgt->custom_count[hand]; k++) {
+		const int slot = (hgt->custom_next[hand] - 1 - k + 10) % 10;
+		for (int c = 0; c < HG_CUSTOM_GESTURE_CLASSES; c++) {
+			mean[c] += hgt->custom_logits[hand][slot][c] / (float)hgt->custom_count[hand];
+		}
+	}
+	int top = 0;
+	float mx = mean[0];
+	for (int c = 1; c < HG_CUSTOM_GESTURE_CLASSES; c++) {
+		if (mean[c] > mean[top]) {
+			top = c;
+		}
+		mx = std::max(mx, mean[c]);
+	}
+	float sum = 0.0f;
+	for (int c = 0; c < HG_CUSTOM_GESTURE_CLASSES; c++) {
+		out->custom_scores[c] = expf(mean[c] - mx);
+		sum += out->custom_scores[c];
+	}
+	for (int c = 0; c < HG_CUSTOM_GESTURE_CLASSES; c++) {
+		out->custom_scores[c] /= sum;
+	}
+	out->custom = (enum t_hand_custom_gesture)top;
+	out->custom_valid = std::isfinite(sum) && sum > 0.0f;
 }
 
 void
@@ -1263,7 +1391,7 @@ run_keypoint_estimation_mediapipe(keypoint_estimation_run_info &info, bool for_f
 	static std::atomic<int> dumped{0};
 	if (dump != nullptr) {
 		const int k = dumped++;
-		if (k % 4 == 0 && k < 4 * 4000) {
+		if (k % 4 == 0 && k < 4 * 12000) {
 			char path[1024];
 			// The landmarks' centre in the crop (0 = middle, crop pixels): how well the crop was placed.
 			const HandTracking::mp_view_output &mo = hgt->mp_outputs[hand_idx][view_idx];
@@ -1271,10 +1399,25 @@ run_keypoint_estimation_mediapipe(keypoint_estimation_run_info &info, bool for_f
 			for (int i = 0; i < 21; i++) {
 				mx += mo.landmarks[i * 3] / 21.0f, my += mo.landmarks[i * 3 + 1] / 21.0f;
 			}
-			snprintf(path, sizeof(path), "%s/mp_%lld_h%d_v%d_dx%+04d_dy%+04d_p%03d.pgm", dump,
+			snprintf(path, sizeof(path), "%s/mp_%lld_h%d_v%d_dx%+04d_dy%+04d_p%03d.png", dump,
 			         (long long)hgt->current_frame_timestamp, hand_idx, view_idx, (int)lroundf(mx - MP_SIZE / 2.0f),
 			         (int)lroundf(my - MP_SIZE / 2.0f), (int)(present * 100));
-			cv::imwrite(path, crop);
+			// The crop with MediaPipe's 21 landmarks: bones grey, thumb tip (4) red, index tip (8) green.
+			cv::Mat vis;
+			cv::cvtColor(crop, vis, crop.channels() == 1 ? cv::COLOR_GRAY2BGR : cv::COLOR_RGB2BGR);
+			if (vis.depth() != CV_8U) {
+				vis.convertTo(vis, CV_8U, 255.0);
+			}
+			static const int bones[20][2] = {{0, 1},  {1, 2},   {2, 3},   {3, 4},   {0, 5},   {5, 6},   {6, 7},
+			                                 {7, 8},  {0, 9},   {9, 10},  {10, 11}, {11, 12}, {0, 13}, {13, 14},
+			                                 {14, 15}, {15, 16}, {0, 17}, {17, 18}, {18, 19}, {19, 20}};
+			auto lp = [&](int i) { return cv::Point2f(mo.landmarks[i * 3], mo.landmarks[i * 3 + 1]); };
+			for (const auto &bn : bones) {
+				cv::line(vis, lp(bn[0]), lp(bn[1]), cv::Scalar(160, 160, 160), 1);
+			}
+			cv::circle(vis, lp(4), 4, cv::Scalar(0, 0, 255), -1);
+			cv::circle(vis, lp(8), 4, cv::Scalar(0, 255, 0), -1);
+			cv::imwrite(path, vis);
 		}
 	}
 }

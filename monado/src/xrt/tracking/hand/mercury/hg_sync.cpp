@@ -40,6 +40,8 @@ DEBUG_GET_ONCE_FLOAT_OPTION(mercury_acquire_confidence, "MERCURY_ACQUIRE_CONFIDE
 DEBUG_GET_ONCE_NUM_OPTION(mercury_detection_tiles, "MERCURY_DETECTION_TILES", 0)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_detection_tile_fraction, "MERCURY_DETECTION_TILE_FRACTION", 0.6)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_detection_tile_min, "MERCURY_DETECTION_TILE_MIN", 0.0)
+DEBUG_GET_ONCE_BOOL_OPTION(mercury_mp_both_views, "MERCURY_MP_BOTH_VIEWS", false)
+DEBUG_GET_ONCE_BOOL_OPTION(mercury_custom_gestures, "MERCURY_CUSTOM_GESTURES", true)
 DEBUG_GET_ONCE_NUM_OPTION(mercury_detection_tiles_per_frame, "MERCURY_DETECTION_TILES_PER_FRAME", 1)
 DEBUG_GET_ONCE_BOOL_OPTION(mercury_detection_tile_mirror, "MERCURY_DETECTION_TILE_MIRROR", false)
 DEBUG_GET_ONCE_FLOAT_OPTION(mercury_keypoint_hand_confidence, "MERCURY_KEYPOINT_HAND_CONFIDENCE", 0.97)
@@ -906,6 +908,15 @@ callback_process_unsafe(HandTracking *hgt,
 			inf.view = &hgt->views[v];
 			inf.hand_idx = hand_idx;
 			u_worker_group_push(hgt->group, run_gesture_mediapipe, &inf);
+			// The other view too: the custom gesture mapping reads both cameras (MERCURY_MP_BOTH_VIEWS=1: also without it).
+			const bool both_views =
+			    hgt->tuneable_values.custom_gestures || debug_get_bool_option_mercury_mp_both_views();
+			if (both_views && usable(1 - v)) {
+				struct keypoint_estimation_run_info &o2 = hgt->mp_gesture_info_other[hand_idx];
+				o2.view = &hgt->views[1 - v];
+				o2.hand_idx = hand_idx;
+				u_worker_group_push(hgt->group, run_gesture_mediapipe, &o2);
+			}
 		}
 	}
 	u_worker_group_wait_all(hgt->group);
@@ -928,6 +939,24 @@ callback_process_unsafe(HandTracking *hgt,
 		for (int hand_idx = 0; hand_idx < 2; hand_idx++) {
 			try {
 				compute_hand_gestures(hgt, hand_idx, &hgt->gestures_pending[hand_idx]);
+				compute_custom_gesture(hgt, hand_idx, &hgt->gestures_pending[hand_idx]);
+				// Development: each view's own reading (MERCURY_DETECTION_LOG "G" lines: frame time ns, hand,
+				// view, valid, presence, pinch distance / palm width, category, category score, view used).
+				static const bool log_views = getenv("MERCURY_DETECTION_LOG") != nullptr;
+				if (log_views) {
+					for (int v = 0; v < 2; v++) {
+						const HandTracking::mp_view_output &o = hgt->mp_outputs[hand_idx][v];
+						if (!o.valid) {
+							continue;
+						}
+						struct t_hand_gestures g;
+						compute_hand_gestures(hgt, hand_idx, &g, v);
+						detection_log("G,%lld,%d,%d,%d,%.3f,%.4f,%d,%.3f,%d\n",
+						              (long long)hgt->current_frame_timestamp, hand_idx, v, g.valid ? 1 : 0,
+						              o.presence, g.pinch_distance_normalized, (int)g.category,
+						              g.category_score, hgt->mp_gesture_view[hand_idx]);
+					}
+				}
 			} catch (const std::exception &e) {
 				HG_WARN(hgt, "Gesture models failed, gestures off: %s", e.what());
 				hgt->gestures_enabled = false;
@@ -1328,6 +1357,8 @@ t_hand_tracking_sync_mercury_create(struct t_stereo_camera_calibration *calib,
 	hgt->tuneable_values.mediapipe_keypoints = debug_get_bool_option_mercury_mediapipe();
 	hgt->tuneable_values.mediapipe_gestures =
 	    hgt->tuneable_values.mediapipe_keypoints && debug_get_bool_option_mercury_mediapipe_gestures();
+	hgt->tuneable_values.custom_gestures =
+	    hgt->tuneable_values.mediapipe_gestures && debug_get_bool_option_mercury_custom_gestures();
 	hgt->tuneable_values.mediapipe_fit =
 	    hgt->tuneable_values.mediapipe_keypoints && debug_get_bool_option_mercury_mediapipe_fit();
 	if (hgt->tuneable_values.mediapipe_fit) {

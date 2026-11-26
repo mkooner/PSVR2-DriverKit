@@ -446,3 +446,63 @@ TEST_CASE("dashboard gesture: open palm toward the face, raised, held about 1 s 
 		CHECK_FALSE(run(g, 1200, 1700, true, 1));
 	}
 }
+
+TEST_CASE("custom mapping: decides pinch and fist when valid, held 60 ms; point and claw do nothing")
+{
+	Config c;
+	c.confirm_frames = 2;
+	const auto custom = [](int64_t ts_ms, int g, float pinch_distance = 1.2f) {
+		Sample s = sample(ts_ms, pinch_distance);
+		s.custom_valid = true;
+		s.custom = g;
+		s.custom_scores[g] = 0.9f;
+		return s;
+	};
+	// pinch: the mapping's pinch, not the distance (an open-looking distance), on after 60 ms, off after 60 ms
+	Machine m(c);
+	int64_t t = 1000;
+	int presses = 0, releases = 0;
+	for (int i = 0; i < 3; i++, t += 16) {
+		presses += m.update(custom(t, CustomPinch), t * 1'000'000LL).pinch_pressed ? 1 : 0;
+	}
+	CHECK(presses == 0); // 32 ms asked for
+	for (int i = 0; i < 10; i++, t += 16) {
+		presses += m.update(custom(t, CustomPinch), t * 1'000'000LL).pinch_pressed ? 1 : 0;
+	}
+	CHECK(presses == 1);
+	CHECK(m.state().pinch);
+	CHECK(m.pinchValue() == 1.0f);
+	for (int i = 0; i < 10; i++, t += 16) {
+		releases += m.update(custom(t, CustomOpen, 0.1f), t * 1'000'000LL).pinch_released ? 1 : 0;
+	}
+	CHECK(releases == 1); // a small distance doesn't hold it on: the mapping said open
+	CHECK_FALSE(m.state().pinch);
+
+	// point and claw: neither pinch nor fist, whatever the distance
+	for (int g : {CustomPoint, CustomClaw}) {
+		Machine n(c);
+		int64_t u = 1000;
+		for (int i = 0; i < 20; i++, u += 16) {
+			n.update(custom(u, g, 0.1f), u * 1'000'000LL);
+		}
+		CHECK_FALSE(n.state().pinch);
+		CHECK_FALSE(n.state().fist);
+	}
+
+	// fist: from the mapping (not the category), blocks the pinch, value 0
+	Machine f(c);
+	int64_t v = 1000;
+	int fist_presses = 0;
+	for (int i = 0; i < 20; i++, v += 16) {
+		fist_presses += f.update(custom(v, CustomFist, 0.1f), v * 1'000'000LL).fist_pressed ? 1 : 0;
+	}
+	CHECK(fist_presses == 1);
+	CHECK(f.state().fist);
+	CHECK_FALSE(f.state().pinch);
+	CHECK(f.pinchValue() == 0.0f);
+
+	// without the mapping the old rules still apply (category fist)
+	Machine old(c);
+	feed(old, 1000, 5, 1.0f, ClosedFist);
+	CHECK(old.state().fist);
+}
