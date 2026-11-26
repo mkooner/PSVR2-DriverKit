@@ -82,6 +82,11 @@ struct hg_tuneable_values
 	 */
 	bool mediapipe_gestures = false;
 	/*!
+	 * The custom gesture mapping fitted on PS VR2 camera images (hg_custom_gesture_weights.h) for pinch / fist /
+	 * point / claw / open, from MediaPipe in both cameras (MERCURY_CUSTOM_GESTURES).
+	 */
+	bool custom_gestures = true;
+	/*!
 	 * Whether MediaPipe's landmarks also build the 3D hand (MERCURY_MEDIAPIPE_FIT, default on); false: Mercury's own
 	 * keypoint model builds it in both views and MediaPipe is read for the gestures only.
 	 */

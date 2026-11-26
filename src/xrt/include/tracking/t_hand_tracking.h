@@ -130,6 +130,20 @@ enum t_hand_gesture_category
 };
 
 /*!
+ * Gestures of a custom mapping fitted on labelled camera images of the headset (e.g. Mercury's PS VR2 mapping on
+ * MediaPipe's gesture embedding and joints of both cameras).
+ */
+enum t_hand_custom_gesture
+{
+	T_HAND_CUSTOM_OPEN = 0,
+	T_HAND_CUSTOM_PINCH = 1,
+	T_HAND_CUSTOM_FIST = 2,
+	T_HAND_CUSTOM_POINT = 3,
+	T_HAND_CUSTOM_CLAW = 4,
+	T_HAND_CUSTOM_COUNT = 5,
+};
+
+/*!
  * One hand's gesture measurements for one camera frame (a hand tracker that has them, e.g. Mercury with MediaPipe's
  * models). Measured on the hand alone: distances are in MediaPipe's hand-centred frame, not camera or room space.
  */
@@ -142,6 +156,9 @@ struct t_hand_gestures
 	uint8_t extended_mask;           //!< bit f: finger f extended (0 thumb ... 4 little finger)
 	enum t_hand_gesture_category category; //!< the gesture classifier's top category
 	float category_score;                  //!< its score, 0..1
+	bool custom_valid;                     //!< false: the custom mapping below isn't meaningful
+	enum t_hand_custom_gesture custom;     //!< the custom mapping's gesture (over its last frames)
+	float custom_scores[T_HAND_CUSTOM_COUNT]; //!< its probability per gesture, 0..1
 };
 
 /*!

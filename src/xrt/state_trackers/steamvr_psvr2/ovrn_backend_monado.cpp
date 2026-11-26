@@ -807,6 +807,11 @@ public:
 		out->extended_mask = g.extended_mask;
 		out->category = (int)g.category;
 		out->category_score = g.category_score;
+		out->custom_valid = g.custom_valid;
+		out->custom = (int)g.custom;
+		for (int c = 0; c < gest::CustomCount && c < T_HAND_CUSTOM_COUNT; c++) {
+			out->custom_scores[c] = g.custom_scores[c];
+		}
 		return true;
 #else
 		(void)hand;

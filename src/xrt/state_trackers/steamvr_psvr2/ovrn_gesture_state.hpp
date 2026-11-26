@@ -40,6 +40,17 @@ enum Category : int
 	ILoveYou = 7,
 };
 
+//! The custom gesture mapping's gestures (t_hand_custom_gesture).
+enum Custom : int
+{
+	CustomOpen = 0,
+	CustomPinch = 1,
+	CustomFist = 2,
+	CustomPoint = 3,
+	CustomClaw = 4,
+	CustomCount = 5,
+};
+
 //! One camera frame's measurements of one hand (as the backend reports them).
 struct Sample
 {
@@ -50,6 +61,10 @@ struct Sample
 	uint8_t extended_mask = 0; //!< bit f: finger f extended (0 thumb ... 4 little finger)
 	int category = None;
 	float category_score = 0.0f;
+	//! The driver's custom gesture mapping (fitted on PS VR2 camera images): used for pinch and fist when valid.
+	bool custom_valid = false;
+	int custom = CustomOpen;
+	float custom_scores[CustomCount] = {};
 };
 
 //! Tuning (heuristics; see the defaults' notes).
@@ -104,6 +119,8 @@ struct State
 	bool openPalm = false;
 
 	float pinchDistanceNormalized = 0.0f;
+	bool customValid = false;      //!< the driver's custom mapping decided pinch and fist this frame
+	float customPinchScore = 0.0f; //!< its pinch probability
 };
 
 //! What changed in one update (presses reported once per activation).
@@ -277,7 +294,16 @@ public:
 		const bool cat_ok = s.category_score >= m_cfg.min_category_score;
 		const auto is = [&](int c) { return s.category == c && cat_ok; };
 
-		if (m_fist.step(is(ClosedFist), !is(ClosedFist), n)) {
+		/*
+		 * The custom mapping, when the driver has it: its gesture decides fist and pinch (open, point and claw:
+		 * neither), each still held a minimum time. MediaPipe's own categories and pinch distance read the same for a
+		 * pinch and an open hand on these cameras (2026-11-25 benchmark: thumb-index / palm width 0.89 vs 0.77) and
+		 * almost never saw a fist (0-4% of fist readings); the mapping caught 5 of 6 pinch and 2 of 2 fist prompts per
+		 * hand on the round it wasn't fitted on.
+		 */
+		const bool custom = s.custom_valid;
+		const bool fist_on = custom ? s.custom == CustomFist : is(ClosedFist);
+		if (m_fist.step(fist_on, !fist_on, n)) {
 			(m_fist.on ? e.fist_pressed : e.fist_released) = true;
 			e.reason = m_fist.on ? "fist recognised" : "fist ended";
 		}
@@ -288,6 +314,12 @@ public:
 				e.reason = "fist: no pinch";
 			}
 			m_pinch.reset();
+		} else if (custom) {
+			const bool pinch_on = s.custom == CustomPinch;
+			if (m_pinch.step(pinch_on, !pinch_on, s.timestamp_ns, m_cfg.pinch_press_ns, m_cfg.pinch_release_ns)) {
+				(m_pinch.on ? e.pinch_pressed : e.pinch_released) = true;
+				e.reason = m_pinch.on ? "custom mapping: pinch" : "custom mapping: no pinch";
+			}
 		} else if (m_pinch.step(d < m_cfg.pinch_on, d > m_cfg.pinch_off, s.timestamp_ns, m_cfg.pinch_press_ns,
 		                        m_cfg.pinch_release_ns)) {
 			(m_pinch.on ? e.pinch_pressed : e.pinch_released) = true;
@@ -302,6 +334,8 @@ public:
 		m_state.fist = m_fist.on;
 		m_state.openPalm = m_open.on;
 		m_state.pinchDistanceNormalized = d;
+		m_state.customValid = custom;
+		m_state.customPinchScore = custom ? s.custom_scores[CustomPinch] : 0.0f;
 		return e;
 	}
 
@@ -315,6 +349,10 @@ public:
 		if (!m_state.valid || m_state.fist) {
 			return 0.0f;
 		}
+		if (m_state.customValid) {
+			// The custom mapping's pinch probability, held at 1 while its pinch is on (the click).
+			return m_state.pinch ? 1.0f : std::fmax(0.0f, std::fmin(1.0f, m_state.customPinchScore));
+		}
 		const float open = 2.0f * m_cfg.pinch_off;
 		const float v = (open - m_state.pinchDistanceNormalized) / (open - m_cfg.pinch_on);
 		return std::fmax(0.0f, std::fmin(1.0f, v));
@@ -325,7 +363,7 @@ private:
 	finite(const Sample &s)
 	{
 		return std::isfinite(s.confidence) && std::isfinite(s.pinch_distance_normalized) &&
-		       std::isfinite(s.category_score);
+		       std::isfinite(s.category_score) && std::isfinite(s.custom_scores[CustomPinch]);
 	}
 
 	Config m_cfg;
