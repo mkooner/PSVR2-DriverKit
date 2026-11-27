@@ -477,6 +477,10 @@ struct t_led_sync_refinement
 		uint32_t rec_attempt;
 		//! Logging: when this loss began, searches in it, the last search's result, its largest on - off difference.
 		timepoint_ns rec_loss_ns;
+		//! The last recovery move (size, when), and whether it went into the drift estimate yet.
+		time_duration_ns rec_last_move_ns;
+		timepoint_ns rec_last_move_at_ns;
+		bool rec_last_move_counted;
 		uint32_t rec_searches;
 		const char *rec_result;
 		float rec_best_d;

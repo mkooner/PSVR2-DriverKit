@@ -447,6 +447,8 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	cc->rec_loss_ns = 0;
 	cc->rec_searches = 0;
 	cc->rec_result = NULL;
+	cc->rec_last_move_at_ns = 0;
+	cc->rec_last_move_counted = false;
 	// The window was just measured with the current clock offset: that's the reference to follow it from.
 	cc->bt_have_ref = cc->bt_valid;
 	cc->bt_ref_ns = cc->bt_smooth_ns;
@@ -1434,6 +1436,8 @@ handle_count_hold_nudge(struct t_led_sync_refinement *refinement)
 #define COUNT_HOLD_REC_STEP_FRAC 0.45
 //! Steps between fresh LEDs-off counts (the background can change during a search).
 #define COUNT_HOLD_REC_OFF_EVERY 6
+//! Recovery moves the same way this close together are drift (see count_hold_rec_found).
+#define COUNT_HOLD_REC_REPEAT_NS (U_TIME_1S_IN_NS * 60)
 
 static float
 count_hold_rec_threshold(const struct t_led_sync_refinement *refinement)
@@ -1602,6 +1606,31 @@ count_hold_rec_found(struct t_led_sync_refinement *refinement, timepoint_ns now_
 		         "us",
 		         (int64_t)((centre_ns - cc->hold_centre_ns) / U_TIME_1US_IN_NS), how, k, cc->rec_tests, took_s,
 		         (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), (int64_t)(centre_ns / U_TIME_1US_IN_NS));
+		/*
+		 * A second move the same way within COUNT_HOLD_REC_REPEAT_NS is drift the hold keeps falling behind, not a
+		 * slip: both go into the drift estimate. On hardware (60 ppm faked, 2026-11-27 12:09) the right controller
+		 * lagged, was lost, recovery moved it +1137us, and with the move left out the estimate fell from +6.2 to
+		 * +1.8 ppm, so it would fall behind again. A single move stays out: counting any move the way the trim
+		 * pointed took real slips for drift (calib_sim, 1.6 ms slips with the normal drift: 26 of 30, tracked
+		 * 96.9 -> 96.1%).
+		 */
+		const time_duration_ns move_ns = centre_ns - cc->hold_centre_ns;
+		const bool repeat = cc->rec_last_move_at_ns != 0 &&
+		                    now_ns - cc->rec_last_move_at_ns <= COUNT_HOLD_REC_REPEAT_NS &&
+		                    (move_ns > 0) == (cc->rec_last_move_ns > 0);
+		if (repeat) {
+			count_hold_integrate_trim(refinement, now_ns);
+			const time_duration_ns add_ns = move_ns + (cc->rec_last_move_counted ? 0 : cc->rec_last_move_ns);
+			cc->hold_corrections_sum_ns += (double)add_ns;
+			cc->hold_moves_sum_ns += (double)add_ns;
+			LOG_INFO(refinement, "Second move the same way within %.0fs: the LEDs drift, %+" PRId64
+			                     "us counted in the drift estimate",
+			         (double)(now_ns - cc->rec_last_move_at_ns) / U_TIME_1S_IN_NS,
+			         (int64_t)(add_ns / U_TIME_1US_IN_NS));
+		}
+		cc->rec_last_move_ns = move_ns;
+		cc->rec_last_move_at_ns = now_ns;
+		cc->rec_last_move_counted = repeat;
 		cc->hold_centre_ns = centre_ns;
 		// The Bluetooth reference belonged to the old centre; the next centred probe sets a new one.
 		cc->bt_have_ref = false;
