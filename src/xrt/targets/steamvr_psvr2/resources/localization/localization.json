@@ -14,6 +14,15 @@
 		"/input/thumbs_down": "Thumbs Down",
 		"/input/victory": "Victory",
 		"/input/i_love_you": "I Love You",
-		"/input/open_palm": "Open Palm"
+		"/input/open_palm": "Open Palm",
+		"/input/menu_palm_pinch": "Palm Pinch (Menu)",
+		"/input/index_poke": "Index Poke Ready",
+		"/input/thumb_tap": "Thumb Tap",
+		"/input/thumb_double_tap": "Thumb Double Tap",
+		"/input/thumb_swipe_left": "Thumb Swipe Left",
+		"/input/thumb_swipe_right": "Thumb Swipe Right",
+		"/input/thumb_swipe_forward": "Thumb Swipe Forward",
+		"/input/thumb_swipe_back": "Thumb Swipe Back",
+		"/pose/poke": "Index Fingertip (Poke)"
 	}
 ]

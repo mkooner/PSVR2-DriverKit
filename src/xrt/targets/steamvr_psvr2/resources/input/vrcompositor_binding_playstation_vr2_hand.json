@@ -4,7 +4,7 @@
 	"app_key": "openvr.component.vrcompositor",
 	"category": "steamvr_input",
 	"controller_type": "playstation_vr2_hand",
-	"description": "Tracked hands in SteamVR's dashboard, laid out as Valve's own tracked-hand binding (vrlink svl_hand_interaction_augmented): the hand's tip pose is the laser pointer; the pinch (the trigger's click: the driver's debounced thumb-and-index pinch, as games get it) clicks and holds the laser still while pinching (LockMousePosition) for selecting and click-drag scrolling, and moves the laser to the pinching hand; a little finger pinch right-clicks; either hand's system gesture opens and closes the dashboard.",
+	"description": "Tracked hands in SteamVR's dashboard, laid out as Valve's own tracked-hand binding (vrlink svl_hand_interaction_augmented): the hand's tip pose is the laser pointer; the pinch (the trigger's click: the driver's debounced thumb-and-index pinch, as games get it) clicks and holds the laser still while pinching (LockMousePosition) for selecting and click-drag scrolling, and moves the laser to the pinching hand; a little finger pinch right-clicks; the left hand's system button (its dashboard gestures, or the headset button) opens and closes the dashboard, as SteamVR's own tracked hands.",
 	"name": "SteamVR dashboard bindings for PS VR2 tracked hands",
 	"options": {},
 	"simulated_actions": [],
@@ -123,15 +123,6 @@
 			"sources": [
 				{
 					"path": "/user/hand/left/input/system",
-					"mode": "button",
-					"inputs": {
-						"click": {
-							"output": "/actions/system/in/ToggleDashboard"
-						}
-					}
-				},
-				{
-					"path": "/user/hand/right/input/system",
 					"mode": "button",
 					"inputs": {
 						"click": {

@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,8 @@ struct Config
 	int smooth_frames = 1;
 	int64_t grace_ns = 100'000'000;
 	HandConfig hands[2]; //!< 0 left, 1 right
+	//! Formula gesture tunables per hand ("params": {"left": {name: value}, "right": {...}}; ovrn_microgestures.hpp).
+	std::map<std::string, float> params[2];
 	std::string source;  //!< where it came from (file path, or "built in")
 	bool valid = false;
 };
@@ -101,6 +104,16 @@ parse(const char *text, std::string *err)
 	c.smooth_frames = (int)num(root, "smooth_frames", 1);
 	c.smooth_frames = c.smooth_frames < 1 ? 1 : (c.smooth_frames > 30 ? 30 : c.smooth_frames);
 	c.grace_ns = (int64_t)(num(root, "grace_ms", 100) * 1e6);
+	const cJSON *params = cJSON_GetObjectItemCaseSensitive(root, "params");
+	for (int h = 0; h < 2; h++) {
+		const cJSON *v = nullptr;
+		cJSON_ArrayForEach(v, cJSON_GetObjectItemCaseSensitive(params, h == 0 ? "left" : "right"))
+		{
+			if (cJSON_IsNumber(v) && v->string != nullptr) {
+				c.params[h][v->string] = (float)v->valuedouble;
+			}
+		}
+	}
 	const cJSON *hands = cJSON_GetObjectItemCaseSensitive(root, "hands");
 	static const char *const names[2] = {"left", "right"};
 	bool ok = true;

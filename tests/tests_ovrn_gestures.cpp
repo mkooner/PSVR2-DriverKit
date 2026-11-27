@@ -11,6 +11,7 @@
 #include "ovrn_gesture_state.hpp"
 #include "ovrn_gesture_rules.hpp"
 #include "ovrn_gesture_rules_default.hpp"
+#include "ovrn_microgestures.hpp"
 
 #include "catch_amalgamated.hpp"
 
@@ -520,10 +521,11 @@ namespace rl = ovrn::gest::rules;
 //! The same features psvr2-test hands/gesture_fit.py computes for these synthetic hands (copied from its output).
 const float kOpenFeatures[kFeatureCount] = {180.0f, 180.0f, 180.0f, 180.0f, 180.0f, 180.0f, 180.0f, 180.0f, 1.8478f,
                                             1.9365f, 1.8779f, 1.7264f, 1.3877f, 1.6088f, 1.8650f, 2.1333f, 180.0f,
-                                            0.8339f};
+                                            0.8339f, 0.9540f, -0.1875f, 0.8125f, 0.0f};
 const float kFistFeatures[kFeatureCount] = {81.8699f, 116.5651f, 81.8699f, 116.5651f, 81.8699f, 116.5651f, 81.8699f,
                                             116.5651f, 0.8379f,  0.8128f,   0.8296f,  0.8693f,   0.8728f,  1.1933f,
-                                            1.5213f,  1.8403f,   180.0f,   0.8339f};
+                                            1.5213f,  1.8403f,   180.0f,   0.8339f,  0.9349f,  0.1171f,
+                                            0.8125f,  -0.1464f};
 
 const char *const kTestConfig = R"json({
  "smooth_frames": 1, "grace_ms": 100,
@@ -862,4 +864,208 @@ TEST_CASE("Hand Landmarker's own gestures: confirmed from its categories, low sc
 		}
 		CHECK_FALSE(low.state().category[cat]);
 	}
+}
+
+// ------------------------------------------------------------------------------------- formula gestures (micro)
+
+namespace {
+namespace mg = ovrn::gest::micro;
+
+//! Features with the thumb at (side, x, y) relative to the index finger (everything else neutral).
+void
+thumbAt(float *f, float side, float x, float y)
+{
+	for (int i = 0; i < kFeatureCount; i++) {
+		f[i] = 1.0f;
+	}
+	f[F_THUMB_INDEX_SIDE] = side;
+	f[F_THUMB_LOCAL_X] = x;
+	f[F_THUMB_LOCAL_Y] = y;
+}
+
+//! Feeds (side, x, y) for @p frames frames every 11 ms; returns the events seen.
+uint32_t
+feedMicro(mg::Micro &m, int64_t &t_ms, int frames, float side, float x, float y, bool blocked = false,
+          int *count = nullptr)
+{
+	uint32_t all = 0;
+	float f[kFeatureCount];
+	thumbAt(f, side, x, y);
+	for (int i = 0; i < frames; i++, t_ms += 11) {
+		const uint32_t e = m.update(t_ms * 1'000'000LL, f, true, blocked);
+		all |= e;
+		if (count != nullptr && e != 0) {
+			(*count)++;
+		}
+	}
+	return all;
+}
+} // namespace
+
+TEST_CASE("geometry: point to segment, palm normal and angle, pinch strength, fingertip direction")
+{
+	CHECK(pointSegmentDistance({0, 1, 0}, {-1, 0, 0}, {1, 0, 0}).value == Approx(1.0f));
+	CHECK(pointSegmentDistance({3, 0, 0}, {-1, 0, 0}, {1, 0, 0}).value == Approx(2.0f)); // clamped to the end
+	CHECK_FALSE(pointSegmentDistance({std::numeric_limits<float>::quiet_NaN(), 0, 0}, {0, 0, 0}, {1, 0, 0}).valid);
+
+	// a right hand palm down (palm normal -y), a mirrored left hand: both oriented by the palm side
+	Vec3 n;
+	REQUIRE(mg::palmNormal({0, 0, 0}, {0.03f, 0, -0.08f}, {-0.05f, 0, -0.08f}, {0, -1, 0}, &n));
+	CHECK(n.y == Approx(-1.0f));
+	REQUIRE(mg::palmNormal({0, 0, 0}, {-0.03f, 0, -0.08f}, {0.05f, 0, -0.08f}, {0, -1, 0}, &n));
+	CHECK(n.y == Approx(-1.0f));
+	CHECK_FALSE(mg::palmNormal({0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, -1, 0}, &n));
+	float a = 0;
+	REQUIRE(mg::palmAngleDeg({0, 1, 0}, {0, 0, 0}, {0, 2, 0}, &a)); // palm straight at the headset
+	CHECK(a == Approx(0.0f).margin(1e-3));
+	REQUIRE(mg::palmAngleDeg({0, -1, 0}, {0, 0, 0}, {0, 2, 0}, &a)); // palm away
+	CHECK(a == Approx(180.0f).margin(1e-3));
+	REQUIRE(mg::palmAngleDeg({0, 1, 0}, {0, 0, 0}, {1, 1, 0}, &a));
+	CHECK(a == Approx(45.0f).margin(1e-3));
+
+	// pinch strength: 0 open, 0.5 halfway, 1 closed, clamped, rising as the fingers close
+	CHECK(mg::pinchStrength(1.2f, 1.2f, 0.4f) == Approx(0.0f));
+	CHECK(mg::pinchStrength(0.8f, 1.2f, 0.4f) == Approx(0.5f));
+	CHECK(mg::pinchStrength(0.4f, 1.2f, 0.4f) == Approx(1.0f));
+	CHECK(mg::pinchStrength(5.0f, 1.2f, 0.4f) == 0.0f);
+	CHECK(mg::pinchStrength(0.0f, 1.2f, 0.4f) == 1.0f);
+	float prev = -1;
+	for (float d = 1.5f; d >= 0.2f; d -= 0.1f) {
+		const float s = mg::pinchStrength(d, 1.2f, 0.4f);
+		CHECK(s >= prev);
+		CHECK(s >= 0.0f);
+		CHECK(s <= 1.0f);
+		prev = s;
+	}
+	CHECK(mg::pinchStrength(std::numeric_limits<float>::quiet_NaN(), 1.2f, 0.4f) == 0.0f);
+
+	// fingertip direction: a straight finger along -z; a bent tip pulls it toward the distal segment
+	Vec3 d;
+	REQUIRE(mg::fingertipDirection({0, 0, 0}, {0, 0, -0.02f}, {0, 0, -0.04f}, 0.3f, 0.7f, &d));
+	CHECK(d.z == Approx(-1.0f));
+	REQUIRE(mg::fingertipDirection({0, 0, 0}, {0, 0, -0.02f}, {0, -0.02f, -0.02f}, 0.3f, 0.7f, &d));
+	CHECK(d.y < -0.8f);
+	CHECK(d.z < -0.3f);
+}
+
+TEST_CASE("thumb tap: one event per quick dip, none when held, jittering or blocked; double tap")
+{
+	mg::Params p;
+	p.alpha = 1.0f; // no smoothing: exact timing in the test
+	mg::Micro m(p);
+	int64_t t = 1000;
+	int n = 0;
+	feedMicro(m, t, 20, 0.8f, 0, 0, false, &n); // clear of the finger: armed
+	uint32_t e = feedMicro(m, t, 10, 0.1f, 0, 0, false, &n); // 110 ms of contact
+	CHECK(e == 0);
+	e = feedMicro(m, t, 1, 0.8f, 0, 0, false, &n); // released: the tap
+	CHECK((e & mg::E_TAP) != 0);
+	CHECK(n == 1);
+	// held contact (> 300 ms): no tap
+	mg::Micro h(p);
+	int nh = 0;
+	feedMicro(h, t, 20, 0.8f, 0, 0, false, &nh);
+	feedMicro(h, t, 40, 0.1f, 0, 0, false, &nh);
+	feedMicro(h, t, 5, 0.8f, 0, 0, false, &nh);
+	CHECK(nh == 0);
+	// one-frame jitter into contact (11 ms < 50 ms): no tap
+	mg::Micro j(p);
+	int nj = 0;
+	for (int k = 0; k < 10; k++) {
+		feedMicro(j, t, 20, 0.8f, 0, 0, false, &nj);
+		feedMicro(j, t, 1, 0.1f, 0, 0, false, &nj);
+	}
+	CHECK(nj == 0);
+	// hovering between contact and release never arms or fires
+	mg::Micro hov(p);
+	int nv = 0;
+	feedMicro(hov, t, 100, 0.35f, 0, 0, false, &nv);
+	CHECK(nv == 0);
+	// blocked (pinch / fist on): nothing
+	mg::Micro b(p);
+	int nb = 0;
+	feedMicro(b, t, 20, 0.8f, 0, 0, true, &nb);
+	feedMicro(b, t, 10, 0.1f, 0, 0, true, &nb);
+	feedMicro(b, t, 2, 0.8f, 0, 0, true, &nb);
+	CHECK(nb == 0);
+	// double tap: two taps within 400 ms (cooldown 250 ms, arm 150 ms in between)
+	mg::Micro d(p);
+	int64_t u = 1000;
+	feedMicro(d, u, 20, 0.8f, 0, 0);
+	feedMicro(d, u, 8, 0.1f, 0, 0);
+	CHECK((feedMicro(d, u, 1, 0.8f, 0, 0) & mg::E_TAP) != 0);
+	feedMicro(d, u, 23, 0.8f, 0, 0); // ~250 ms: cooled down and re-armed
+	feedMicro(d, u, 8, 0.1f, 0, 0);
+	const uint32_t second = feedMicro(d, u, 1, 0.8f, 0, 0);
+	CHECK((second & mg::E_TAP) != 0);
+	CHECK((second & mg::E_DOUBLE_TAP) != 0);
+}
+
+TEST_CASE("thumb swipe: four directions, left/right per hand, small or diagonal moves ignored, one event per contact")
+{
+	mg::Params right = mg::Params::fromMap(1, {});
+	mg::Params left = mg::Params::fromMap(0, {});
+	right.alpha = left.alpha = 1.0f;
+	const auto swipe = [](const mg::Params &p, float dx, float dy) {
+		mg::Micro m(p);
+		int64_t t = 1000;
+		uint32_t all = 0;
+		for (int i = 0; i <= 20; i++, t += 11) { // ~220 ms, in contact with the finger's side
+			float f[kFeatureCount];
+			thumbAt(f, 0.3f, dx * i / 20.0f, dy * i / 20.0f);
+			all |= m.update(t * 1'000'000LL, f, true, false);
+		}
+		return all;
+	};
+	CHECK(swipe(right, 0.5f, 0) == mg::E_SWIPE_FORWARD);
+	CHECK(swipe(right, -0.5f, 0) == mg::E_SWIPE_BACK);
+	CHECK(swipe(right, 0, 0.5f) == mg::E_SWIPE_LEFT); // toward the thumb side: left on the right hand
+	CHECK(swipe(right, 0, -0.5f) == mg::E_SWIPE_RIGHT);
+	CHECK(swipe(left, 0, 0.5f) == mg::E_SWIPE_RIGHT); // toward the thumb side: right on the left hand
+	CHECK(swipe(left, 0, -0.5f) == mg::E_SWIPE_LEFT);
+	CHECK(swipe(right, 0.15f, 0) == 0);      // too small
+	CHECK(swipe(right, 0.4f, 0.4f) == 0);    // diagonal
+	// one event per contact: a long continued move doesn't fire again
+	mg::Micro m(right);
+	int64_t t = 1000;
+	int n = 0;
+	for (int i = 0; i <= 60; i++, t += 11) {
+		float f[kFeatureCount];
+		thumbAt(f, 0.3f, 1.5f * i / 60.0f, 0);
+		n += m.update(t * 1'000'000LL, f, true, false) != 0 ? 1 : 0;
+	}
+	CHECK(n == 1);
+	// outside the finger's region: no swipe
+	CHECK([&] {
+		mg::Micro o(right);
+		int64_t u = 1000;
+		uint32_t all = 0;
+		for (int i = 0; i <= 20; i++, u += 11) {
+			float f[kFeatureCount];
+			thumbAt(f, 0.9f, 0.5f * i / 20.0f, 0);
+			all |= o.update(u * 1'000'000LL, f, true, false);
+		}
+		return all;
+	}() == 0);
+}
+
+TEST_CASE("formula gesture params: per hand from the config, defaults otherwise")
+{
+	std::string err;
+	const rl::Config c = rl::parse(rl::kDefaultConfig, &err);
+	REQUIRE(c.valid);
+	const mg::Params l = mg::Params::fromMap(0, c.params[0]);
+	const mg::Params r = mg::Params::fromMap(1, c.params[1]);
+	CHECK(l.palm_angle_deg == Approx(40.0f));
+	CHECK(l.pinch_open[0] == Approx(1.20f));
+	CHECK(r.pinch_open[0] == Approx(1.00f));
+	CHECK(l.swipe_thumbward_is_left == 0.0f);
+	CHECK(r.swipe_thumbward_is_left == 1.0f);
+	CHECK(l.tap_release > l.tap_contact); // hysteresis
+	const rl::Config o = rl::parse(R"({"params": {"left": {"palm_angle_deg": 30, "tap_contact": 0.2}}, "hands": {}})", &err);
+	REQUIRE(o.valid);
+	const mg::Params ol = mg::Params::fromMap(0, o.params[0]);
+	CHECK(ol.palm_angle_deg == Approx(30.0f));
+	CHECK(ol.tap_contact == Approx(0.2f));
+	CHECK(ol.tap_release == Approx(0.45f)); // default kept
 }

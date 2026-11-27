@@ -31,6 +31,7 @@
 #include "ovrn_gesture_state.hpp"
 #include "ovrn_gesture_rules.hpp"
 #include "ovrn_gesture_rules_default.hpp"
+#include "ovrn_microgestures.hpp"
 
 #include <cstdlib>
 #include <string>
@@ -105,6 +106,7 @@ public:
 			m_tracked = false;
 			logGestureEvents(m_mp.reset("hand not tracked"), now_ns);
 			setHandGestures(nullptr);
+			releaseFormulaGestures();
 			ruleChanges(m_rules.reset(now_ns, "hand not tracked", m_ruleChanges, kRuleChanges), &sample_none());
 			setGestures(skel::Gestures{});
 			// A lost hand lets go of the gesture's system press (the headset button still works: sendSystem).
@@ -131,6 +133,7 @@ public:
 		m_tracked = true;
 		const skel::Gestures g = skel::gestures(in_root, j.radius);
 		updateTip(in_root);
+		updatePoke(in_root);
 		/*
 		 * MediaPipe's gesture measurements when the hand tracker has them (MERCURY_MEDIAPIPE_GESTURES): pinch and
 		 * fist from them, through the debounced state machine. While they're on but this frame's is invalid (hand
@@ -176,10 +179,12 @@ public:
 			m_stat.pinch_mapping +=
 			    !sample.rule_pinch_decides && !sample.pinch_image_valid && sample.custom_valid ? 1 : 0;
 			logGestureEvents(m_mp.update(sample, now_ns), now_ns, &sample);
+			updateFormulaGestures(j, now_ns, sample);
 			m_stat.mp_frames++;
 			m_stat.mp_valid += m_mp.state().valid ? 1 : 0;
 		} else if (m_mp.state().valid) {
 			logGestureEvents(m_mp.reset("gesture measurements unavailable"), now_ns);
+			releaseFormulaGestures();
 			ruleChanges(m_rules.reset(now_ns, "gesture measurements unavailable", m_ruleChanges, kRuleChanges),
 			            &sample_none());
 		}
@@ -235,7 +240,12 @@ public:
 			}
 			gesture_down = m_systemPinch && now_ns - m_systemSinceNs >= kSystemHoldNs;
 		}
-		m_systemOn = systemPress(gesture_down);
+		/*
+		 * The dashboard from the left hand only, as SteamVR's own tracked hands (vrlink's dashboard binding toggles it
+		 * from the left hand's system button): its open-palm gesture or its palm pinch (palm toward the headset + the
+		 * pinch; ovrn_microgestures.hpp). The right hand's are bindable inputs, not the system button.
+		 */
+		m_systemOn = systemPress(m_hand == Hand::Left && (gesture_down || m_menuPalmPinchOn));
 		sendSystem();
 
 		m_stat.palm_facing += system ? 1 : 0;
@@ -253,7 +263,20 @@ public:
 			out.pinch = m_mp.pinchValue();
 			out.finger_pinch[0] = out.pinch;
 			out.grab = st.fist ? 1.0f : 0.0f;
-			setOutputs(out, st.pinch, st.fist);
+			// Middle / ring / little pinch strength from MediaPipe's landmarks (thumb tip to fingertip / palm width).
+			if (m_strengthValid) {
+				for (int i = 0; i < 3; i++) {
+					out.finger_pinch[1 + i] = m_strength[i];
+				}
+			}
+			// The left hand's palm pinch opens the dashboard: it isn't also a click (Meta reserves the palm pinch the
+			// same way). The right hand's is a normal click (and its own bindable input).
+			const bool menu_owns_pinch = m_menuPalmPinchOn && m_hand == Hand::Left;
+			if (menu_owns_pinch) {
+				out.pinch = 0.0f;
+				out.finger_pinch[0] = 0.0f;
+			}
+			setOutputs(out, st.pinch && !menu_owns_pinch, st.fist);
 			setHandGestures(&st);
 			return;
 		}
@@ -350,10 +373,14 @@ protected:
 		for (int i = 0; i < kHandGestureCount; i++) {
 			in->CreateBooleanComponent(m_container, kHandGestures[i].path, &m_handGesture[i]);
 		}
+		for (int i = 0; i < kFormulaInputs; i++) {
+			in->CreateBooleanComponent(m_container, kFormulaInputPaths[i], &m_formulaInput[i]);
+		}
 		// The poses apps and the dashboard bind (no render model gives them): raw and grip at the palm, tip ahead.
 		in->CreatePoseComponent(m_container, "/pose/raw", &m_poseRaw);
 		in->CreatePoseComponent(m_container, "/pose/grip", &m_poseGrip);
 		in->CreatePoseComponent(m_container, "/pose/tip", &m_poseTip);
+		in->CreatePoseComponent(m_container, "/pose/poke", &m_posePoke);
 		const vr::HmdMatrix34_t identity = {{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
 		in->UpdatePoseComponent(m_poseRaw, &identity, 0.0);
 		in->UpdatePoseComponent(m_poseGrip, &identity, 0.0);
@@ -497,6 +524,16 @@ private:
 				for (uint32_t &c : m_handGestureClicks) {
 					c = 0;
 				}
+				log("ovrn: %s hand formula gestures (10 s presses): palm pinch %u, poke ready %u, thumb tap %u, double "
+				    "tap %u, swipe left %u, right %u, forward %u, back %u; palm angle now %.0f deg (limit %.0f); pinch "
+				    "strength middle %.2f ring %.2f little %.2f\n",
+				    m_hand == Hand::Left ? "left" : "right", m_formulaPresses[0], m_formulaPresses[1], m_formulaPresses[2],
+				    m_formulaPresses[3], m_formulaPresses[4], m_formulaPresses[5], m_formulaPresses[6],
+				    m_formulaPresses[7], m_palmAngle, m_microParams.palm_angle_deg, m_strength[0], m_strength[1],
+				    m_strength[2]);
+				for (uint32_t &c : m_formulaPresses) {
+					c = 0;
+				}
 				const uint32_t pn = m_stat.pinch_formula + m_stat.pinch_image + m_stat.pinch_mapping;
 				log("ovrn: %s hand pinch source (10 s): formula %.0f%%, image detector %.0f%%, gesture mapping "
 				    "%.0f%% of %u frames\n",
@@ -617,6 +654,175 @@ private:
 	vr::VRInputComponentHandle_t m_pinch[4] = {vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle,
 	                                           vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle};
 	vr::VRInputComponentHandle_t m_system = vr::k_ulInvalidInputComponentHandle;
+
+	// ---------------------------------------------------------------- formula gestures (ovrn_microgestures.hpp)
+	gest::micro::Params m_microParams = gest::micro::Params::fromMap(m_hand == Hand::Left ? 0 : 1,
+	                                                                  gestureRules().params[m_hand == Hand::Left ? 0 : 1]);
+	gest::micro::Micro m_micro = gest::micro::Micro(m_microParams);
+	bool m_menuPalmPinchOn = false;
+	float m_palmAngle = NAN;
+	bool m_strengthValid = false;
+	float m_strength[3] = {};
+	bool m_pokeReady = false;
+	//! Inputs: the palm pinch, poke ready, thumb tap, double tap, swipes left / right / forward / back.
+	static constexpr int kFormulaInputs = 8;
+	static constexpr const char *kFormulaInputPaths[kFormulaInputs] = {
+	    "/input/menu_palm_pinch/click", "/input/index_poke/click",       "/input/thumb_tap/click",
+	    "/input/thumb_double_tap/click", "/input/thumb_swipe_left/click", "/input/thumb_swipe_right/click",
+	    "/input/thumb_swipe_forward/click", "/input/thumb_swipe_back/click"};
+	vr::VRInputComponentHandle_t m_formulaInput[kFormulaInputs] = {
+	    vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle,
+	    vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle,
+	    vr::k_ulInvalidInputComponentHandle, vr::k_ulInvalidInputComponentHandle};
+	bool m_formulaOn[kFormulaInputs] = {};
+	int64_t m_pulseUntil[kFormulaInputs] = {}; //!< events (tap, swipes) are held this long so apps see them
+	uint32_t m_formulaPresses[kFormulaInputs] = {};
+	vr::VRInputComponentHandle_t m_posePoke = vr::k_ulInvalidInputComponentHandle;
+
+	static gest::micro::Vec3
+	g3(const Vec3 &v)
+	{
+		return {(float)v.x, (float)v.y, (float)v.z};
+	}
+
+	void
+	setFormulaInput(int i, bool on)
+	{
+		if (on && !m_formulaOn[i]) {
+			m_formulaPresses[i]++;
+		}
+		if (on != m_formulaOn[i] || on) {
+			vr::VRDriverInput()->UpdateBooleanComponent(m_formulaInput[i], on, 0.0);
+		}
+		m_formulaOn[i] = on;
+	}
+
+	//! Everything formula-based let go (the hand isn't tracked, or its measurements stopped).
+	void
+	releaseFormulaGestures()
+	{
+		m_menuPalmPinchOn = false;
+		m_strengthValid = false;
+		m_pokeReady = false;
+		m_micro.reset();
+		for (int i = 0; i < kFormulaInputs; i++) {
+			m_pulseUntil[i] = 0;
+			setFormulaInput(i, false);
+		}
+	}
+
+	/*!
+	 * The formula gestures for this frame (after the MediaPipe gesture state's update): the palm pinch (Mercury's
+	 * joints and the head pose, both in the room frame), the pinch strengths, poke ready and the thumb tap / swipes
+	 * (MediaPipe's joint features), and the poke pose (Mercury's fingertip, in the hand's frame).
+	 */
+	void
+	updateFormulaGestures(const HandJoints &j, int64_t now_ns, const gest::Sample &sample)
+	{
+		using namespace gest::micro;
+		using GV = gest::micro::Vec3;
+		const gest::State &st = m_mp.state();
+		const bool feats = sample.valid && sample.features_valid;
+
+		// Palm pinch: palm normal = normalize(cross(index knuckle - wrist, little knuckle - wrist)), oriented by the
+		// palm joint's inner axis; palm centre = mean of the wrist and the four knuckles; the angle to the headset.
+		bool facing = false;
+		m_palmAngle = NAN;
+		TrackedPose head;
+		static const int kW = 1, kI = 7, kM = 12, kR = 17, kL = 22; // OpenXR joints: wrist, proximal (knuckles)
+		if (m_backend->headPose(now_ns, &head) && head.position_valid && j.joint_valid[0] && j.joint_valid[kW] &&
+		    j.joint_valid[kI] && j.joint_valid[kM] && j.joint_valid[kR] && j.joint_valid[kL]) {
+			using namespace skel::detail;
+			const Pose &palm = j.joint[0];
+			const V inner = rotate(Q{(float)palm.orientation.w, (float)palm.orientation.x, (float)palm.orientation.y,
+			                         (float)palm.orientation.z},
+			                       V{0, -1, 0});
+			GV n;
+			const GV center = geo::scale(
+			    geo::add(geo::add(geo::add(g3(j.joint[kW].position), g3(j.joint[kI].position)),
+			                      geo::add(g3(j.joint[kM].position), g3(j.joint[kR].position))),
+			             g3(j.joint[kL].position)),
+			    0.2f);
+			float angle = 0.0f;
+			if (palmNormal(g3(j.joint[kW].position), g3(j.joint[kI].position), g3(j.joint[kL].position),
+			               GV{inner.x, inner.y, inner.z}, &n) &&
+			    palmAngleDeg(n, center, g3(head.pose.position), &angle)) {
+				m_palmAngle = angle;
+				facing = angle < m_microParams.palm_angle_deg;
+			}
+		}
+		const bool menu = st.valid && st.pinch && facing;
+		if (menu != m_menuPalmPinchOn && m_mpDebug) {
+			log("ovrn: %s palm pinch: %s (palm angle %.0f deg, limit %.0f; pinch %d)\n",
+			    m_hand == Hand::Left ? "left" : "right", menu ? "on" : "off", m_palmAngle,
+			    m_microParams.palm_angle_deg, st.pinch ? 1 : 0);
+		}
+		m_menuPalmPinchOn = menu;
+		setFormulaInput(0, menu);
+
+		// Pinch strengths (middle, ring, little), smoothed.
+		if (feats) {
+			for (int i = 0; i < 3; i++) {
+				const float raw = pinchStrength(sample.features[geo::F_THUMB_MIDDLE + i], m_microParams.pinch_open[i],
+				                                m_microParams.pinch_closed[i]);
+				m_strength[i] = m_strengthValid ? m_microParams.pinch_alpha * raw +
+				                                      (1.0f - m_microParams.pinch_alpha) * m_strength[i]
+				                                : raw;
+			}
+		}
+		m_strengthValid = feats;
+
+		// Poke ready (index extended, middle not).
+		m_pokeReady = feats && pokeReady(sample.features, m_microParams);
+		setFormulaInput(1, m_pokeReady);
+
+		// Thumb tap and swipes: discrete events, each held 100 ms for apps; not while a pinch, fist or palm pinch is on.
+		const uint32_t ev =
+		    m_micro.update(sample.timestamp_ns, sample.features, feats, st.pinch || st.fist || m_menuPalmPinchOn);
+		static const uint32_t bits[6] = {E_TAP, E_DOUBLE_TAP, E_SWIPE_LEFT, E_SWIPE_RIGHT, E_SWIPE_FORWARD, E_SWIPE_BACK};
+		for (int k = 0; k < 6; k++) {
+			if (ev & bits[k]) {
+				m_pulseUntil[2 + k] = now_ns + 100'000'000;
+				if (m_mpDebug) {
+					static const char *const names[6] = {"thumb tap", "thumb double tap", "thumb swipe left",
+					                                     "thumb swipe right", "thumb swipe forward", "thumb swipe back"};
+					log("ovrn: %s %s\n", m_hand == Hand::Left ? "left" : "right", names[k]);
+				}
+			}
+			setFormulaInput(2 + k, now_ns < m_pulseUntil[2 + k]);
+		}
+	}
+
+	/*!
+	 * The poke pose (/pose/poke) in the hand's frame: at the index fingertip (Mercury's joint), its -Z along the last
+	 * two index segments (distal weighted more), its +Y toward the back of the hand.
+	 */
+	void
+	updatePoke(const skel::Joints &in_palm)
+	{
+		using namespace gest::micro;
+		using GV = gest::micro::Vec3;
+		static const int kPip = 8, kDip = 9, kTip = 10; // OpenXR: index intermediate (PIP), distal (DIP), tip
+		if (!in_palm.valid[kPip] || !in_palm.valid[kDip] || !in_palm.valid[kTip]) {
+			return;
+		}
+		const auto v = [](const skel::detail::V &a) { return GV{a.x, a.y, a.z}; };
+		GV dir, x, y;
+		if (!fingertipDirection(v(in_palm.pos[kPip]), v(in_palm.pos[kDip]), v(in_palm.pos[kTip]),
+		                        m_microParams.poke_proximal_weight, m_microParams.poke_distal_weight, &dir)) {
+			return;
+		}
+		const GV z = geo::scale(dir, -1.0f); // SteamVR poses point along -Z
+		if (!geo::normalized(geo::cross(GV{0, 1, 0}, z), &x)) {
+			if (!geo::normalized(geo::cross(GV{0, 0, 1}, z), &x)) {
+				return;
+			}
+		}
+		y = geo::cross(z, x);
+		const GV p = v(in_palm.pos[kTip]);
+		const vr::HmdMatrix34_t m = {{{x.x, y.x, z.x, p.x}, {x.y, y.y, z.y, p.y}, {x.z, y.z, z.z, p.z}}};
+		vr::VRDriverInput()->UpdatePoseComponent(m_posePoke, &m, 0.0);
+	}
 	/*!
 	 * Hand Landmarker's own gestures as buttons (its Gesture Recognizer categories, confirmed by the gesture state;
 	 * all released while the hand isn't tracked): for games and SteamVR's binding screen.

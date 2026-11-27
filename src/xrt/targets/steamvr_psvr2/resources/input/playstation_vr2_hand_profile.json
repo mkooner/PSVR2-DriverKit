@@ -133,6 +133,78 @@
       ],
       "order": 4
     },
+    "/input/menu_palm_pinch": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        72,
+        30
+      ],
+      "order": 5
+    },
+    "/input/index_poke": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        15,
+        5
+      ],
+      "order": 5
+    },
+    "/input/thumb_tap": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        25,
+        35
+      ],
+      "order": 5
+    },
+    "/input/thumb_double_tap": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        25,
+        40
+      ],
+      "order": 5
+    },
+    "/input/thumb_swipe_left": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        20,
+        30
+      ],
+      "order": 5
+    },
+    "/input/thumb_swipe_right": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        30,
+        30
+      ],
+      "order": 5
+    },
+    "/input/thumb_swipe_forward": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        25,
+        25
+      ],
+      "order": 5
+    },
+    "/input/thumb_swipe_back": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [
+        25,
+        45
+      ],
+      "order": 5
+    },
     "/pose/raw": {
       "type": "pose",
       "binding_image_point": [
@@ -148,6 +220,13 @@
       ]
     },
     "/pose/tip": {
+      "type": "pose",
+      "binding_image_point": [
+        14,
+        16
+      ]
+    },
+    "/pose/poke": {
       "type": "pose",
       "binding_image_point": [
         14,

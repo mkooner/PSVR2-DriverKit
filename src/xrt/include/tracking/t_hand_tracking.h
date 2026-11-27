@@ -161,7 +161,7 @@ struct t_hand_gestures
 	bool joint_features_valid;             //!< false: joint_features isn't meaningful
 	//! The joint features of MediaPipe's landmarks (Mercury's gesture::jointFeatures order and units), from the
 	//! camera with the highest hand presence: what calibrated gesture rules read.
-	float joint_features[18];
+	float joint_features[22];
 	bool custom_valid;                     //!< false: the custom mapping below isn't meaningful
 	enum t_hand_custom_gesture custom;     //!< the custom mapping's gesture (over its last frames)
 	float custom_scores[T_HAND_CUSTOM_COUNT]; //!< its probability per gesture, 0..1

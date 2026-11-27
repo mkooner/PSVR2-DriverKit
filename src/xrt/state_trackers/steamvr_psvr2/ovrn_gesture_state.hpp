@@ -71,7 +71,7 @@ struct Sample
 	float pinch_image = 0.0f;
 	//! MediaPipe's joint features (Mercury's gesture::jointFeatures), for the calibrated rules.
 	bool features_valid = false;
-	float features[18] = {};
+	float features[22] = {};
 	//! The calibrated rules' results this frame (ovrn_gesture_rules.hpp; set by the hand before update()).
 	bool rule_fist_decides = false; //!< an enabled fist rule decides the fist (else the custom mapping / category)
 	bool rule_fist = false;         //!< it is active
