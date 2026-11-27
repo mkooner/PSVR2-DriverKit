@@ -295,6 +295,20 @@ if drv.get("blocked_by_safe_mode"):
     print("  unblocked " + sys.argv[2] + " (was blocked by a previous SteamVR safe mode event)")
 drv["blocked_by_safe_mode"] = False
 drv["enable"] = True
+# Refresh rate: SteamVR picks the headset's display mode from its own setting (Video > Refresh Rate,
+# steamvr.preferredRefreshRate), not from the driver's rate (PSVR2_REFRESH_HZ). If the two differ, the panel runs at one
+# rate while frames are paced and poses predicted for the other: judder. So SteamVR's setting follows ours (REFRESH).
+import os
+hz = os.environ.get("PSVR2_REFRESH_HZ") or ("119.88" if os.environ.get("REFRESH", "90") == "120" else "89.91")
+try:
+    hz = float(hz)
+except ValueError:
+    hz = 89.91
+sv = cfg.setdefault("steamvr", {})
+old = sv.get("preferredRefreshRate")
+sv["preferredRefreshRate"] = hz
+if old is None or abs(float(old) - hz) > 0.01:
+    print("  SteamVR refresh setting: %s -> %.2f Hz (matches the headset)" % ("unset" if old is None else "%.2f" % float(old), hz))
 # Async reprojection: SteamVR's own default on NVIDIA under Linux is off ("Async: Automatically disabled as default
 # based on the detected Vulkan environment" in vrcompositor.txt, RTX 5080). With ASYNC=1 (OVRN_ASYNC=1) the driver asks
 # SteamVR for it itself (IVRSettings, ovrn_provider.cpp applyCompositorDefaults) and takes it out again at shutdown.
