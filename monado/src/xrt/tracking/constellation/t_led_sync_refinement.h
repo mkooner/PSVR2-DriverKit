@@ -414,6 +414,8 @@ struct t_led_sync_refinement
 		//! Adaptive probe interval: lengthened while the probes keep finding the blink centred.
 		time_duration_ns hold_interval_ns;
 		uint32_t hold_centred_streak;
+		//! Corrections in a row the same way (sign: the direction), see COUNT_HOLD_CHASE_MAX_STEPS.
+		int hold_dir_streak;
 		//! The first LED timing found was logged as a startup milestone (u_startup_mark).
 		bool startup_marked;
 		/*!
