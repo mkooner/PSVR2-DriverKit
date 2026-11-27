@@ -442,7 +442,7 @@ public:
 		out->pinch_image_valid = g.pinch_image_valid != 0;
 		out->pinch_image = g.pinch_image;
 		out->features_valid = g.features_valid != 0;
-		for (int f = 0; f < 18; f++) {
+		for (int f = 0; f < 22; f++) {
 			out->features[f] = g.features[f];
 		}
 		out->custom_valid = g.custom_valid != 0;

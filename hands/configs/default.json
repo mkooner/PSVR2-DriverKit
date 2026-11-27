@@ -464,5 +464,28 @@
     "status": "no recorded examples: needs a recording (gesture_prompts.py)"
    }
   }
- }
+ },
+ "params": {
+  "left": {
+   "palm_angle_deg": 40,
+   "pinch_open_middle": 1.2,
+   "pinch_open_ring": 1.35,
+   "pinch_open_little": 1.6,
+   "pinch_closed_middle": 0.4,
+   "pinch_closed_ring": 0.45,
+   "pinch_closed_little": 0.55,
+   "swipe_thumbward_is_left": 0
+  },
+  "right": {
+   "palm_angle_deg": 40,
+   "pinch_open_middle": 1.0,
+   "pinch_open_ring": 1.15,
+   "pinch_open_little": 1.4,
+   "pinch_closed_middle": 0.4,
+   "pinch_closed_ring": 0.45,
+   "pinch_closed_little": 0.55,
+   "swipe_thumbward_is_left": 1
+  }
+ },
+ "params_note": "pinch_open_*: the median thumb-to-fingertip distance / palm width of open hands in the 2026-11-25 recordings (164622, 195136) per hand; pinch_closed_*: estimates (no middle / ring / little pinch recorded); tap / swipe defaults (ovrn_microgestures.hpp) gave 0.06 false taps and 0.76 false swipes a minute on those recordings (hands/microgestures.py)"
 }

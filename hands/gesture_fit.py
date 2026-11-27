@@ -22,7 +22,8 @@ import numpy as np
 
 FEATURES = ['index_pip', 'index_dip', 'middle_pip', 'middle_dip', 'ring_pip', 'ring_dip', 'little_pip', 'little_dip',
             'index_reach', 'middle_reach', 'ring_reach', 'little_reach',
-            'thumb_index', 'thumb_middle', 'thumb_ring', 'thumb_little', 'thumb_ip', 'thumb_out']
+            'thumb_index', 'thumb_middle', 'thumb_ring', 'thumb_little', 'thumb_ip', 'thumb_out',
+            'thumb_index_side', 'thumb_local_x', 'thumb_local_y', 'thumb_local_z']
 HANDS = ('left', 'right')
 
 # ---------------------------------------------------------------------------------------------------- features / data
@@ -47,6 +48,19 @@ def features(w):
         reach.append(np.linalg.norm(P[mcp + 3] - P[0]) / base if base > 1e-6 else math.nan)
         thumb.append(np.linalg.norm(P[4] - P[mcp + 3]) / palm)
     f = [x for pd in zip(pip, dip) for x in pd] + reach + thumb + [angle(P[2], P[3], P[4]), np.linalg.norm(P[4] - P[5]) / palm]
+    # thumb tip to the index's PIP-DIP segment; the thumb tip in the index finger's frame (gesture::indexFrame)
+    seg = P[7] - P[6]; l2 = seg @ seg
+    u = 0.0 if l2 < 1e-12 else min(1.0, max(0.0, float((P[4] - P[6]) @ seg / l2)))
+    f.append(np.linalg.norm(P[4] - (P[6] + u * seg)) / palm)
+    ax = P[8] - P[5]; n = np.linalg.norm(ax)
+    if n < 1e-6:
+        return None
+    ax = ax / n
+    across = P[5] - P[17]; ay = across - ax * (across @ ax); n = np.linalg.norm(ay)
+    if n < 1e-6:
+        return None
+    ay = ay / n; az = np.cross(ax, ay); rel = P[4] - P[5]
+    f += [rel @ ax / palm, rel @ ay / palm, rel @ az / palm]
     f = np.array(f)
     return f if np.all(np.isfinite(f)) else None
 
