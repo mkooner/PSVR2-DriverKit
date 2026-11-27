@@ -50,6 +50,11 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <errno.h>
+#include <time.h>
+#ifdef XRT_OS_LINUX
+#include <dirent.h>
+#include <sys/timex.h>
+#endif
 
 
 /*!
@@ -77,6 +82,9 @@ DEBUG_GET_ONCE_BOOL_OPTION(pssense_advanced_led_sync, "PSSENSE_ADVANCED_LED_SYNC
  * (PSVR2Toolkit's custom-controller-sync calibration), then hold it. Set to false for the gray code + BG path.
  */
 DEBUG_GET_ONCE_BOOL_OPTION(pssense_count_calibration, "PSSENSE_COUNT_CALIBRATION", true)
+//! Test switches for the host clock slew correction (see pssense_host_slew_update): off, and a fake measured slew.
+DEBUG_GET_ONCE_BOOL_OPTION(pssense_host_slew_correction, "PSSENSE_HOST_SLEW_CORRECTION", true)
+DEBUG_GET_ONCE_FLOAT_OPTION(pssense_test_host_slew_ppm, "PSSENSE_TEST_HOST_SLEW_PPM", 0.0f)
 
 /*!
  * Longest time the constellation tracker's prediction may run without a fresh optical fix before its position is
@@ -365,6 +373,16 @@ struct pssense_device
 		time_duration_ns led_map_max_dev_ns;
 		timepoint_ns led_map_last_log_ns;
 
+		/*!
+		 * Host clock slew (see pssense_host_slew_update): CLOCK_MONOTONIC's rate against CLOCK_MONOTONIC_RAW,
+		 * measured over ~1 s windows (slew_win_*) and logged per minute (slew_min_*); slew_frac_ns carries the
+		 * sub-ns part of the correction between frames, slew_corrected_ns sums it for the log.
+		 */
+		bool slew_valid, slew_active;
+		double slew_rate;
+		timepoint_ns slew_win_mono_ns, slew_win_raw_ns, slew_min_mono_ns, slew_min_raw_ns;
+		double slew_frac_ns, slew_corrected_ns;
+
 		//! Locked by controller_thread.
 		struct pssense_led_settings led_settings;
 
@@ -643,6 +661,146 @@ static bool
 pssense_host_ts_to_imu(struct pssense_device *pssense, timepoint_ns host_ns, timepoint_ns *out_imu_ns)
 {
 	return pssense_clock_to_remote(&pssense->timing.imu_clock, host_ns, out_imu_ns);
+}
+
+/*
+ *
+ * Host clock slew.
+ *
+ */
+
+/*!
+ * Time sync services (systemd-timesyncd, chrony, ntpd/ntpsec, openntpd, PTP) correct the clock by changing its rate
+ * (slewing, and a lasting frequency correction), all through the kernel's adjtimex, and CLOCK_MONOTONIC, which every
+ * host timestamp here is in, follows those rate changes; CLOCK_MONOTONIC_RAW doesn't. The camera exposure timestamps
+ * follow CLOCK_MONOTONIC continuously, but the count calibration's LED clock map is latched once and only advanced by
+ * the optical drift trim, and the LED cycle length comes from a period measured in host ns: a slew of e moves the
+ * blink against the exposure by e (65 ppm: 65us per second), which the hold's drift estimate only learns slowly and
+ * gets wrong whenever the service changes its rate. A user's session (2026-11-27 17:10) had both controllers' windows
+ * moving together ~1ms per 15-20s (~65 ppm); this PC measured +8.8 ppm (systemd-timesyncd). Measuring the slew itself
+ * covers any service: the map advances by it less, and the cycle length is divided by (1 + rate), so the hold only
+ * follows the crystals' steady difference.
+ */
+#define PSSENSE_SLEW_WINDOW_NS (U_TIME_1S_IN_NS * 1)
+/*!
+ * Only a big slew is corrected: on from this rate, off again under PSSENSE_SLEW_OFF. The hold follows a small one fine
+ * (calib_sim: <= 47 ppm unchanged) and on a normal setup (this PC: 3-11 ppm, systemd-timesyncd) the LED timing stays
+ * exactly as without the correction.
+ */
+#define PSSENSE_SLEW_ON (30e-6)
+#define PSSENSE_SLEW_OFF (20e-6)
+#define PSSENSE_SLEW_LOG_NS (U_TIME_1S_IN_NS * 60)
+
+static timepoint_ns
+pssense_raw_ns(void)
+{
+#ifdef CLOCK_MONOTONIC_RAW
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) == 0) {
+		return (timepoint_ns)ts.tv_sec * U_TIME_1S_IN_NS + ts.tv_nsec;
+	}
+#endif
+	return 0;
+}
+
+//! The time sync services running and the kernel's correction, for the log.
+static void
+pssense_describe_time_sync(char *out, size_t size)
+{
+	out[0] = '\0';
+#ifdef XRT_OS_LINUX
+	static const char *const names[] = {"chronyd", "systemd-timesyn", "ntpd", "ntpsec", "openntpd", "ptp4l", "phc2sys"};
+	size_t len = 0;
+	DIR *dir = opendir("/proc");
+	struct dirent *de;
+	while (dir != NULL && (de = readdir(dir)) != NULL) {
+		if (de->d_name[0] < '0' || de->d_name[0] > '9') {
+			continue;
+		}
+		char path[300], comm[32] = {0};
+		snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
+		FILE *f = fopen(path, "r");
+		if (f == NULL) {
+			continue;
+		}
+		if (fgets(comm, sizeof(comm), f) == NULL) {
+			comm[0] = '\0';
+		}
+		fclose(f);
+		comm[strcspn(comm, "\n")] = '\0';
+		for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+			if (strcmp(comm, names[i]) == 0 && strstr(out, names[i]) == NULL && len + 32 < size) {
+				len += (size_t)snprintf(out + len, size - len, "%s%s", len > 0 ? ", " : "",
+				                        strcmp(names[i], "systemd-timesyn") == 0 ? "systemd-timesyncd" : names[i]);
+			}
+		}
+	}
+	if (dir != NULL) {
+		closedir(dir);
+	}
+	struct timex tx = {0}; // modes 0: read only, no privileges needed
+	int state = adjtimex(&tx);
+	snprintf(out + len, size - len, "%skernel frequency correction %+.1f ppm, tick %ldus, %s", len > 0 ? "; " : "no time sync service found; ",
+	         (double)tx.freq / 65536.0, (long)tx.tick,
+	         state < 0 ? "state unknown" : state == TIME_ERROR ? "not synchronised" : "synchronised");
+#else
+	snprintf(out, size, "time sync not checked on this OS");
+#endif
+}
+
+//! Measures the host clock's slew; called with the device locked, from the LED settings path.
+static void
+pssense_host_slew_update(struct pssense_device *pssense)
+{
+	const timepoint_ns raw = pssense_raw_ns();
+	if (raw == 0) {
+		return;
+	}
+	const timepoint_ns mono = os_monotonic_get_ns();
+	if (pssense->tracking.slew_win_raw_ns == 0) {
+		pssense->tracking.slew_win_raw_ns = pssense->tracking.slew_min_raw_ns = raw;
+		pssense->tracking.slew_win_mono_ns = pssense->tracking.slew_min_mono_ns = mono;
+		static atomic_bool logged = false;
+		if (!atomic_exchange(&logged, true)) {
+			char desc[256];
+			pssense_describe_time_sync(desc, sizeof(desc));
+			PSSENSE_INFO(pssense, "Host clock: %s; a slew over %.0f ppm is %s the LED timing", desc, PSSENSE_SLEW_ON * 1e6,
+			             debug_get_bool_option_pssense_host_slew_correction() ? "taken out of"
+			                                                                   : "NOT taken out of (test switch)");
+		}
+		return;
+	}
+	const time_duration_ns dr = raw - pssense->tracking.slew_win_raw_ns;
+	if (dr >= PSSENSE_SLEW_WINDOW_NS) {
+		const double rate = (double)((mono - pssense->tracking.slew_win_mono_ns) - dr) / (double)dr +
+		                    (double)debug_get_float_option_pssense_test_host_slew_ppm() * 1e-6;
+		pssense->tracking.slew_rate = pssense->tracking.slew_valid ? 0.5 * (pssense->tracking.slew_rate + rate) : rate;
+		pssense->tracking.slew_valid = true;
+		const double mag = fabs(pssense->tracking.slew_rate);
+		const bool was = pssense->tracking.slew_active;
+		pssense->tracking.slew_active = was ? mag >= PSSENSE_SLEW_OFF : mag >= PSSENSE_SLEW_ON;
+		if (pssense->tracking.slew_active != was && debug_get_bool_option_pssense_host_slew_correction()) {
+			PSSENSE_INFO(pssense, "Host clock slewing %+.1f ppm: %s", pssense->tracking.slew_rate * 1e6,
+			             pssense->tracking.slew_active ? "taking it out of the LED timing from now"
+			                                           : "small again, LED timing uncorrected from now");
+		}
+		pssense->tracking.slew_win_raw_ns = raw;
+		pssense->tracking.slew_win_mono_ns = mono;
+	}
+	const time_duration_ns dm = raw - pssense->tracking.slew_min_raw_ns;
+	if (dm >= PSSENSE_SLEW_LOG_NS) {
+		const double ppm = (double)((mono - pssense->tracking.slew_min_mono_ns) - dm) / (double)dm * 1e6;
+		char desc[256];
+		pssense_describe_time_sync(desc, sizeof(desc));
+		PSSENSE_INFO(pssense,
+		             "Host clock ran %+.1f ppm against the raw clock over the last minute (%s); %.0fus taken out of the "
+		             "LED timing (correction %s)",
+		             ppm, desc, pssense->tracking.slew_corrected_ns / 1e3,
+		             pssense->tracking.slew_active ? "on" : "off, under the threshold");
+		pssense->tracking.slew_min_raw_ns = raw;
+		pssense->tracking.slew_min_mono_ns = mono;
+		pssense->tracking.slew_corrected_ns = 0;
+	}
 }
 
 static bool
@@ -2128,6 +2286,7 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 	}
 
 	os_thread_helper_lock(&pssense->controller_thread);
+	pssense_host_slew_update(pssense);
 
 	// update the LED settings
 	if (pssense->tracking.received_frames > 10) {
@@ -2174,6 +2333,11 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 		double cycle_period_ns = pssense->tracking.latest_led_sync_sample.cycle_period_ns;
 		if (cycle_period_ns <= 0.0) {
 			cycle_period_ns = (double)pssense->tracking.average_exposure_interval_ns;
+		} else if (pssense->tracking.count_calibration && pssense->tracking.slew_active &&
+		           pssense->tracking.led_sync_refinement.period_estimate.period_ns > 0.0 &&
+		           debug_get_bool_option_pssense_host_slew_correction()) {
+			// That period was measured in host ns, which run at (1 + slew) (see pssense_host_slew_update).
+			cycle_period_ns /= 1.0 + pssense->tracking.slew_rate;
 		}
 
 		// inside thirds of a nanosecond
@@ -2246,8 +2410,17 @@ pssense_timing_event_sink_push(struct t_timing_event_sink *sink, const struct t_
 					pssense->tracking.led_map_valid = true;
 				} else {
 					double skew = pssense->tracking.latest_led_sync_sample.clock_skew;
-					pssense->tracking.led_map_offset_ns += (time_duration_ns)(
-					    skew * (double)(host_ns - pssense->tracking.led_map_last_host_ns));
+					const time_duration_ns dh = host_ns - pssense->tracking.led_map_last_host_ns;
+					pssense->tracking.led_map_offset_ns += (time_duration_ns)(skew * (double)dh);
+					// The host clock's slew over the same time (see pssense_host_slew_update).
+					if (pssense->tracking.slew_active && debug_get_bool_option_pssense_host_slew_correction()) {
+						const double slew_ns = pssense->tracking.slew_rate * (double)dh +
+						                       pssense->tracking.slew_frac_ns;
+						const time_duration_ns whole_ns = (time_duration_ns)slew_ns;
+						pssense->tracking.slew_frac_ns = slew_ns - (double)whole_ns;
+						pssense->tracking.led_map_offset_ns -= whole_ns;
+						pssense->tracking.slew_corrected_ns += (double)whole_ns;
+					}
 					time_duration_ns abs_dev = dev_ns < 0 ? -dev_ns : dev_ns;
 					pssense->tracking.led_map_max_dev_ns = MAX(pssense->tracking.led_map_max_dev_ns, abs_dev);
 				}
