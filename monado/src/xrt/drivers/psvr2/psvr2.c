@@ -2580,8 +2580,10 @@ psvr2_hmd_create(struct xrt_prober_device *xpdev)
 	 * SteamVR's compositor runs the PS VR2 panel in its 4000x2040@89.91Hz mode (it matches a desired 90Hz; the
 	 * 119.88Hz mode is also offered), but this said 120Hz, which SteamVR takes as Prop_DisplayFrequency for its frame
 	 * timing and pose prediction: every frame's head pose was predicted for the wrong moment (8.3 vs 11.1ms frames),
-	 * judder while turning. PSVR2_REFRESH_HZ sets it (89.91 default, or 119.88), and both compositors pick the display
-	 * mode to match: SteamVR from Prop_DisplayFrequency, Monado direct in choose_best_vk_mode_auto (comp_window_direct.c).
+	 * judder while turning. PSVR2_REFRESH_HZ sets it (89.91 default, or 119.88). Monado direct picks the display mode to
+	 * match (choose_best_vk_mode_auto, comp_window_direct.c). SteamVR doesn't: it picks the mode from its own
+	 * steamvr.preferredRefreshRate setting ("Trying to match desired rate of 90.000000Hz" while this said 89.91), so the
+	 * launcher writes that setting to the same rate.
 	 */
 	hmd->base.hmd->screens[0].nominal_frame_interval_ns =
 	    time_s_to_ns(1.0f / debug_get_float_option_psvr2_refresh_hz());

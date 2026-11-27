@@ -516,8 +516,19 @@ public:
 		d.refresh_hz = (std::isfinite(hz) && hz > 1.0 && hz < 1000.0) ? hz : 60.0;
 		float v2p = debug_get_float_option_ovrn_vsync_to_photons_s();
 		d.vsync_to_photons_s = v2p >= 0.0f ? v2p : (psvr2 ? 0.00136 : 0.011);
+		/*
+		 * Sony's 10.3 ms is from a 90 Hz session (89.91 Hz, an 11.12 ms frame); at 119.88 Hz a frame is only 8.34 ms,
+		 * so it's scaled with the frame time (7.7 ms there) rather than reported longer than a frame.
+		 */
 		float p2v = debug_get_float_option_ovrn_photons_to_vblank_s();
-		d.photons_to_vblank_s = p2v >= 0.0f ? p2v : (psvr2 ? 0.0103 : -1.0);
+		d.photons_to_vblank_s = p2v >= 0.0f ? p2v : (psvr2 ? 0.0103 * (89.91 / d.refresh_hz) : -1.0);
+		if (psvr2) {
+			// The panel's two VR modes (EDID: 4000x2040 at 89.91 and 119.88 Hz). Sent with
+			// Prop_DisplaySupportsRuntimeFramerateChange_Bool: without the list, SteamVR set the frame rate to 90
+			// while the panel ran at 119.88 Hz (2026-11-26 21:35, "Updated HMD Prop_DisplayFrequency_Float to
+			// 90.000000"), so frames were paced for 90 Hz on a 120 Hz panel: judder and 16% dropped frames.
+			d.available_rates = {89.91f, 119.88f};
+		}
 		d.distortion_mesh_resolution = (int)debug_get_num_option_ovrn_distortion_mesh_res();
 		int scale = (int)debug_get_num_option_ovrn_scale_percentage();
 		if (scale <= 0) {
