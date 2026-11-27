@@ -94,6 +94,8 @@ struct DisplayInfo
 	double refresh_hz = 90.0;
 	double vsync_to_photons_s = 0.0;
 	double photons_to_vblank_s = -1.0; //!< < 0: not reported
+	//! The refresh rates the panel offers (Prop_DisplayAvailableFrameRates_Float_Array; empty: not reported)
+	std::vector<float> available_rates;
 	int distortion_mesh_resolution = 0; //!< 0: SteamVR's default
 	EyeInfo eye[2];
 };

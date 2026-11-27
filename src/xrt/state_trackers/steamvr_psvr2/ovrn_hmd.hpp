@@ -46,6 +46,34 @@ public:
 		for (const std::string &line : m_presence.tick(now, at_shutdown)) {
 			log("%s\n", line.c_str());
 		}
+		checkFrameRate(now);
+	}
+
+	/*!
+	 * SteamVR's compositor rewrites Prop_DisplayFrequency_Float once it has the display; if that isn't the rate the
+	 * driver runs at (PSVR2_REFRESH_HZ), frames are paced and poses predicted for the wrong refresh: judder. Checked
+	 * once a second, logged when it changes.
+	 */
+	void
+	checkFrameRate(int64_t now)
+	{
+		if (m_objectId.load() == vr::k_unTrackedDeviceIndexInvalid || now - m_rateCheckNs < 1000000000) {
+			return;
+		}
+		m_rateCheckNs = now;
+		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+		const float hz = vr::VRProperties()->GetFloatProperty(m_container, vr::Prop_DisplayFrequency_Float, &err);
+		if (err != vr::TrackedProp_Success || std::fabs(hz - m_rateLogged) < 0.01f) {
+			return;
+		}
+		m_rateLogged = hz;
+		if (std::fabs(hz - (float)m_display.refresh_hz) < 0.5f) {
+			log("ovrn: SteamVR frame rate %.2f Hz, as the driver's (%.2f Hz)\n", hz, m_display.refresh_hz);
+		} else {
+			log("ovrn: WARNING: SteamVR frame rate %.2f Hz, but the headset runs at %.2f Hz: frames are paced for the "
+			    "wrong refresh (judder). SteamVR's Video > Refresh Rate setting should match DriverKit's\n",
+			    hz, m_display.refresh_hz);
+		}
 	}
 
 	//! The headset's index in SteamVR, k_unTrackedDeviceIndexInvalid when not active.
@@ -323,6 +351,12 @@ protected:
 			props->SetBoolProperty(m_container, vr::Prop_DriverProvidedChaperoneVisibility_Bool, true);
 		}
 		props->SetFloatProperty(m_container, vr::Prop_DisplayFrequency_Float, (float)m_display.refresh_hz);
+		if (!m_display.available_rates.empty()) {
+			std::vector<float> rates = m_display.available_rates;
+			props->SetProperty(m_container, vr::Prop_DisplayAvailableFrameRates_Float_Array, rates.data(),
+			                   (uint32_t)(rates.size() * sizeof(float)), vr::k_unFloatPropertyTag);
+			props->SetBoolProperty(m_container, vr::Prop_DisplaySupportsMultipleFramerates_Bool, true);
+		}
 		props->SetFloatProperty(m_container, vr::Prop_SecondsFromVsyncToPhotons_Float,
 		                        (float)m_display.vsync_to_photons_s);
 		if (m_display.photons_to_vblank_s >= 0.0) {
@@ -667,6 +701,8 @@ private:
 	vr::VRInputComponentHandle_t m_proximityHandle = vr::k_ulInvalidInputComponentHandle;
 	bool m_wornSent = false;
 	PresenceLog m_presence; //!< wear sensor, head tracking and SteamVR's standby verdicts, logged every 30 s
+	int64_t m_rateCheckNs = 0;  //!< checkFrameRate: last check
+	float m_rateLogged = -1.0f; //!< checkFrameRate: SteamVR's frame rate last logged
 	bool m_wornSentOnce = false;
 	vr::VRInputComponentHandle_t m_eyeHandle = vr::k_ulInvalidInputComponentHandle;
 	uint64_t m_eyeUpdates = 0; //!< RunFrame thread: gaze updates sent, and how many carried valid gaze
