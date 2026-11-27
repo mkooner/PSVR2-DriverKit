@@ -200,6 +200,9 @@ main(int argc, char **argv)
 	int acq_n = 0, acq_never = 0, acq_cal_max = 0;
 	double sh_tracked = 0, sh_worst_tracked = 1, sh_err_worst = 0, sh_err_sum = 0;
 	int sh_runs = 0, sh_recal = 0, sh_recal_max = 0, sh_jumps = 0, sh_undone = 0;
+	// Longest stretch the left controller isn't tracked (the tracker has it and >= 4 LEDs lit), after the event.
+	double sh_dark_sum = 0, sh_dark_worst = 0;
+	int sh_dark_runs = 0;
 	double sum_rec = 0, worst_rec = 0, sum_recal = 0;
 	int n_rec = 0, n_never = 0, max_recal = 0;
 	double sum_other = 0, worst_other = 0, sum_back = 0, worst_back = 0;
@@ -236,7 +239,7 @@ main(int argc, char **argv)
 		int recal = 0, streak = 0, prev_phase = -1;
 		int64_t ev_start = -1;
 		double applied_shift = 0, bt_walk = 0, run_err_worst = 0;
-		long ev_frames = 0, ev_tracked = 0;
+		long ev_frames = 0, ev_tracked = 0, dark_run = 0, dark_max = 0;
 		for (int i = 0; i < 2; i++)
 			c[i].bt_ns = 3e6 + urand() * 1e6;
 		const int64_t run_limit = (outage_for > 0 || shift_mode || acquire_s > 0 ? 220LL : 60LL) * 1000000000LL;
@@ -446,6 +449,11 @@ main(int argc, char **argv)
 				prev_phase = ph;
 				ev_frames++;
 				ev_tracked += vis[0] >= 4;
+				{
+					bool trk = vis[0] >= 4 && (acquire_s <= 0 || c[0].acquired);
+					dark_run = trk ? 0 : dark_run + 1;
+					dark_max = dark_run > dark_max ? dark_run : dark_max;
+				}
 				if (ph == T_LED_SYNC_PHASE_COUNT_HOLD) {
 					double blink = (double)c[0].r.current_blink_duration_ns;
 					double tc = c[0].window_left_ns + (blink + exposure_ns) / 2;
@@ -517,6 +525,10 @@ main(int argc, char **argv)
 			sh_jumps += c[0].r.count_calib.bt_jumps;
 			sh_undone += c[0].r.count_calib.bt_jumps_undone;
 			sh_runs++;
+			double dk = dark_max * FRAME_NS / 1e9;
+			sh_dark_sum += dk;
+			sh_dark_worst = fmax(sh_dark_worst, dk);
+			sh_dark_runs++;
 		}
 		if (outage_for > 0 && out_end >= 0) {
 			sum_recal += recal;
@@ -598,6 +610,8 @@ main(int argc, char **argv)
 		       shift_us, shift_s, bterr_us, bterr_s, 100 * sh_tracked / sh_runs, 100 * sh_worst_tracked,
 		       (double)sh_recal / sh_runs, sh_recal_max, sh_err_sum / sh_runs, sh_err_worst,
 		       (double)sh_jumps / sh_runs, sh_undone, sh_runs);
+		printf("  longest blackout of the left controller after the shift: mean %.2fs worst %.2fs\n",
+		       sh_dark_sum / sh_dark_runs, sh_dark_worst);
 	}
 	if (outage_for > 0) {
 		printf("left out of view %.0fs after holding: tracked again after mean %.2fs worst %.2fs (%d runs), "
