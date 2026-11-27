@@ -297,6 +297,14 @@ count_calib_enter(struct t_led_sync_refinement *refinement)
 	refinement->count_calib.anchored = false;
 	refinement->count_calib.have_prev_left = false;
 	refinement->count_calib.started_ns = 0;
+	// A lost recovery running when the resync started (its token, if any, carries over to the calibration).
+	refinement->count_calib.rec_active = false;
+	refinement->count_calib.rec_paused = false;
+	refinement->count_calib.rec_confirm = false;
+	{
+		struct t_led_sync_refinement *self = refinement;
+		atomic_compare_exchange_strong(&count_probe_wanted, &self, NULL);
+	}
 	refinement->count_calib.have_plausible = false;
 	refinement->count_calib.pass_plausible = false;
 	refinement->count_calib.empty_sweeps = 0;
@@ -413,6 +421,15 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	cc->hold_seen_since_calib = false;
 	cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
 	cc->hold_centred_streak = 0;
+	cc->rec_active = false;
+	cc->rec_paused = false;
+	cc->rec_confirm = false;
+	cc->rec_next_ns = 0;
+	cc->rec_backoff_ns = 0;
+	cc->rec_attempt = 0;
+	cc->rec_loss_ns = 0;
+	cc->rec_searches = 0;
+	cc->rec_result = NULL;
 	// The window was just measured with the current clock offset: that's the reference to follow it from.
 	cc->bt_have_ref = cc->bt_valid;
 	cc->bt_ref_ns = cc->bt_smooth_ns;
@@ -1118,11 +1135,17 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 	}
 	cc->hold_in_view = in_view;
 
-	LOG_DEBUG(refinement,
-	          "Count hold probe: %s -> %s, centre %" PRId64
+	/*
+	 * At info when it moves the centre or first loses the LEDs (a user's log, 2026-11-27, showed two 15 s losses but
+	 * not what the probes saw before them); centred and repeated "not in view" probes stay at debug.
+	 */
+	const bool probe_news = (in_view && e != 0) || (!in_view && cc->hold_unseen_probes == 1);
+	const enum u_logging_level probe_level = probe_news ? U_LOGGING_INFO : U_LOGGING_DEBUG;
+	U_LOG_IFL(probe_level, refinement->log_level,
+	          "[%s] Count hold probe: %s -> %s, centre %" PRId64
 	          "us, cycle trim %+.1fppm, %u corrections in %.0fs, next in %.0fs",
-	          detail, verdict, (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), cc->skew * 1e6,
-	          cc->hold_corrections, (double)t_ns / U_TIME_1S_IN_NS,
+	          LED_SYNC_NAME(refinement), detail, verdict, (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS),
+	          cc->skew * 1e6, cc->hold_corrections, (double)t_ns / U_TIME_1S_IN_NS,
 	          (double)cc->hold_interval_ns / U_TIME_1S_IN_NS);
 
 	count_calib_release_token(refinement);
@@ -1259,6 +1282,11 @@ static void
 count_hold_push_sample(struct t_led_sync_refinement *refinement, const struct t_constellation_tracker_sample *sample)
 {
 	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	if (cc->rec_active) {
+		// Lost recovery: the tracker matching the LEDs at the offset under test (see handle_count_hold_recover).
+		count_calib_push_sample(refinement, sample);
+		return;
+	}
 	if (!cc->hold_measuring || sample->sequence_id < cc->hold_meas_from_seq) {
 		return;
 	}
@@ -1332,12 +1360,381 @@ handle_count_hold_nudge(struct t_led_sync_refinement *refinement)
 	count_hold_apply(refinement, now_ns, in_view, e, verdict, detail);
 }
 
+/*!
+ * Lost recovery. When the tracker loses a holding controller, "not seen" used to mean "out of view": the hold kept its
+ * timing and only the 15 s resync (STABLE_NOT_SEEN_TIMEOUT_NS) calibrated again. But the timing can also slip with the
+ * controller in front of the cameras: in a user's game session (2026-11-27 10:58) each controller once went 15 s
+ * untracked with the other one tracked and ~12 blobs per picture, and each time the recalibration found its window
+ * 1.3-1.9 s later and tracking came back at once. The nudge check can't tell the two apart (it reads the tracker's
+ * brightness, which is 0 for both), so this counts blobs, as the calibration does.
+ *
+ * After COUNT_HOLD_REC_AFTER_NS unseen it measures the LEDs off, then lit at offsets around the held centre, nearest
+ * first, both ways, re-testing the centre every third step: centre, +1, -1, centre, +2, -2, ... steps of
+ * COUNT_HOLD_REC_STEP_FRAC of the held window, over the whole frame. A positive (an on - off difference over the
+ * noise threshold, read against a fresh off count too, or the tracker matching the LEDs) at:
+ *  - the centre: the timing is right and the controller only hidden, nothing changes;
+ *  - k steps out: the timing slipped, if the step one nearer the centre reads off right then. It is tested again
+ *    first: the earlier reading may be from while the controller was hidden, and a step is under half a window,
+ *    so +-1 is still inside a window that didn't move (in calib_sim with the controller hidden at random, taking
+ *    the earlier reading moved 51 unmoved windows by ~1.1 ms, and the next search moved them back). Reads on: the
+ *    positive moves one step in and is checked again, down to the centre (nothing slipped). Reads off: the
+ *    window's near edge lies within a step before the positive, and the centre goes half a window minus half a
+ *    step past it (error <= (1/2 - FRAC/2) of the window, inside the part where the blink covers the whole
+ *    exposure), once the positive itself reads on once more: the other controller coming into view during a
+ *    reading and leaving before the off count looks like a positive (calib_sim, both hidden at random: +3 steps,
+ *    2.1 ms, "found" on a window that hadn't moved), and doesn't repeat.
+ * A search that found the LEDs at the held timing proved it right: the next one in the same loss waits
+ * COUNT_HOLD_REC_BACKOFF_MAX_NS. In calib_sim with the controller hidden at random, losses where the tracker was slow to
+ * find a controller back in view ran 2-4 searches (one 9.8 s loss: 4, the last "LEDs visible at the held timing"),
+ * each taking lit pictures from the tracker with its LEDs-off reading.
+ *
+ * Every search reads the LEDs off fresh. Judging a lit reading against an older off count instead (to skip the off
+ * reading for a controller only hidden) was tried in calib_sim: the other controller's 15-30 blobs, there in one
+ * count and not the other, made lit readings at a slipped timing look clear, and slips took 4.4-4.8 s instead of
+ * 2.2-2.8 s.
+ *
+ * The first search after losing it covers +-2 steps, the second +-4, later ones the whole frame, the LEDs back at the
+ * held centre in between: a hidden controller comes back with its LEDs at the timing it holds most of the time (the
+ * search costs one that was only hidden ~0.1 s per loss in calib_sim), and the slips in the 2026-11-27 log were
+ * ~0.5-1.5 ms, within the first. Nothing at any offset: out of view or covered, the held centre stays (calibrating then threw away a good window:
+ * the 11:50 run in COUNT_HOLD_UNSEEN_KEEP_NS). Searches repeat while it stays unseen, COUNT_HOLD_REC_BACKOFF_NS apart,
+ * doubling up to COUNT_HOLD_REC_BACKOFF_MAX_NS. The re-tested centre finds a controller back in view within ~3 steps
+ * instead of after the search. A slip is a one-off move, so it's not counted in the drift estimate.
+ */
+#define COUNT_HOLD_REC_AFTER_NS (U_TIME_1MS_IN_NS * 500)
+#define COUNT_HOLD_REC_BACKOFF_NS (U_TIME_1S_IN_NS * 1)
+#define COUNT_HOLD_REC_BACKOFF_MAX_NS (U_TIME_1S_IN_NS * 8)
+//! Under half the window, so a window narrowed by dim or half covered LEDs isn't stepped over.
+#define COUNT_HOLD_REC_STEP_FRAC 0.45
+//! Steps between fresh LEDs-off counts (the background can change during a search).
+#define COUNT_HOLD_REC_OFF_EVERY 6
+
+static float
+count_hold_rec_threshold(const struct t_led_sync_refinement *refinement)
+{
+	const float var = refinement->count_calib.noise_var > 0.0f ? refinement->count_calib.noise_var
+	                                                           : COUNT_NOISE_INITIAL_VAR;
+	return fmaxf(COUNT_THRESHOLD_MARGIN, COUNT_NOISE_SIGMAS * sqrtf(var));
+}
+
+//! The step's distance from the centre in steps (centre every third), false once the whole frame was covered.
+static bool
+count_hold_rec_k(const struct t_led_sync_refinement *refinement, int step, int *out_k)
+{
+	const __typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	const int k = step % 3 == 0 ? 0 : (step / 3 + 1) * (step % 3 == 1 ? 1 : -1);
+	const time_duration_ns half_period = refinement->exposure_interval_ns / 2;
+	int k_max = (int)((half_period + cc->rec_step_ns - 1) / cc->rec_step_ns);
+	if (cc->rec_attempt < 2) {
+		k_max = MIN(k_max, cc->rec_attempt == 0 ? 2 : 4);
+	}
+	*out_k = k;
+	return abs(k) <= k_max;
+}
+
+static void
+count_hold_rec_measure_off(struct t_led_sync_refinement *refinement)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	count_calib_set_leds_off(refinement);
+	cc->off_phase = true;
+	cc->frames = 0;
+	cc->sum = 0;
+	cc->sum_sq = 0;
+}
+
+static void
+count_hold_rec_test(struct t_led_sync_refinement *refinement, time_duration_ns x_ns)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	cc->rec_x_ns = x_ns;
+	cc->trk_leds_max = 0;
+	cc->on_from_seq = 0;
+	count_calib_set_offset(refinement, x_ns);
+}
+
+static void
+count_hold_rec_end(struct t_led_sync_refinement *refinement, timepoint_ns now_ns)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	cc->rec_active = false;
+	cc->rec_paused = false;
+	cc->rec_confirm = false;
+	cc->rec_verify = false;
+	cc->rec_recheck = false;
+	cc->rec_attempt++;
+	cc->rec_backoff_ns = cc->rec_backoff_ns <= 0 ? COUNT_HOLD_REC_BACKOFF_NS
+	                                             : MIN(cc->rec_backoff_ns * 2, COUNT_HOLD_REC_BACKOFF_MAX_NS);
+	cc->rec_next_ns = now_ns + cc->rec_backoff_ns;
+	cc->hold_sub = 0;
+	cc->hold_last_apply_ns = now_ns;
+	count_calib_set_offset(refinement, cc->hold_centre_ns);
+	count_calib_release_token(refinement);
+	struct t_led_sync_refinement *self = refinement;
+	atomic_compare_exchange_strong(&count_probe_wanted, &self, NULL);
+}
+
+//! Starts a search if the controller has been unseen long enough, true if it did (it owns the token then).
+static bool
+count_hold_rec_maybe_start(struct t_led_sync_refinement *refinement, timepoint_ns now_ns)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	const time_duration_ns unseen_ns =
+	    (time_duration_ns)refinement->frames_since_last_visually_seen * refinement->exposure_interval_ns;
+	if (unseen_ns < COUNT_HOLD_REC_AFTER_NS) {
+		if (cc->rec_loss_ns != 0) {
+			// One line per loss that reached a search: how long losses last in play, and what the searches found.
+			LOG_INFO(refinement, "Tracker has the controller again after %.1fs lost (%u searches, last: %s)",
+			         (double)(now_ns - unseen_ns - cc->rec_loss_ns) / U_TIME_1S_IN_NS, cc->rec_searches,
+			         cc->rec_result != NULL ? cc->rec_result : "still running");
+		}
+		cc->rec_loss_ns = 0;
+		cc->rec_searches = 0;
+		cc->rec_result = NULL;
+		cc->rec_backoff_ns = 0;
+		cc->rec_next_ns = 0;
+		cc->rec_attempt = 0;
+		return false;
+	}
+	// An unconfirmed window has its own rule (COUNT_HOLD_UNSEEN_PROBES), the tracker may not have found it yet.
+	if (!cc->hold_seen_since_calib || cc->hold_sub != 0 || now_ns < cc->rec_next_ns || cc->hold_window_ns <= 0) {
+		return false;
+	}
+	if (!count_calib_take_token(refinement)) {
+		atomic_store(&count_probe_wanted, refinement);
+		return false;
+	}
+	struct t_led_sync_refinement *self = refinement;
+	atomic_compare_exchange_strong(&count_probe_wanted, &self, NULL);
+
+	cc->rec_active = true;
+	cc->rec_paused = false;
+	cc->rec_confirm = false;
+	cc->rec_verify = false;
+	cc->rec_recheck = false;
+	cc->rec_step = 0;
+	cc->rec_tests = 0;
+	cc->rec_best_d = -1e9f;
+	cc->rec_best_k = 0;
+	if (cc->rec_loss_ns == 0) {
+		cc->rec_loss_ns = now_ns - unseen_ns;
+	}
+	cc->rec_searches++;
+	cc->rec_result = "still running";
+	cc->rec_started_ns = now_ns;
+	cc->rec_step_ns = (time_duration_ns)((double)cc->hold_window_ns * COUNT_HOLD_REC_STEP_FRAC);
+	if (cc->rec_step_ns < COUNT_HOLD_STEP_NS) {
+		cc->rec_step_ns = COUNT_HOLD_STEP_NS;
+	}
+	cc->hold_sub = 0;
+	cc->hold_measuring = false;
+	LOG_INFO(refinement,
+	         "Lost by the tracker for %.1fs: checking the LED timing, search %u (%s, centre %" PRId64
+	         "us, steps of %" PRId64 "us, Bluetooth clock %+.0fus since the last centred probe%s)",
+	         (double)unseen_ns / U_TIME_1S_IN_NS, cc->rec_searches,
+	         cc->rec_attempt == 0 ? "+-2 steps" : cc->rec_attempt == 1 ? "+-4 steps" : "whole frame",
+	         (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), (int64_t)(cc->rec_step_ns / U_TIME_1US_IN_NS),
+	         count_hold_bt_change_ns(refinement) / 1e3, cc->bt_have_ref ? "" : ", no reference");
+	count_hold_rec_measure_off(refinement);
+	return true;
+}
+
+//! A positive at the step under test, confirmed: keep or move the centre and end the search.
+static void
+count_hold_rec_found(struct t_led_sync_refinement *refinement, timepoint_ns now_ns, int k, const char *how)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	const time_duration_ns x_ns = cc->hold_centre_ns + k * cc->rec_step_ns;
+	const double took_s = (double)(now_ns - cc->rec_started_ns) / U_TIME_1S_IN_NS;
+	if (k == 0) {
+		LOG_INFO(refinement,
+		         "LEDs visible at the held timing (%s, %u tests, %.1fs): the controller was hidden, timing kept", how,
+		         cc->rec_tests, took_s);
+		cc->rec_result = "LEDs visible at the held timing";
+		// Proven right just now: the tracker only needs time (count_hold_rec_end doubles this to the maximum).
+		cc->rec_backoff_ns = COUNT_HOLD_REC_BACKOFF_MAX_NS;
+	} else {
+		cc->rec_result = "timing slipped, centre moved";
+		const time_duration_ns past_ns = cc->hold_window_ns / 2 - cc->rec_step_ns / 2;
+		const time_duration_ns centre_ns = x_ns + (k > 0 ? past_ns : -past_ns);
+		LOG_INFO(refinement,
+		         "LED timing slipped %+" PRId64 "us (%s at %+d steps, %u tests, %.1fs): centre %" PRId64 "us -> %" PRId64
+		         "us",
+		         (int64_t)((centre_ns - cc->hold_centre_ns) / U_TIME_1US_IN_NS), how, k, cc->rec_tests, took_s,
+		         (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), (int64_t)(centre_ns / U_TIME_1US_IN_NS));
+		cc->hold_centre_ns = centre_ns;
+		// The Bluetooth reference belonged to the old centre; the next centred probe sets a new one.
+		cc->bt_have_ref = false;
+		cc->bt_jump_pending = false;
+		cc->hold_unseen_probes = 0;
+		cc->hold_centred_streak = 0;
+		cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
+		cc->hold_last_probe_ns = now_ns;
+	}
+	count_hold_rec_end(refinement, now_ns);
+}
+
+static void
+count_hold_rec_next(struct t_led_sync_refinement *refinement, timepoint_ns now_ns)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	cc->rec_step++;
+	int k = 0;
+	if (!count_hold_rec_k(refinement, cc->rec_step, &k)) {
+		LOG_INFO(refinement,
+		         "LEDs not seen within %s (%u tests, %.1fs): out of view or covered, keeping centre %" PRId64
+		         "us (largest lit - off %.1f blobs at %+d steps, off %.1f, threshold %.1f)",
+		         cc->rec_attempt == 0 ? "+-2 steps" : cc->rec_attempt == 1 ? "+-4 steps" : "the frame", cc->rec_tests,
+		         (double)(now_ns - cc->rec_started_ns) / U_TIME_1S_IN_NS,
+		         (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS), cc->rec_best_d, cc->rec_best_k, cc->rec_off_mean,
+		         count_hold_rec_threshold(refinement));
+		cc->rec_result = "LEDs not seen at any timing tested";
+		count_hold_rec_end(refinement, now_ns);
+		return;
+	}
+	if (cc->rec_tests % COUNT_HOLD_REC_OFF_EVERY == 0) {
+		count_hold_rec_measure_off(refinement);
+		return;
+	}
+	count_hold_rec_test(refinement, cc->hold_centre_ns + k * cc->rec_step_ns);
+}
+
+//! A positive at step k (count or tracker): done at the centre, otherwise check the step nearer the centre first.
+static void
+count_hold_rec_positive(struct t_led_sync_refinement *refinement, timepoint_ns now_ns, int k, const char *how)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	if (k == 0) {
+		count_hold_rec_found(refinement, now_ns, 0, how);
+		return;
+	}
+	cc->rec_verify = true;
+	cc->rec_pos_k = k;
+	cc->rec_verify_k = k > 0 ? k - 1 : k + 1;
+	count_hold_rec_test(refinement, cc->hold_centre_ns + cc->rec_verify_k * cc->rec_step_ns);
+}
+
+static void
+handle_count_hold_recover(struct t_led_sync_refinement *refinement)
+{
+	__typeof__(refinement->count_calib) *cc = &refinement->count_calib;
+	const timepoint_ns now_ns = os_monotonic_get_ns();
+
+	if (cc->rec_paused) {
+		if (!count_calib_take_token(refinement)) {
+			return;
+		}
+		cc->rec_paused = false;
+		// Read this step again, the other controller's probe ran in between.
+		if (cc->off_phase) {
+			count_hold_rec_measure_off(refinement);
+		} else {
+			count_hold_rec_test(refinement, cc->rec_x_ns);
+		}
+		return;
+	}
+	struct t_led_sync_refinement *wanted = atomic_load(&count_probe_wanted);
+	if (wanted != NULL && wanted != refinement && cc->frames == 0) {
+		count_calib_release_token(refinement);
+		cc->rec_paused = true;
+		return;
+	}
+
+	const uint32_t frames = cc->phase_frames > COUNT_FRAMES_PER_STEP ? cc->phase_frames : COUNT_FRAMES_PER_STEP;
+	float mean = 0;
+	if (!count_calib_accumulate(refinement, frames, &mean)) {
+		return;
+	}
+	const float threshold = count_hold_rec_threshold(refinement);
+
+	if (cc->off_phase) {
+		cc->rec_off_mean = mean;
+		if (cc->rec_confirm) {
+			cc->rec_confirm = false;
+			if (cc->rec_on_mean - mean > threshold) {
+				int k = 0;
+				count_hold_rec_k(refinement, cc->rec_step, &k);
+				count_hold_rec_positive(refinement, now_ns, k, "blob count");
+				return;
+			}
+			// The background rose meanwhile: this off count is the new reference, go on.
+			count_hold_rec_next(refinement, now_ns);
+			return;
+		}
+		int k = 0;
+		count_hold_rec_k(refinement, cc->rec_step, &k);
+		count_hold_rec_test(refinement, cc->hold_centre_ns + k * cc->rec_step_ns);
+		return;
+	}
+
+	cc->rec_tests++;
+	const float d = mean - cc->rec_off_mean;
+	{
+		int kb = 0;
+		count_hold_rec_k(refinement, cc->rec_verify || cc->rec_recheck ? 0 : cc->rec_step, &kb);
+		if (!cc->rec_verify && !cc->rec_recheck && d > cc->rec_best_d) {
+			cc->rec_best_d = d;
+			cc->rec_best_k = kb;
+		}
+	}
+	LOG_DEBUG(refinement, "Lost check at %+" PRId64 "us: %.1f blobs, %.1f off (threshold %.1f), tracker matched %u",
+	          (int64_t)((cc->rec_x_ns - cc->hold_centre_ns) / U_TIME_1US_IN_NS), mean, cc->rec_off_mean, threshold,
+	          cc->trk_leds_max);
+	const bool tracker = cc->trk_leds_max >= COUNT_TRACKER_MIN_LEDS;
+	if (cc->rec_recheck) {
+		// The positive once more: on, it stands; off, it was something else (the other controller), search on.
+		cc->rec_recheck = false;
+		if (tracker || d > threshold) {
+			count_hold_rec_found(refinement, now_ns, cc->rec_pos_k, "blob count, nearer step dark");
+		} else {
+			count_hold_rec_next(refinement, now_ns);
+		}
+		return;
+	}
+	if (cc->rec_verify) {
+		// The step nearer the centre: on, the positive moves in; off, the positive is read once more.
+		cc->rec_verify = false;
+		if (tracker || d > threshold) {
+			count_hold_rec_positive(refinement, now_ns, cc->rec_verify_k, tracker ? "tracker" : "blob count");
+		} else {
+			cc->rec_recheck = true;
+			count_hold_rec_test(refinement, cc->hold_centre_ns + cc->rec_pos_k * cc->rec_step_ns);
+		}
+		return;
+	}
+	int k = 0;
+	count_hold_rec_k(refinement, cc->rec_step, &k);
+	if (tracker) {
+		count_hold_rec_positive(refinement, now_ns, k, "tracker");
+		return;
+	}
+	if (d > threshold && k == 0) {
+		// Nothing moves on a positive at the centre, so it needs no confirmation (the LEDs stay lit there).
+		count_hold_rec_found(refinement, now_ns, 0, "blob count");
+		return;
+	}
+	if (d > threshold) {
+		cc->rec_on_mean = mean;
+		cc->rec_confirm = true;
+		count_hold_rec_measure_off(refinement);
+		return;
+	}
+	count_hold_rec_next(refinement, now_ns);
+}
+
 DEBUG_GET_ONCE_OPTION(pssense_hold_check, "PSSENSE_HOLD_CHECK", "nudge")
 
 //! PSSENSE_HOLD_CHECK=edges selects the previous edge-and-LEDs-off check.
 static void
 handle_count_hold(struct t_led_sync_refinement *refinement)
 {
+	if (refinement->count_calib.rec_active) {
+		handle_count_hold_recover(refinement);
+		return;
+	}
+	if (count_hold_rec_maybe_start(refinement, os_monotonic_get_ns())) {
+		return;
+	}
 	const char *mode = debug_get_option_pssense_hold_check();
 	if (mode != NULL && strcmp(mode, "edges") == 0) {
 		handle_count_hold_edges(refinement);
