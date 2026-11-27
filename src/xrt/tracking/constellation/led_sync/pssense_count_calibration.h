@@ -94,6 +94,22 @@
 //! Hold: how often to probe both window edges, and sooner when the controller isn't seen.
 #define COUNT_HOLD_PROBE_NS (U_TIME_1S_IN_NS * 3)
 #define COUNT_HOLD_PROBE_UNSEEN_NS (U_TIME_1S_IN_NS * 1)
+/*!
+ * Corrections grow while the probes keep pointing the same way, one COUNT_HOLD_STEP_NS more each up to this many
+ * (100, 200, 300us): the
+ * drift outruns the 100us steps at the 3 s interval (~33us/s) while the trim is still learning it (it starts at 0,
+ * from 10 s, capped at COUNT_HOLD_DRIFT_MAX until high drift is confirmed). With a 60 ppm drift faked on hardware
+ * (PSSENSE_TEST_HOST_SLEW_PPM, 2026-11-27) every probe for 25 s read "moved later" and tracking was clearly worse;
+ * 300us steps follow up to 100us/s. Probing more often instead (1 s) followed it too but its extra LED moves cost
+ * normal drift and partly hidden controllers pictures (calib_sim: 15/47 ppm and random hides worse). A reading the
+ * other way starts again at one step, so a wrong one moves 100us as before.
+ */
+#define COUNT_HOLD_CHASE_MAX_STEPS 3
+/*!
+ * From the second correction the same way. Waiting for the third (100, 100, 200, 300us) changed nothing at normal
+ * drift in calib_sim and cost the large ones (80 ppm: 96.5 vs 97.8% tracked, one 120 ppm run 8% tracked).
+ */
+#define COUNT_HOLD_CHASE_AFTER 2
 //! Longest probe interval once the blink stays centred.
 #define COUNT_HOLD_PROBE_MAX_NS (U_TIME_1S_IN_NS * 30)
 //! Hold: how far inside each window edge the probes go, and the correction step.
@@ -421,6 +437,7 @@ count_calib_finish(struct t_led_sync_refinement *refinement)
 	cc->hold_seen_since_calib = false;
 	cc->hold_interval_ns = COUNT_HOLD_PROBE_NS;
 	cc->hold_centred_streak = 0;
+	cc->hold_dir_streak = 0;
 	cc->rec_active = false;
 	cc->rec_paused = false;
 	cc->rec_confirm = false;
@@ -1027,9 +1044,19 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 			         (int64_t)(cc->hold_centre_ns / U_TIME_1US_IN_NS));
 		}
 	}
+	if (in_view && e != 0 && !bt_moved) {
+		cc->hold_dir_streak = cc->hold_dir_streak != 0 && (cc->hold_dir_streak > 0) == (e > 0)
+		                          ? cc->hold_dir_streak + e
+		                          : e;
+	} else if (in_view) {
+		cc->hold_dir_streak = 0;
+	}
 	if (e != 0 && !bt_moved) {
-		cc->hold_centre_ns += e * COUNT_HOLD_STEP_NS;
-		cc->hold_corrections_sum_ns += e * (double)COUNT_HOLD_STEP_NS;
+		const int run = abs(cc->hold_dir_streak);
+		const int steps = run >= COUNT_HOLD_CHASE_AFTER ? MIN(run - COUNT_HOLD_CHASE_AFTER + 2, COUNT_HOLD_CHASE_MAX_STEPS) : 1;
+		const time_duration_ns step_ns = (time_duration_ns)steps * COUNT_HOLD_STEP_NS;
+		cc->hold_centre_ns += e * step_ns;
+		cc->hold_corrections_sum_ns += e * (double)step_ns;
 		cc->hold_corrections++;
 	}
 	// Every move of the centre (step, Bluetooth move, undo): what high drift is detected and estimated from.
@@ -1043,21 +1070,20 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 	}
 
 	time_duration_ns t_ns = now_ns - cc->hold_start_ns;
-	if (in_view && t_ns >= COUNT_HOLD_DRIFT_MIN_T_NS && !fast) {
-		double rate = (cc->hold_corrections_sum_ns + cc->hold_trim_integral_ns) / (double)t_ns;
-		if (rate >= -COUNT_HOLD_DRIFT_MAX && rate <= COUNT_HOLD_DRIFT_MAX) {
-			cc->skew = rate;
-		} else {
-			LOG_DEBUG(refinement, "Count hold drift estimate %+.1fppm is implausible, trim left at %+.1fppm",
-			          rate * 1e6, cc->skew * 1e6);
-		}
-	} else if (in_view && t_ns >= COUNT_HOLD_DRIFT_MIN_T_NS) {
+	if (in_view && t_ns >= COUNT_HOLD_DRIFT_MIN_T_NS) {
 		/*
-		 * High drift: before 2026-11-22 only the 100us steps were counted, not the Bluetooth moves that carry most
-		 * of a fast drift, so the estimate stayed near 0 while the hold chased the drift move after move.
+		 * Normal drift counts the probe steps, high drift also the Bluetooth moves that carry most of it (before
+		 * 2026-11-22 only the steps were counted and the estimate stayed near 0 while the hold chased the drift).
 		 */
-		double rate = (cc->hold_moves_sum_ns + cc->hold_trim_integral_ns) / (double)t_ns;
+		double rate = ((fast ? cc->hold_moves_sum_ns : cc->hold_corrections_sum_ns) + cc->hold_trim_integral_ns) /
+		              (double)t_ns;
 		const double fast_tol = fmax(COUNT_HOLD_DRIFT_FAST_TOL, 0.25 * fabs(rate));
+		/*
+		 * Over COUNT_HOLD_DRIFT_MAX only when an estimate COUNT_HOLD_DRIFT_FAST_AGREE_NS older agrees, whether high
+		 * drift was detected or not. Before, normal mode dropped such estimates as implausible, so a 50-60 ppm drift
+		 * could never be trimmed fully (the high-drift detection needs > 60 ppm stretches) and the probes chased the
+		 * rest for good: a 60 ppm drift faked on hardware (2026-11-27) had the trim at +32.6 ppm after 33 s.
+		 */
 		if (rate >= -COUNT_HOLD_DRIFT_MAX && rate <= COUNT_HOLD_DRIFT_MAX) {
 			cc->skew = rate;
 			cc->hold_have_fast_rate = false;
@@ -1070,7 +1096,7 @@ count_hold_apply(struct t_led_sync_refinement *refinement,
 			}
 			cc->skew = rate;
 		} else {
-			// The first fast estimate, or one that disagreed: a later one has to agree with this one.
+			// The first estimate over the limit, or one that disagreed: a later one has to agree with this one.
 			if (fabs(rate) <= COUNT_HOLD_DRIFT_FAST_MAX &&
 			    (!cc->hold_have_fast_rate || now_ns - cc->hold_fast_rate_ns >= COUNT_HOLD_DRIFT_FAST_AGREE_NS)) {
 				cc->hold_fast_rate = rate;
@@ -1474,6 +1500,18 @@ count_hold_rec_end(struct t_led_sync_refinement *refinement, timepoint_ns now_ns
 	atomic_compare_exchange_strong(&count_probe_wanted, &self, NULL);
 }
 
+/*!
+ * This controller no longer waits to start a search: withdraw its request for the token. Left standing (it was found
+ * again while the other one searched), the other controller's search and every calibration after it kept yielding to a
+ * probe that never came, untracked for good (calib_sim, 120 ppm drift: one run 8% tracked, an 82 s blackout).
+ */
+static void
+count_hold_rec_withdraw(struct t_led_sync_refinement *refinement)
+{
+	struct t_led_sync_refinement *self = refinement;
+	atomic_compare_exchange_strong(&count_probe_wanted, &self, NULL);
+}
+
 //! Starts a search if the controller has been unseen long enough, true if it did (it owns the token then).
 static bool
 count_hold_rec_maybe_start(struct t_led_sync_refinement *refinement, timepoint_ns now_ns)
@@ -1494,10 +1532,12 @@ count_hold_rec_maybe_start(struct t_led_sync_refinement *refinement, timepoint_n
 		cc->rec_backoff_ns = 0;
 		cc->rec_next_ns = 0;
 		cc->rec_attempt = 0;
+		count_hold_rec_withdraw(refinement);
 		return false;
 	}
 	// An unconfirmed window has its own rule (COUNT_HOLD_UNSEEN_PROBES), the tracker may not have found it yet.
 	if (!cc->hold_seen_since_calib || cc->hold_sub != 0 || now_ns < cc->rec_next_ns || cc->hold_window_ns <= 0) {
+		count_hold_rec_withdraw(refinement);
 		return false;
 	}
 	if (!count_calib_take_token(refinement)) {
