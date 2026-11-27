@@ -458,6 +458,32 @@ struct t_led_sync_refinement
 		timepoint_ns hold_last_probe_ns, hold_last_apply_ns;
 		double hold_drift_ns_per_s;
 		uint32_t hold_corrections;
+		/*!
+		 * Lost recovery (see COUNT_HOLD_REC_*): a search for this controller's LEDs by blob count around the held
+		 * centre, while the tracker has lost it. rec_step indexes the test order (centre, +1, -1, centre, +2, ...),
+		 * rec_x_ns is the offset under test, rec_off_mean the LEDs-off count it's compared with, rec_confirm a
+		 * positive being read against a fresh off count. rec_next_ns/rec_backoff_ns space the searches while it
+		 * stays unseen.
+		 */
+		bool rec_active, rec_paused, rec_confirm;
+		int rec_step;
+		//! A positive k steps out is being checked inward: rec_pos_k the positive, rec_verify_k the step tested.
+		bool rec_verify;
+		int rec_pos_k, rec_verify_k;
+		//! The positive is read once more before moving (rec_recheck); searches since last seen (rec_attempt).
+		bool rec_recheck;
+		uint32_t rec_attempt;
+		//! Logging: when this loss began, searches in it, the last search's result, its largest on - off difference.
+		timepoint_ns rec_loss_ns;
+		uint32_t rec_searches;
+		const char *rec_result;
+		float rec_best_d;
+		int rec_best_k;
+		time_duration_ns rec_x_ns, rec_step_ns;
+		float rec_off_mean, rec_on_mean;
+		timepoint_ns rec_started_ns, rec_next_ns;
+		time_duration_ns rec_backoff_ns;
+		uint32_t rec_tests;
 		time_duration_ns full_window_ns, offset_ns, lower_ns, upper_ns, left_ns, right_ns;
 		uint32_t attempts;
 	} count_calib;

@@ -448,8 +448,10 @@ handle_timing_event_locked(struct t_led_sync_refinement *refinement,
 	// If we're past the initial find and we haven't seen the controller in some amount of
 	// time, start searching for an offset again.
 	if (trigger_resync) {
-		LOG_DEBUG(refinement, "Triggering resync due to not being visually seen for %" PRIu32 " frames",
-		          refinement->frames_since_last_visually_seen);
+		LOG_INFO(refinement, "Not seen by the tracker for %.1fs (%" PRIu32 " frames): calibrating the LED timing again",
+		         (double)refinement->frames_since_last_visually_seen * (double)refinement->exposure_interval_ns /
+		             U_TIME_1S_IN_NS,
+		         refinement->frames_since_last_visually_seen);
 		set_phase_locked(refinement, T_LED_SYNC_PHASE_FIND_INITIAL_OFFSET);
 	}
 
