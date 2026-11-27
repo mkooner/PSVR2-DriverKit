@@ -57,6 +57,7 @@ static bool g_tracker = false;
 static bool g_apply_trim = true;
 static double g_flip_s = 0;
 static double g_drift = 15e-6;
+static bool g_drift_no_bt = false;
 // SIM_BREAKDOWN=1: time in each count calibration state until the first hold, per controller (ms, summed over runs).
 static double g_state_ms[2][16];
 static double g_wait_other_ms[2];
@@ -183,6 +184,7 @@ main(int argc, char **argv)
 	g_flip_s = getenv("SIM_DRIFT_FLIP_S") ? atof(getenv("SIM_DRIFT_FLIP_S")) : 0;
 	if (getenv("SIM_DRIFT_PPM"))
 		g_drift = atof(getenv("SIM_DRIFT_PPM")) * 1e-6;
+	g_drift_no_bt = getenv("SIM_DRIFT_NO_BT") != NULL;
 	g_flicker = getenv("SIM_AMBIENT_FLICKER") ? atof(getenv("SIM_AMBIENT_FLICKER")) : 0.0;
 	if (getenv("SIM_LED_LATENCY_FRAMES"))
 		g_led_latency_frames = atof(getenv("SIM_LED_LATENCY_FRAMES"));
@@ -211,6 +213,9 @@ main(int argc, char **argv)
 	double times[1000];
 
 	for (int run = 0; run < runs; run++) {
+		// SIM_PER_RUN=1: a marker on stderr (between the runs' logs) and each run's result on stdout.
+		if (getenv("SIM_PER_RUN"))
+			fprintf(stderr, "=== run %d\n", run);
 		struct sim_ctrl c[2];
 		memset(c, 0, sizeof(c));
 		struct t_led_sync_refinement_options opts = {
@@ -260,7 +265,9 @@ main(int argc, char **argv)
 			}
 			if (shift_mode) {
 				if (ev_start < 0 && c[0].hold_at_ns >= 0 && c[1].hold_at_ns >= 0) {
-					ev_start = proc + 40LL * 1000000000LL;
+					// SIM_EV_DELAY_S: the event (and the measurement) that long after both hold, 40 by default; 0 measures
+					// the hold's learning from its start.
+					ev_start = proc + (int64_t)((getenv("SIM_EV_DELAY_S") ? atof(getenv("SIM_EV_DELAY_S")) : 40.0) * 1e9);
 				}
 				double t = ev_start >= 0 ? (proc - ev_start) / 1e9 : -1;
 				// Real shift: LED window and Bluetooth offset together.
@@ -320,7 +327,10 @@ main(int argc, char **argv)
 				if (g_flip_s > 0 && ((int64_t)((proc - start_ns) / (g_flip_s * 1e9))) % 2 == 1)
 					drift = -drift;
 				s->window_left_ns += drift * FRAME_NS; // SIM_DRIFT_PPM, 15 as measured
-				s->bt_ns += drift * FRAME_NS;          // a real drift shows in the Bluetooth clock too
+				// A real drift shows in the Bluetooth clock too; SIM_DRIFT_NO_BT=1: it doesn't (a host clock slew taken
+				// out of one path only, as PSSENSE_TEST_HOST_SLEW_PPM fakes it)
+				if (!g_drift_no_bt)
+					s->bt_ns += drift * FRAME_NS;
 				if (g_apply_trim)
 					s->trim_ns += s->skew * FRAME_NS; // the driver's mapping advances by the trim
 				if (dropout > 0 && proc >= s->vis_change_ns) {
@@ -526,6 +536,8 @@ main(int argc, char **argv)
 			sh_undone += c[0].r.count_calib.bt_jumps_undone;
 			sh_runs++;
 			double dk = dark_max * FRAME_NS / 1e9;
+			if (getenv("SIM_PER_RUN"))
+				printf("run %d: tracked %.1f%%, longest blackout %.2fs\n", run, 100 * f, dk);
 			sh_dark_sum += dk;
 			sh_dark_worst = fmax(sh_dark_worst, dk);
 			sh_dark_runs++;
