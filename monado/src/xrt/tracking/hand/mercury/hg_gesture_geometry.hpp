@@ -229,6 +229,16 @@ enum Feature : int
 	F_THUMB_LITTLE,
 	F_THUMB_IP,
 	F_THUMB_OUT,
+	//! Thumb tip to the index finger's middle section (the PIP-DIP segment, 6-7) / palm width (thumb tap).
+	F_THUMB_INDEX_SIDE,
+	/*!
+	 * The thumb tip in the index finger's own frame, from the index knuckle (5), / palm width (thumb swipe): x along
+	 * the finger (5 -> 8, toward the tip), y across it toward the thumb side (the knuckle line 17 -> 5 without its
+	 * part along the finger; the same side on both hands, no handedness flip), z = x cross y.
+	 */
+	F_THUMB_LOCAL_X,
+	F_THUMB_LOCAL_Y,
+	F_THUMB_LOCAL_Z,
 	kFeatureCount,
 };
 
@@ -240,6 +250,7 @@ featureName(int f)
 	    "index_pip",    "index_dip",    "middle_pip",  "middle_dip",   "ring_pip",   "ring_dip",
 	    "little_pip",   "little_dip",   "index_reach", "middle_reach", "ring_reach", "little_reach",
 	    "thumb_index",  "thumb_middle", "thumb_ring",  "thumb_little", "thumb_ip",   "thumb_out",
+	    "thumb_index_side", "thumb_local_x", "thumb_local_y", "thumb_local_z",
 	};
 	return f >= 0 && f < kFeatureCount ? names[f] : "";
 }
@@ -259,6 +270,74 @@ featureIndex(const char *name)
 		}
 	}
 	return -1;
+}
+
+inline Vec3
+add(const Vec3 &a, const Vec3 &b)
+{
+	return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+inline Vec3
+scale(const Vec3 &a, float s)
+{
+	return {a.x * s, a.y * s, a.z * s};
+}
+
+inline float
+dot(const Vec3 &a, const Vec3 &b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+inline Vec3
+cross(const Vec3 &a, const Vec3 &b)
+{
+	return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+//! @p a scaled to length 1; invalid for a ~zero or non-finite vector.
+inline bool
+normalized(const Vec3 &a, Vec3 *out)
+{
+	const float l = std::sqrt(dot(a, a));
+	if (!std::isfinite(l) || !(l > kEpsilon)) {
+		return false;
+	}
+	*out = scale(a, 1.0f / l);
+	return true;
+}
+
+//! Distance from @p p to the segment @p a - @p b (the closest point clamped to the segment).
+inline Value
+pointSegmentDistance(const Vec3 &p, const Vec3 &a, const Vec3 &b)
+{
+	if (!finite(p) || !finite(a) || !finite(b)) {
+		return {};
+	}
+	const Vec3 seg = sub(b, a);
+	const float l2 = dot(seg, seg);
+	float u = l2 > kEpsilon * kEpsilon ? dot(sub(p, a), seg) / l2 : 0.0f;
+	u = std::fmax(0.0f, std::fmin(1.0f, u));
+	return distance(p, add(a, scale(seg, u)));
+}
+
+/*!
+ * The index finger's own frame (thumb swipes): x from the index knuckle (5) to its tip (8), y the knuckle line from the
+ * little finger (17) to the index (5) without its part along x (toward the thumb side on both hands), z = x cross y.
+ */
+inline bool
+indexFrame(const Landmarks &lm, Vec3 *x, Vec3 *y, Vec3 *z)
+{
+	if (!lm.valid || !normalized(sub(lm.p[INDEX_TIP], lm.p[INDEX_MCP]), x)) {
+		return false;
+	}
+	const Vec3 across = sub(lm.p[INDEX_MCP], lm.p[LITTLE_MCP]);
+	if (!normalized(sub(across, scale(*x, dot(across, *x))), y)) {
+		return false;
+	}
+	*z = cross(*x, *y);
+	return true;
 }
 
 //! All joint features of one hand; false (and @p out untouched) when any can't be measured.
@@ -292,6 +371,17 @@ jointFeatures(const Landmarks &lm, float out[kFeatureCount])
 	}
 	f[F_THUMB_IP] = ip.value;
 	f[F_THUMB_OUT] = out_v.value;
+	const Value palm = palmWidth(lm);
+	const Value side = pointSegmentDistance(lm.p[THUMB_TIP], lm.p[INDEX_PIP], lm.p[INDEX_DIP]);
+	Vec3 ax, ay, az;
+	if (!palm.valid || !(palm.value > kEpsilon) || !side.valid || !indexFrame(lm, &ax, &ay, &az)) {
+		return false;
+	}
+	const Vec3 rel = sub(lm.p[THUMB_TIP], lm.p[INDEX_MCP]);
+	f[F_THUMB_INDEX_SIDE] = side.value / palm.value;
+	f[F_THUMB_LOCAL_X] = dot(rel, ax) / palm.value;
+	f[F_THUMB_LOCAL_Y] = dot(rel, ay) / palm.value;
+	f[F_THUMB_LOCAL_Z] = dot(rel, az) / palm.value;
 	for (int i = 0; i < kFeatureCount; i++) {
 		out[i] = f[i];
 	}

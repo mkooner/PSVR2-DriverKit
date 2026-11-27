@@ -133,11 +133,12 @@ public:
 		addHandsIfTracked();
 		/*
 		 * While a bare hand is in use, the headset button opens the dashboard through that hand's system button (the
-		 * right hand's when both are in use) instead of toggling Room View (Hmd::setButtonToHands).
+		 * left hand's when both are in use: SteamVR's own tracked-hand dashboard binding toggles the dashboard from the
+		 * left hand's system button only) instead of toggling Room View (Hmd::setButtonToHands).
 		 */
 		HandDevice *button_hand = nullptr;
 		for (auto &h : m_hands) {
-			if (h->active() && h->inUse() && (button_hand == nullptr || h->hand() == Hand::Right)) {
+			if (h->active() && h->inUse() && (button_hand == nullptr || h->hand() == Hand::Left)) {
 				button_hand = h.get();
 			}
 		}
